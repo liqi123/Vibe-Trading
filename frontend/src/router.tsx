@@ -25,6 +25,24 @@ const Correlation = lazy(() =>
 const AlphaZoo = lazy(() =>
   import("@/pages/AlphaZoo").then((m) => ({ default: m.AlphaZoo })),
 );
+const Expectations = lazy(() =>
+  import("@/pages/Expectations").then((m) => ({ default: m.Expectations })),
+);
+const PaperTrading = lazy(() =>
+  import("@/pages/PaperTrading").then((m) => ({ default: m.PaperTrading })),
+);
+const DailyScan = lazy(() =>
+  import("@/pages/DailyScan").then((m) => ({ default: m.DailyScan })),
+);
+const Tools = lazy(() =>
+  import("@/pages/Tools").then((m) => ({ default: m.Tools })),
+);
+const Watchlist = lazy(() =>
+  import("@/pages/Watchlist").then((m) => ({ default: m.Watchlist })),
+);
+const CalcTools = lazy(() =>
+  import("@/pages/CalcTools").then((m) => ({ default: m.CalcTools })),
+);
 
 function PageLoader() {
   return (
@@ -58,6 +76,12 @@ export const router = createBrowserRouter([
       { path: "/alpha-zoo/bench", element: wrap(AlphaZoo) },
       { path: "/alpha-zoo/compare", element: wrap(AlphaZoo) },
       { path: "/alpha-zoo/:alphaId", element: wrap(AlphaZoo) },
+      { path: "/tools", element: wrap(Tools) },
+      { path: "/expectations", element: wrap(Expectations) },
+      { path: "/paper-trading", element: wrap(PaperTrading) },
+      { path: "/daily-scan", element: wrap(DailyScan) },
+      { path: "/watchlist", element: wrap(Watchlist) },
+      { path: "/calc-tools", element: wrap(CalcTools) },
     ],
   },
 ]);

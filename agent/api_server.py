@@ -3398,7 +3398,14 @@ async def stop_runner_endpoint(payload: LiveRunnerControlRequest):
 # ============================================================================
 
 from src.api.alpha_routes import register_alpha_routes  # noqa: E402
-register_alpha_routes(app)
+register_alpha_routes(app, require_auth=require_auth, require_event_stream_auth=require_event_stream_auth)
+
+# ============================================================================
+# Custom Trading Tools Routes (预期管理/模拟盘/每日选股)
+# ============================================================================
+
+from src.api.trading_tools_routes import register_trading_tools_routes  # noqa: E402
+register_trading_tools_routes(app)
 
 
 # ============================================================================
