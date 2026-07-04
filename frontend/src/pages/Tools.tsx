@@ -3,6 +3,13 @@ import { Target, Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, 
 
 const TOOLS = [
   {
+    to: "/daily-review",
+    icon: TrendingUp,
+    title: "每日复盘",
+    desc: "市场概览、持仓摘要、选股执行、今日交易一站聚合",
+    color: "text-rose-500",
+  },
+  {
     to: "/expectations",
     icon: Target,
     title: "预期管理",

@@ -58,6 +58,9 @@ const BacktestEval = lazy(() =>
 const NewsSearch = lazy(() =>
   import("@/pages/tools/NewsSearch").then((m) => ({ default: m.NewsSearch })),
 );
+const DailyReview = lazy(() =>
+  import("@/pages/tools/DailyReview").then((m) => ({ default: m.DailyReview })),
+);
 const ScheduledTasks = lazy(() =>
   import("@/pages/ScheduledTasks").then((m) => ({ default: m.ScheduledTasks })),
 );
@@ -105,6 +108,7 @@ export const router = createBrowserRouter([
       { path: "/ai-analysis", element: wrap(AIAnalysis) },
       { path: "/backtest-eval", element: wrap(BacktestEval) },
       { path: "/news", element: wrap(NewsSearch) },
+      { path: "/daily-review", element: wrap(DailyReview) },
       { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
     ],
   },

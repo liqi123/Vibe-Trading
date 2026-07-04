@@ -605,80 +605,350 @@ def get_market_overview() -> dict:
         db.close()
 
 
+_market_cache: dict | None = None
+_market_cache_time: float = 0
+MARKET_CACHE_TTL = 30  # seconds
+
+
 @router.get("/market/realtime")
 def get_market_realtime() -> dict:
-    """Real-time market advance/decline stats via Tencent API (single batch request)."""
+    """Real-time market advance/decline stats via Tencent API (cached 30s)."""
+    import time
     import urllib.request as _req
     import logging
     _log = logging.getLogger("trading_tools")
+
+    global _market_cache, _market_cache_time
+    now = time.time()
+    if _market_cache is not None and now - _market_cache_time < MARKET_CACHE_TTL:
+        return _market_cache
 
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         cur = db.cursor()
-        cur.execute("SELECT code FROM stock_names")
+        cur.execute("SELECT code FROM stock_names WHERE code LIKE 'sh60%' OR code LIKE 'sz00%' OR code LIKE 'sz30%'")
         codes_raw = [r[0] for r in cur.fetchall()]
     finally:
         db.close()
 
-    if not codes_raw:
-        return {"up": 0, "down": 0, "flat": 0, "limit_up": 0, "limit_down": 0, "total": 0}
-
-    # Convert to Tencent format
-    def to_tencent(c: str) -> str:
-        c = c.strip().lower()
-        if c.startswith(("sh", "sz")):
-            return c
-        if c.startswith("6"):
-            return "sh" + c
-        return "sz" + c
-
-    tencent_codes = [to_tencent(c) for c in codes_raw]
-
-    # Batch request (URL length limit ~8000 chars, ~800 codes per batch)
     up = down = flat = limit_up = limit_down = 0
-    batch_size = 800
-    try:
-        for i in range(0, len(tencent_codes), batch_size):
-            batch = tencent_codes[i:i+batch_size]
-            url = "https://qt.gtimg.cn/q=" + ",".join(batch)
-            req = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _req.urlopen(req, timeout=15) as resp:
-                text = resp.read().decode("gbk", errors="replace")
-            for line in text.strip().split(";"):
-                if "=" not in line or "~" not in line:
-                    continue
-                try:
-                    raw = line.split('"')[1]
-                    fields = raw.split("~")
-                    if len(fields) < 35:
+    if codes_raw:
+        batch_size = 800
+        try:
+            for i in range(0, len(codes_raw), batch_size):
+                batch = codes_raw[i:i+batch_size]
+                url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+                req = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with _req.urlopen(req, timeout=15) as resp:
+                    text = resp.read().decode("gbk", errors="replace")
+                for line in text.strip().split(";"):
+                    if "=" not in line or "~" not in line:
                         continue
-                    change_pct = float(fields[32]) if fields[32] else 0
-                    price = float(fields[3]) if fields[3] else 0
-                    prev_close = float(fields[4]) if fields[4] else 0
-                    if change_pct > 0:
-                        up += 1
-                    elif change_pct < 0:
-                        down += 1
-                    else:
-                        flat += 1
-                    if prev_close > 0 and price > 0:
-                        actual_pct = (price - prev_close) / prev_close
-                        if actual_pct >= 0.098:
-                            limit_up += 1
-                        elif actual_pct <= -0.098:
-                            limit_down += 1
-                except (ValueError, IndexError):
-                    continue
-    except Exception as exc:
-        _log.warning("Tencent batch query failed: %s", exc)
+                    try:
+                        raw = line.split('"')[1]
+                        fields = raw.split("~")
+                        if len(fields) < 35:
+                            continue
+                        change_pct = float(fields[32]) if fields[32] else 0
+                        price = float(fields[3]) if fields[3] else 0
+                        prev_close = float(fields[4]) if fields[4] else 0
+                        if change_pct > 0:
+                            up += 1
+                        elif change_pct < 0:
+                            down += 1
+                        else:
+                            flat += 1
+                        if prev_close > 0 and price > 0:
+                            actual_pct = (price - prev_close) / prev_close
+                            if actual_pct >= 0.098:
+                                limit_up += 1
+                            elif actual_pct <= -0.098:
+                                limit_down += 1
+                    except (ValueError, IndexError):
+                        continue
+        except Exception as exc:
+            _log.warning("Tencent batch query failed: %s", exc)
 
-    return {
+    result = {
         "up": up, "down": down, "flat": flat,
         "limit_up": limit_up, "limit_down": limit_down,
         "total": up + down + flat,
+        "_cached": _market_cache is not None,
     }
+    _market_cache = result
+    _market_cache_time = now
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Market Momentum (市场动量)
+# ---------------------------------------------------------------------------
+
+_MOMENTUM_CACHE: dict | None = None
+_MOMENTUM_CACHE_TIME: float = 0
+_MOMENTUM_CACHE_TTL = 60
+
+@router.get("/market/momentum")
+def get_market_momentum() -> dict:
+    """市场动量 — 板块排名 + 均线/RSI 分布
+
+    Returns:
+        {sectors: [{name, momentum, rank}], ma_distribution: {above5, above10, above20, total},
+         rsi_distribution: {oversold, neutral, overbought}}
+    """
+    import time as _time
+    global _MOMENTUM_CACHE, _MOMENTUM_CACHE_TIME
+    now = _time.time()
+    if _MOMENTUM_CACHE is not None and now - _MOMENTUM_CACHE_TIME < _MOMENTUM_CACHE_TTL:
+        return _MOMENTUM_CACHE
+
+    db = _get_db()
+    if db is None:
+        return {"error": "数据库不可用"}
+    try:
+        from utils.config import get_date_col, fmt_date
+        date_col, _ = get_date_col()
+        cur = db.cursor()
+
+        # 获取最新日期
+        cur.execute(f"SELECT MAX({date_col}) FROM daily_kline")
+        latest = cur.fetchone()[0]
+        if not latest:
+            return {"error": "无数据"}
+        latest_str = str(latest)
+
+        # ---- 板块动量（Tencent 行业指数） ----
+        top5 = []
+        bottom5 = []
+        try:
+            SECTOR_CODES = [
+                ("sz399231", "农林牧渔"), ("sz399232", "采矿"), ("sz399233", "制造"),
+                ("sz399234", "水电燃气"), ("sz399235", "建筑"), ("sz399236", "批发零售"),
+                ("sz399237", "交通运输"), ("sz399238", "餐饮住宿"), ("sz399239", "信息技术"),
+                ("sz399240", "金融"), ("sz399241", "房地产"), ("sz399242", "商务服务"),
+                ("sz399243", "科研服务"), ("sz399244", "公共管理"), ("sz399248", "文化体育"),
+                ("sz399274", "汽车"), ("sz399275", "医药生物"), ("sz399276", "机械设备"),
+                ("sz399277", "电子"), ("sz399278", "国防军工"), ("sz399279", "通信"),
+                ("sz399280", "计算机"), ("sz399281", "传媒"), ("sz399282", "有色金属"),
+                ("sz399283", "基础化工"), ("sz399284", "钢铁"), ("sz399285", "建筑材料"),
+                ("sz399286", "食品饮料"), ("sz399287", "纺织服装"), ("sz399288", "公用事业"),
+            ]
+            import urllib.request
+            url = "https://qt.gtimg.cn/q=" + ",".join(c for c, _ in SECTOR_CODES)
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                text = resp.read().decode("gbk", errors="replace")
+            sectors = []
+            for line in text.strip().split(";"):
+                line = line.strip()
+                if not line or "=" not in line: continue
+                raw = line.split('"')[1] if '"' in line else ""
+                if not raw or "pv_none" in raw: continue
+                fields = raw.split("~")
+                if len(fields) < 33: continue
+                try: change_pct = float(fields[32])
+                except (ValueError, IndexError): continue
+                tencent_code = "sz" + fields[2]
+                name = next((n for c, n in SECTOR_CODES if c == tencent_code), fields[1])
+                sectors.append({"name": name, "momentum": round(change_pct, 1)})
+            sectors.sort(key=lambda x: x["momentum"], reverse=True)
+            top5 = [{"name": s["name"], "momentum": s["momentum"], "rank": i+1} for i, s in enumerate(sectors[:5])]
+            bottom5 = [{"name": s["name"], "momentum": s["momentum"], "rank": len(sectors)-i} for i, s in enumerate(sectors[-5:])]
+        except Exception:
+            pass
+
+        # ---- MA 分布（最近收盘 vs N日前） ----
+        ma_result = {"above5": 0, "above10": 0, "above20": 0, "total": 0}
+        try:
+            # 获取所有股票最新收盘价和前N日收盘价
+            dates = [r[0] for r in cur.execute(
+                f"SELECT DISTINCT {date_col} FROM daily_kline ORDER BY {date_col} DESC LIMIT 22"
+            ).fetchall()]
+            if len(dates) >= 2:
+                today = dates[0]
+                d5 = dates[4] if len(dates) > 4 else dates[-1]
+                d10 = dates[9] if len(dates) > 9 else dates[-1]
+                d20 = dates[20] if len(dates) > 20 else dates[-1]
+
+                cur.execute(
+                    f"SELECT a.close, b.close, c.close, d.close "
+                    f"FROM daily_kline a "
+                    f"LEFT JOIN daily_kline b ON a.code=b.code AND b.{date_col}=? "
+                    f"LEFT JOIN daily_kline c ON a.code=c.code AND c.{date_col}=? "
+                    f"LEFT JOIN daily_kline d ON a.code=d.code AND d.{date_col}=? "
+                    f"WHERE a.{date_col}=?",
+                    (d5, d10, d20, today),
+                )
+                rows = cur.fetchall()
+                ma_result = {
+                    "above5": sum(1 for r in rows if r[0] and r[1] and r[0] > r[1]),
+                    "above10": sum(1 for r in rows if r[0] and r[2] and r[0] > r[2]),
+                    "above20": sum(1 for r in rows if r[0] and r[3] and r[0] > r[3]),
+                    "total": len(rows),
+                }
+        except Exception:
+            pass
+
+        # ---- RSI 分布 ----
+        rsi_result = {"oversold": 0, "normal": 0, "overbought": 0}
+        try:
+            # 简化：用 N日涨跌幅 代替 RSI 估算
+            # 跌>10% = oversold, 涨>10% = overbought
+            if len(dates) >= 14:
+                d14 = dates[13] if len(dates) > 13 else dates[-1]
+                cur.execute(
+                    f"SELECT a.close, b.close FROM daily_kline a "
+                    f"JOIN daily_kline b ON a.code=b.code AND b.{date_col}=? "
+                    f"WHERE a.{date_col}=?",
+                    (d14, today),
+                )
+                rows = cur.fetchall()
+                oversold = normal = overbought = 0
+                for r in rows:
+                    if r[0] and r[1] and r[1] > 0:
+                        pct = (r[0] / r[1] - 1) * 100
+                        if pct <= -10:
+                            oversold += 1
+                        elif pct >= 10:
+                            overbought += 1
+                        else:
+                            normal += 1
+                rsi_result = {"oversold": oversold, "normal": normal, "overbought": overbought}
+        except Exception:
+            pass
+
+        # ---- 涨跌停结构（今日/昨日对比） ----
+        struct = {}
+        try:
+            for limit_dir in ["up", "down"]:
+                limit_pct = 9.8 if limit_dir == "up" else -9.8
+                op = ">=" if limit_dir == "up" else "<="
+                cur.execute(
+                    f"SELECT a.close, b.close FROM daily_kline a "
+                    f"JOIN daily_kline b ON a.code=b.code AND b.{date_col}=? "
+                    f"WHERE a.{date_col}=? AND b.close > 0 "
+                    f"AND (a.close - b.close)/b.close*100 {op} ?",
+                    (dates[1] if len(dates) > 1 else today, today, limit_pct),
+                )
+                limit_count = len(cur.fetchall())
+                struct[f"limit_{limit_dir}"] = limit_count
+        except Exception:
+            pass
+
+        result = {
+            "sectors": {"top": top5, "bottom": bottom5},
+            "ma_distribution": ma_result,
+            "rsi_distribution": rsi_result,
+            "structure": struct,
+        }
+        _MOMENTUM_CACHE = result
+        _MOMENTUM_CACHE_TIME = now
+        return result
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Market Sentiment (市场情绪)
+# ---------------------------------------------------------------------------
+
+@router.get("/market/sentiment")
+def get_market_sentiment() -> dict:
+    """市场情绪 — 情绪周期 + 涨跌比 + 情绪评分
+
+    Returns:
+        {cycle: "up"|"down"|"unknown", cycle_updated: str,
+         advance_decline_ratio: float, limit_ratio: float,
+         sentiment_score: int (0-100), label: str}
+    """
+    db = _get_db()
+    if db is None:
+        return {"error": "数据库不可用"}
+    try:
+        from utils.config import get_date_col
+        date_col, _ = get_date_col()
+        cur = db.cursor()
+
+        # 最新两日
+        cur.execute(f"SELECT DISTINCT {date_col} FROM daily_kline ORDER BY {date_col} DESC LIMIT 2")
+        dates = [r[0] for r in cur.fetchall()]
+        if len(dates) < 2:
+            return {"cycle": "unknown", "sentiment_score": 50, "label": "数据不足"}
+
+        today, prev = dates[0], dates[1]
+        cur.execute(
+            f"SELECT a.close, b.close FROM daily_kline a "
+            f"JOIN daily_kline b ON a.code=b.code AND b.{date_col}=? "
+            f"WHERE a.{date_col}=?",
+            (prev, today),
+        )
+        rows = cur.fetchall()
+        total = len(rows)
+        up = sum(1 for r in rows if r[0] and r[1] and r[0] > r[1])
+        down = sum(1 for r in rows if r[0] and r[1] and r[0] < r[1])
+        flat = total - up - down
+
+        # 涨跌比
+        ad_ratio = round(up / down, 2) if down > 0 else 99
+
+        # 涨停/跌停
+        limit_up = sum(1 for r in rows if r[0] and r[1] and r[1] > 0 and (r[0]-r[1])/r[1] >= 0.098)
+        limit_down = sum(1 for r in rows if r[0] and r[1] and r[1] > 0 and (r[0]-r[1])/r[1] <= -0.098)
+        limit_ratio = round(limit_up / limit_down, 2) if limit_down > 0 else 99
+
+        # 情绪周期（从文件读取）
+        cycle = "unknown"
+        cycle_updated = ""
+        try:
+            state = _read_json(_PAPER_DIR / "market_sentiment_state.json")
+            cycle = state.get("cycle", "unknown")
+            cycle_updated = state.get("updated_at", "")
+        except Exception:
+            pass
+
+        # 情绪评分 (0-100)
+        score = 50
+        # 涨跌比贡献 (0-40): ad_ratio >= 2 -> +20, ad_ratio >= 1 -> +10, ad_ratio <= 0.5 -> -20
+        if total > 0:
+            up_pct = up / total * 100
+            score += min(20, max(-20, (up_pct - 50) * 1.5))
+        # 涨跌比额外贡献
+        score += 5 if ad_ratio >= 2 else (-5 if ad_ratio <= 0.5 else 0)
+        # 涨停跌停比贡献
+        score += 10 if limit_ratio >= 3 else (5 if limit_ratio >= 1.5 else (-5 if limit_ratio <= 0.5 else 0))
+        # 情绪周期修正
+        score += 10 if cycle == "up" else (-10 if cycle == "down" else 0)
+        score = max(0, min(100, int(score)))
+
+        # 标签
+        if score >= 75:
+            label = "乐观 😊"
+        elif score >= 60:
+            label = "偏暖 🙂"
+        elif score >= 40:
+            label = "中性 😐"
+        elif score >= 25:
+            label = "偏冷 🥶"
+        else:
+            label = "恐慌 😱"
+
+        return {
+            "cycle": cycle,
+            "cycle_updated": cycle_updated,
+            "date": str(today),
+            "total": total,
+            "up": up, "down": down, "flat": flat,
+            "advance_decline_ratio": ad_ratio,
+            "limit_up": limit_up,
+            "limit_down": limit_down,
+            "limit_ratio": limit_ratio,
+            "sentiment_score": score,
+            "label": label,
+        }
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +1050,7 @@ def run_script(data: dict):
         "fibonacci": "strategies/daily_check.py",
         "v5": "strategies/daily_check_v5.py",
         "stops": "-m utils stops",
+        "review": "reports/generate_review.py",
     }
     if script not in scripts:
         raise HTTPException(status_code=400, detail=f"Unknown script: {script}")
