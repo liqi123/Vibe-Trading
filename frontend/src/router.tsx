@@ -40,8 +40,26 @@ const Tools = lazy(() =>
 const Watchlist = lazy(() =>
   import("@/pages/Watchlist").then((m) => ({ default: m.Watchlist })),
 );
+const Overview = lazy(() =>
+  import("@/pages/Overview").then((m) => ({ default: m.Overview })),
+);
 const CalcTools = lazy(() =>
   import("@/pages/CalcTools").then((m) => ({ default: m.CalcTools })),
+);
+const TradeJournal = lazy(() =>
+  import("@/pages/tools/TradeJournal").then((m) => ({ default: m.TradeJournal })),
+);
+const AIAnalysis = lazy(() =>
+  import("@/pages/tools/AIAnalysis").then((m) => ({ default: m.AIAnalysis })),
+);
+const BacktestEval = lazy(() =>
+  import("@/pages/tools/BacktestEval").then((m) => ({ default: m.BacktestEval })),
+);
+const NewsSearch = lazy(() =>
+  import("@/pages/tools/NewsSearch").then((m) => ({ default: m.NewsSearch })),
+);
+const ScheduledTasks = lazy(() =>
+  import("@/pages/ScheduledTasks").then((m) => ({ default: m.ScheduledTasks })),
 );
 
 function PageLoader() {
@@ -64,6 +82,7 @@ export const router = createBrowserRouter([
   {
     element: <Layout />,
     children: [
+      { path: "/overview", element: wrap(Overview) },
       { path: "/", element: wrap(Home) },
       { path: "/agent", element: wrap(Agent) },
       { path: "/runtime", element: wrap(Runtime) },
@@ -82,6 +101,11 @@ export const router = createBrowserRouter([
       { path: "/daily-scan", element: wrap(DailyScan) },
       { path: "/watchlist", element: wrap(Watchlist) },
       { path: "/calc-tools", element: wrap(CalcTools) },
+      { path: "/journal", element: wrap(TradeJournal) },
+      { path: "/ai-analysis", element: wrap(AIAnalysis) },
+      { path: "/backtest-eval", element: wrap(BacktestEval) },
+      { path: "/news", element: wrap(NewsSearch) },
+      { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
     ],
   },
 ]);

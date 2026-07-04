@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Wallet, History, RefreshCw, Clock } from "lucide-react";
+import { Wallet, History, RefreshCw, Clock, TrendingDown, Save } from "lucide-react";
+import { useModalStore } from "../stores/modal";
 
 interface V1Position {
   code: string;
@@ -76,24 +77,75 @@ export function PaperTrading() {
   const [v1, setV1] = useState<PaperState | null>(null);
   const [v5, setV5] = useState<PaperState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"v1" | "v5">("v1");
+  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "history">("v1");
+  const [sellingCode, setSellingCode] = useState<string | null>(null);
+  const [editingE, setEditingE] = useState<Record<string, string>>({});
+  const [savingE, setSavingE] = useState<string | null>(null);
+  const openStock = useModalStore((s) => s.open);
+  const [trades, setTrades] = useState<any[]>([]);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [r1, r5] = await Promise.all([
+      const [r1, r5, t1, t5] = await Promise.all([
         fetch("/tools/portfolio"),
         fetch("/tools/portfolio/v5"),
+        fetch("/tools/trades"),
+        fetch("/tools/trades/v5"),
       ]);
       setV1(await r1.json());
       setV5(await r5.json());
+      const d1 = await t1.json();
+      const d5 = await t5.json();
+      setTrades([
+        ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
+        ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
+      ]);
     } catch { /* ignore */ }
     setLoading(false);
   };
 
   useEffect(() => { fetchData(); }, []);
 
-  const state = activeTab === "v1" ? v1 : v5;
+  const handleSaveE = async (code: string, portfolio: string) => {
+    const val = parseFloat(editingE[code]);
+    if (isNaN(val)) return;
+    setSavingE(code);
+    try {
+      await fetch("/tools/portfolio/update-field", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, portfolio, field: "E", value: val }),
+      });
+      fetchData();
+    } catch { /* ignore */ }
+    setSavingE(null);
+    setEditingE(prev => { const n = { ...prev }; delete n[code]; return n; });
+  };
+
+  const handleSell = async (code: string, portfolio: string) => {
+    if (!confirm(`确认卖出 ${code}？`)) return;
+    setSellingCode(code);
+    try {
+      const resp = await fetch("/tools/portfolio/sell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, portfolio, reason: "手动卖出" }),
+      });
+      const result = await resp.json();
+      if (result.ok) {
+        alert(`卖出成功，盈亏: ${formatMoney(result.pnl)}`);
+        fetchData();
+      } else {
+        alert(`卖出失败: ${result.detail || "未知错误"}`);
+      }
+    } catch (e) {
+      alert("卖出请求失败");
+    }
+    setSellingCode(null);
+  };
+
+  const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : null;
   const positions = state?.positions || [];
   const cash = state?.cash || 0;
   const initial = state?.initial_capital || 200000;
@@ -110,7 +162,7 @@ export function PaperTrading() {
         <div>
           <h1 className="text-2xl font-bold">模拟盘</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {state?.name || (activeTab === "v1" ? "斐波那契策略" : "趋势策略")}
+            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : "趋势策略")}
           </p>
         </div>
         <button
@@ -125,7 +177,7 @@ export function PaperTrading() {
 
       {/* Tabs */}
       <div className="flex gap-2 border-b">
-        {(["v1", "v5"] as const).map(tab => (
+        {(["v1", "v5", "history"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -135,13 +187,13 @@ export function PaperTrading() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "v1" ? "V1 斐波那契" : "V5 趋势"}
+            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : "交易历史"}
           </button>
         ))}
       </div>
 
       {/* Summary */}
-      <div className="grid gap-4 md:grid-cols-5">
+      {activeTab !== "history" && <div className="grid gap-4 md:grid-cols-5">
         <div className="border rounded-lg p-4 bg-card">
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-1">
             <Wallet className="h-4 w-4" />
@@ -168,7 +220,7 @@ export function PaperTrading() {
           <div className="text-sm text-muted-foreground mb-1">持仓数量</div>
           <p className="text-xl font-bold">{positions.length} / 5</p>
         </div>
-      </div>
+      </div>}
 
       {/* Pending Orders */}
       {activeTab === "v5" && v5?.pending_orders && v5.pending_orders.length > 0 && (
@@ -188,7 +240,7 @@ export function PaperTrading() {
       )}
 
       {/* Positions */}
-      <div className="border rounded-lg bg-card overflow-hidden">
+      {activeTab !== "history" && <div className="border rounded-lg bg-card overflow-hidden">
         <div className="px-4 py-3 border-b">
           <h2 className="font-semibold">当前持仓</h2>
         </div>
@@ -203,16 +255,16 @@ export function PaperTrading() {
                 <tr className="border-b bg-muted/50">
                   <th className="px-4 py-2 text-left font-medium">代码</th>
                   <th className="px-4 py-2 text-left font-medium">名称</th>
-                  <th className="px-4 py-2 text-right font-medium">买入价</th>
+                  <th className="px-4 py-2 text-right font-medium">成本价</th>
                   <th className="px-4 py-2 text-right font-medium">现价</th>
                   <th className="px-4 py-2 text-right font-medium">数量</th>
                   <th className="px-4 py-2 text-right font-medium">成本</th>
                   <th className="px-4 py-2 text-right font-medium">市值</th>
                   <th className="px-4 py-2 text-right font-medium">盈亏</th>
-                  {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">E价</th>}
-                  {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">止损</th>}
+                  {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">跑路价</th>}
                   {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">评分</th>}
                   {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">最高</th>}
+                  <th className="px-4 py-2 text-center font-medium">操作</th>
                 </tr>
               </thead>
               <tbody>
@@ -220,11 +272,12 @@ export function PaperTrading() {
                   const mv = pos.current_price * pos.shares;
                   const pnl = mv - pos.cost;
                   const pnlPct = pnl / pos.cost;
+                  const unitCost = pos.shares > 0 ? pos.cost / pos.shares : pos.buy_price;
                   return (
                     <tr key={pos.code} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="px-4 py-3 font-mono text-xs">{pos.code}</td>
+                      <td className="px-4 py-3 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(pos.code)}>{pos.code}</td>
                       <td className="px-4 py-3 font-medium">{pos.name}</td>
-                      <td className="px-4 py-3 text-right">{pos.buy_price.toFixed(2)}</td>
+                      <td className="px-4 py-3 text-right font-mono">{unitCost.toFixed(2)}</td>
                       <td className="px-4 py-3 text-right font-medium">{pos.current_price.toFixed(2)}</td>
                       <td className="px-4 py-3 text-right">{pos.shares}</td>
                       <td className="px-4 py-3 text-right text-muted-foreground">{formatMoney(pos.cost)}</td>
@@ -234,19 +287,39 @@ export function PaperTrading() {
                         <div className="text-xs">{formatPct(pnlPct)}</div>
                       </td>
                       {activeTab === "v1" && isV1(pos) && (
-                        <>
-                          <td className="px-4 py-3 text-right font-mono text-xs">
-                            {pos.E.toFixed(2)}
-                            {pos.current_price >= pos.E ? (
-                              <span className="ml-1 text-green-600">✓</span>
-                            ) : (
-                              <span className="ml-1 text-red-600">✗</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-right font-mono text-xs text-red-600">
-                            {pos.stop.toFixed(2)}
-                          </td>
-                        </>
+                        <td className="px-4 py-3 text-right">
+                          {editingE[pos.code] !== undefined ? (
+                            <div className="flex items-center gap-1 justify-end">
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={editingE[pos.code]}
+                                onChange={e => setEditingE(prev => ({ ...prev, [pos.code]: e.target.value }))}
+                                className="w-20 px-1 py-0.5 text-right text-xs border rounded font-mono"
+                                autoFocus
+                              />
+                              <button
+                                onClick={() => handleSaveE(pos.code, activeTab)}
+                                disabled={savingE === pos.code}
+                                className="p-0.5 text-green-600 hover:text-green-700"
+                              >
+                                <Save className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div
+                              className="flex items-center gap-1 justify-end cursor-pointer hover:bg-muted/50 rounded px-1"
+                              onClick={() => setEditingE(prev => ({ ...prev, [pos.code]: pos.E.toFixed(2) }))}
+                            >
+                              <span className="font-mono text-xs">{pos.E.toFixed(2)}</span>
+                              {pos.current_price >= pos.E ? (
+                                <span className="text-green-600">✓</span>
+                              ) : (
+                                <span className="text-red-600">✗</span>
+                              )}
+                            </div>
+                          )}
+                        </td>
                       )}
                       {activeTab === "v5" && !isV1(pos) && (
                         <>
@@ -264,6 +337,16 @@ export function PaperTrading() {
                           </td>
                         </>
                       )}
+                      <td className="px-4 py-3 text-center">
+                        <button
+                          onClick={() => handleSell(pos.code, activeTab)}
+                          disabled={sellingCode === pos.code}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 border border-red-200 rounded hover:bg-red-50 transition-colors disabled:opacity-50"
+                        >
+                          <TrendingDown className="h-3 w-3" />
+                          {sellingCode === pos.code ? "卖出中..." : "卖出"}
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -271,15 +354,76 @@ export function PaperTrading() {
             </table>
           </div>
         )}
-      </div>
+      </div>}
 
-      {/* Trade History */}
-      {state?.history && state.history.length > 0 && (
+      {/* All Trade History (history tab) */}
+      {activeTab === "history" && (
+        <div className="border rounded-lg bg-card overflow-hidden">
+          <div className="px-4 py-3 border-b flex items-center gap-2">
+            <History className="h-4 w-4" />
+            <h2 className="font-semibold">全部交易历史</h2>
+            <span className="text-xs text-muted-foreground">（V1 + V5 合计 {trades.length} 条）</span>
+          </div>
+          <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-muted/50">
+                <tr className="border-b">
+                  <th className="px-4 py-2 text-left font-medium">日期</th>
+                  <th className="px-4 py-2 text-left font-medium">策略</th>
+                  <th className="px-4 py-2 text-left font-medium">代码</th>
+                  <th className="px-4 py-2 text-left font-medium">名称</th>
+                  <th className="px-4 py-2 text-left font-medium">操作</th>
+                  <th className="px-4 py-2 text-right font-medium">价格</th>
+                  <th className="px-4 py-2 text-right font-medium">数量</th>
+                  <th className="px-4 py-2 text-right font-medium">盈亏</th>
+                  <th className="px-4 py-2 text-left font-medium">备注</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.length === 0 ? (
+                  <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">暂无交易记录</td></tr>
+                ) : (
+                  trades.map((t, i) => (
+                    <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
+                      <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${t.strategy === "V1" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                          {t.strategy}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
+                      <td className="px-4 py-2.5">{t.name || "-"}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          t.action === "buy" ? "bg-green-100 text-green-700" :
+                          t.action === "sell" ? "bg-red-100 text-red-700" :
+                          "bg-yellow-100 text-yellow-700"
+                        }`}>
+                          {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">{t.price?.toFixed(2) || "-"}</td>
+                      <td className="px-4 py-2.5 text-right">{t.shares || "-"}</td>
+                      <td className={`px-4 py-2.5 text-right font-medium ${t.pnl != null ? pnlClass(t.pnl > 0 ? 1 : -1) : "text-muted-foreground"}`}>
+                        {t.pnl != null ? formatMoney(t.pnl) : "-"}
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{t.note || ""}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Trade History (per strategy) */}
+      {activeTab !== "history" && state?.history && state.history.length > 0 && (
         <div className="border rounded-lg bg-card overflow-hidden">
           <div className="px-4 py-3 border-b flex items-center gap-2">
             <History className="h-4 w-4" />
             <h2 className="font-semibold">交易记录</h2>
-            <span className="text-xs text-muted-foreground">（最近 {Math.min(state.history.length, 20)} 条）</span>
+            <span className="text-xs text-muted-foreground">（最近 {Math.min(state.history.length, 30)} 条）</span>
           </div>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full text-sm">
@@ -299,7 +443,7 @@ export function PaperTrading() {
                 {state.history.slice(0, 30).map((t, i) => (
                   <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
                     <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs">{t.code}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
                     <td className="px-4 py-2.5">{t.name || "-"}</td>
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${

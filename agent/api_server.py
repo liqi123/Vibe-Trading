@@ -3595,6 +3595,7 @@ def serve_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8000, help="Listen port (default 8000)")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address")
     parser.add_argument("--dev", action="store_true", help="Dev mode: spawn Vite on :5173")
+    parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -3636,7 +3637,10 @@ def serve_main(argv: list[str] | None = None) -> int:
     print("=" * 50)
 
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        if args.reload:
+            uvicorn.run("agent.api_server:app", host=args.host, port=args.port, log_level="info", reload=True)
+        else:
+            uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     finally:
         if vite_proc:
             vite_proc.terminate()

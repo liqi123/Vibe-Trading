@@ -1,12 +1,13 @@
 import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
 import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
-import { Activity, BarChart3, Bot, Check, ChevronDown, FileText, Languages, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Wrench } from "lucide-react";
+import { Activity, BarChart3, Bot, Check, ChevronDown, Eye, FileText, Languages, Moon, Sun, Plus, Trash2, Pencil, MessageSquare, ChevronsLeft, ChevronsRight, Settings, Layers, Loader2, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
 import { useAgentStore } from "@/stores/agent";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
+import { StockDetailPanel } from "@/components/stock/StockDetailPanel";
 import { SUPPORTED_LANGUAGES } from "@/i18n";
 
 // APP_VERSION is sourced from i18n locale files (app.version key) to keep a
@@ -16,6 +17,7 @@ export function Layout() {
   const { t } = useTranslation();
 
   const NAV = [
+    { to: "/overview", icon: Eye, label: "总览" },
     { to: "/", icon: BarChart3, label: t('layout.home') },
     { to: "/agent", icon: Bot, label: t('layout.agent') },
     { to: "/runtime", icon: Activity, label: t('layout.runtime') },
@@ -259,6 +261,7 @@ export function Layout() {
           <Outlet />
         </main>
       </div>
+      <StockDetailPanel />
     </div>
   );
 }

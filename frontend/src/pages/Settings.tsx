@@ -1,9 +1,8 @@
 import i18n from "@/i18n";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Database, KeyRound, Loader2, MessageSquareMore, Play, RefreshCw, RotateCcw, Save, Server, SlidersHorizontal, Square } from "lucide-react";
-import { useTranslation } from "react-i18next";
+import { Database, KeyRound, Loader2, RotateCcw, Save, Server, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
-import { api, isAuthRequiredError, type ChannelRuntimeStatus, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
+import { api, isAuthRequiredError, type DataSourceSettings, type LLMProviderOption, type LLMSettings } from "@/lib/api";
 import { getApiAuthKey, setApiAuthKey } from "@/lib/apiAuth";
 
 interface LLMFormState {
@@ -34,10 +33,8 @@ function toForm(settings: LLMSettings): LLMFormState {
 }
 
 export function Settings() {
-  const { t } = useTranslation();
   const [settings, setSettings] = useState<LLMSettings | null>(null);
   const [dataSettings, setDataSettings] = useState<DataSourceSettings | null>(null);
-  const [channelStatus, setChannelStatus] = useState<ChannelRuntimeStatus | null>(null);
   const [form, setForm] = useState<LLMFormState | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [localApiKey, setLocalApiKeyState] = useState(() => getApiAuthKey());
@@ -47,8 +44,6 @@ export function Settings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dataSaving, setDataSaving] = useState(false);
-  const [channelRefreshing, setChannelRefreshing] = useState(false);
-  const [channelAction, setChannelAction] = useState<"start" | "stop" | null>(null);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -57,9 +52,8 @@ export function Settings() {
     Promise.allSettled([
       api.getLLMSettings(),
       api.getDataSourceSettings(),
-      api.getChannelStatus(),
     ])
-      .then(([llmResult, dataSourceResult, channelResult]) => {
+      .then(([llmResult, dataSourceResult]) => {
         if (!alive) return;
 
         if (llmResult.status === "fulfilled") {
@@ -71,7 +65,7 @@ export function Settings() {
           if (isAuthRequiredError(llmResult.reason)) {
             toast.error(message);
           } else {
-            toast.error(`Failed to load LLM settings: ${message}`);
+            toast.error(`加载LLM设置失败: ${message}`);
           }
         }
 
@@ -83,16 +77,8 @@ export function Settings() {
           if (isAuthRequiredError(dataSourceResult.reason)) {
             toast.error(message);
           } else {
-            toast.error(`Failed to load data source settings: ${message}`);
+            toast.error(`加载数据源设置失败: ${message}`);
           }
-        }
-
-        if (channelResult.status === "fulfilled") {
-          setChannelStatus(channelResult.value);
-        } else {
-          const message = channelResult.reason instanceof Error ? channelResult.reason.message : "Unknown error";
-          toast.error(`${t("settings.channels.refreshFailed")}: ${message}`);
-          setChannelStatus(null);
         }
       })
       .finally(() => {
@@ -102,31 +88,7 @@ export function Settings() {
     return () => {
       alive = false;
     };
-  }, [t]);
-
-  const refreshChannelStatus = async () => {
-    setChannelRefreshing(true);
-    try {
-      setChannelStatus(await api.getChannelStatus());
-    } catch (error) {
-      toast.error(`${t("settings.channels.refreshFailed")}: ${error instanceof Error ? error.message : "Unknown error"}`);
-    } finally {
-      setChannelRefreshing(false);
-    }
-  };
-
-  const setChannelsRunning = async (action: "start" | "stop") => {
-    setChannelAction(action);
-    try {
-      const updated = action === "start" ? await api.startChannels() : await api.stopChannels();
-      setChannelStatus(updated);
-      toast.success(action === "start" ? t("settings.channels.started") : t("settings.channels.stoppedToast"));
-    } catch (error) {
-      toast.error(`${action === "start" ? t("settings.channels.startFailed") : t("settings.channels.stopFailed")}: ${error instanceof Error ? error.message : "Unknown error"}`);
-    } finally {
-      setChannelAction(null);
-    }
-  };
+  }, []);
 
   const providers = settings?.providers ?? [];
   const selectedProvider = useMemo<LLMProviderOption | undefined>(
@@ -159,7 +121,7 @@ export function Settings() {
   const submitLocalApiKey = (event: FormEvent) => {
     event.preventDefault();
     setApiAuthKey(localApiKey);
-    toast.success("Local API key saved");
+    toast.success("本地API密钥已保存");
     window.location.reload();
   };
 
@@ -177,9 +139,9 @@ export function Settings() {
       setForm(toForm(updated));
       setApiKey("");
       setClearApiKey(false);
-      toast.success("LLM settings saved");
+      toast.success("LLM设置已保存");
     } catch (error) {
-      toast.error(`Failed to save LLM settings: ${error instanceof Error ? error.message : "Unknown error"}`);
+      toast.error(`保存LLM设置失败: ${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setSaving(false);
     }
@@ -196,9 +158,9 @@ export function Settings() {
       setDataSettings(updated);
       setTushareToken("");
       setClearTushareToken(false);
-      toast.success("Data source settings saved");
+      toast.success("数据源设置已保存");
     } catch (error) {
-      toast.error(`Failed to save data source settings: ${error instanceof Error ? error.message : "Unknown error"}`);
+      toast.error(`保存数据源设置失败: ${error instanceof Error ? error.message : "未知错误"}`);
     } finally {
       setDataSaving(false);
     }
@@ -209,19 +171,19 @@ export function Settings() {
       <div className="mb-4 space-y-1">
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-primary" />
-          <h2 className="text-base font-semibold">{"Local API access"}</h2>
+          <h2 className="text-base font-semibold">本地API访问</h2>
         </div>
-        <p className="text-sm text-muted-foreground">{"For remote or private Web UI deployments, enter the server API key once in this browser. Localhost use can stay blank."}</p>
+        <p className="text-sm text-muted-foreground">远程或私有部署时，在浏览器中输入服务器API密钥。本地使用可留空。</p>
       </div>
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
         <label className="grid gap-2">
-          <span className={labelClass}>{"Server API key"}</span>
+          <span className={labelClass}>服务器API密钥</span>
           <input
             type="password"
             value={localApiKey}
             onChange={(event) => setLocalApiKeyState(event.target.value)}
             className={fieldClass}
-            placeholder={"Stored only in this browser. Leave blank to clear it."}
+            placeholder="仅存储在本浏览器中。留空则清除。"
             autoComplete="current-password"
           />
         </label>
@@ -230,10 +192,10 @@ export function Settings() {
           className="inline-flex items-center justify-center gap-2 self-end rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90"
         >
           <Save className="h-4 w-4" />
-          {i18n.t("settings.save")}
+          保存
         </button>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">{"Stored only in this browser. Leave blank to clear it."}</p>
+      <p className="mt-2 text-xs text-muted-foreground">仅存储在本浏览器中。留空则清除。</p>
     </form>
   );
 
@@ -241,14 +203,14 @@ export function Settings() {
     return (
       <div className="mx-auto max-w-5xl space-y-6 p-6">
         <div className="space-y-2">
-          <h1 className="text-2xl font-semibold tracking-tight">{"Settings"}</h1>
-          <p className="max-w-3xl text-sm text-muted-foreground">{"Configure model credentials and market data source tokens for this local project."}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">设置</h1>
+          <p className="max-w-3xl text-sm text-muted-foreground">配置模型凭证和市场数据源令牌。</p>
         </div>
         {localApiAccessSection}
         <div className="flex min-h-32 items-center justify-center rounded-lg border bg-card p-5 text-sm text-muted-foreground">
           {settingsLoadError ? (
             <div className="text-center">
-              <div className="font-medium text-foreground">{"Settings are unavailable"}</div>
+              <div className="font-medium text-foreground">设置不可用</div>
               <div className="mt-1">{settingsLoadError}</div>
             </div>
           ) : (
@@ -263,131 +225,16 @@ export function Settings() {
   }
 
   const keyStatus = settings.api_key_configured
-    ? "Configured"
+    ? "已配置"
     : settings.api_key_required
-      ? "Leave blank to keep the current key"
+      ? "留空则保留当前密钥"
       : selectedProvider?.auth_type === "oauth" && selectedProvider.login_command
-        ? `This provider uses OAuth. Run: ${selectedProvider.login_command}`
-        : "This provider does not require an API key.";
+        ? `此提供商使用OAuth。运行: ${selectedProvider.login_command}`
+        : "此提供商不需要API密钥。";
   const apiKeyDisabled = !selectedProvider?.api_key_required || clearApiKey;
   const tushareStatus = dataSettings.tushare_token_configured
-    ? "Configured"
-    : "Leave blank to keep the current token";
-  const channelRows = channelStatus
-    ? Object.entries(channelStatus.channels ?? {}).sort(([a], [b]) => a.localeCompare(b))
-    : [];
-  const channelEnabledCount = channelRows.filter(([, item]) => item.enabled).length;
-  const channelLoadedCount = channelRows.filter(([, item]) => item.loaded).length;
-  const channelUnavailableCount = channelRows.filter(([, item]) => item.available === false).length;
-  const channelBusy = channelRefreshing || channelAction !== null;
-
-  const channelsSection = (
-    <section className="rounded-lg border bg-card p-5 shadow-sm">
-      <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <MessageSquareMore className="h-4 w-4 text-primary" />
-            <h2 className="text-base font-semibold">{t("settings.channels.title")}</h2>
-          </div>
-          <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.channels.description")}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={refreshChannelStatus}
-            disabled={channelBusy}
-            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {channelRefreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {t("settings.channels.refresh")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setChannelsRunning("start")}
-            disabled={channelBusy || !channelStatus}
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {channelAction === "start" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {t("settings.channels.start")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setChannelsRunning("stop")}
-            disabled={channelBusy || !channelStatus}
-            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {channelAction === "stop" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
-            {t("settings.channels.stop")}
-          </button>
-        </div>
-      </div>
-
-      {channelStatus ? (
-        <>
-          <div className="mb-4 grid gap-3 md:grid-cols-4">
-            <div className="rounded-md border bg-muted/20 px-3 py-2">
-              <div className="text-xs text-muted-foreground">{t("settings.channels.runtime")}</div>
-              <div className="text-sm font-medium">{channelStatus.running ? t("settings.channels.running") : t("settings.channels.stopped")}</div>
-            </div>
-            <div className="rounded-md border bg-muted/20 px-3 py-2">
-              <div className="text-xs text-muted-foreground">{t("settings.channels.enabled")}</div>
-              <div className="text-sm font-medium">{channelEnabledCount}</div>
-            </div>
-            <div className="rounded-md border bg-muted/20 px-3 py-2">
-              <div className="text-xs text-muted-foreground">{t("settings.channels.loaded")}</div>
-              <div className="text-sm font-medium">{channelLoadedCount}</div>
-            </div>
-            <div className="rounded-md border bg-muted/20 px-3 py-2">
-              <div className="text-xs text-muted-foreground">{t("settings.channels.unavailable")}</div>
-              <div className="text-sm font-medium">{channelUnavailableCount}</div>
-            </div>
-          </div>
-
-          <div className="overflow-hidden rounded-md border">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">{t("settings.channels.channel")}</th>
-                  <th className="px-3 py-2 text-left font-medium">{t("settings.channels.state")}</th>
-                  <th className="px-3 py-2 text-left font-medium">{t("settings.channels.recovery")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {channelRows.map(([name, item]) => (
-                  <tr key={name} className="border-t">
-                    <td className="px-3 py-2 align-top">
-                      <div className="font-medium">{item.display_name || name}</div>
-                      <div className="text-xs text-muted-foreground">{name}</div>
-                    </td>
-                    <td className="px-3 py-2 align-top">
-                      <div className="flex flex-wrap gap-1.5">
-                        <span className={`rounded-full px-2 py-0.5 text-xs ${item.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}>
-                          {item.enabled ? t("settings.channels.enabled") : t("settings.channels.disabled")}
-                        </span>
-                        <span className={`rounded-full px-2 py-0.5 text-xs ${item.loaded ? "bg-success/10 text-success" : "bg-muted text-muted-foreground"}`}>
-                          {item.loaded ? t("settings.channels.loaded") : t("settings.channels.notLoaded")}
-                        </span>
-                        <span className={`rounded-full px-2 py-0.5 text-xs ${item.running ? "bg-success/10 text-success" : "bg-muted text-muted-foreground"}`}>
-                          {item.running ? t("settings.channels.running") : t("settings.channels.stopped")}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="max-w-md px-3 py-2 align-top text-xs text-muted-foreground">
-                      {item.install_hint || item.error || t("settings.channels.noRecovery")}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      ) : (
-        <div className="rounded-md border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-          {t("settings.channels.refreshFailed")}
-        </div>
-      )}
-    </section>
-  );
+    ? "已配置"
+    : "留空则保留当前token";
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
@@ -398,18 +245,16 @@ export function Settings() {
 
       {localApiAccessSection}
 
-      {channelsSection}
-
       <div className="space-y-2">
-        <h2 className="text-lg font-semibold tracking-tight">{"LLM Settings"}</h2>
-        <p className="max-w-3xl text-sm text-muted-foreground">{"Choose the model used by the agent and save it to the project-local agent/.env file."}</p>
+        <h2 className="text-lg font-semibold tracking-tight">LLM设置</h2>
+        <p className="max-w-3xl text-sm text-muted-foreground">选择代理使用的模型并保存到项目本地 agent/.env 文件。</p>
       </div>
 
       <form onSubmit={submit} className="grid gap-6 lg:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.8fr)]">
         <section className="rounded-lg border bg-card p-5 shadow-sm">
           <div className="mb-5 flex items-center gap-2">
             <Server className="h-4 w-4 text-primary" />
-            <h2 className="text-base font-semibold">{"Connection"}</h2>
+            <h2 className="text-base font-semibold">连接</h2>
           </div>
 
           <div className="grid gap-4">
@@ -424,7 +269,7 @@ export function Settings() {
                   <option key={provider.name} value={provider.name}>{provider.label}</option>
                 ))}
               </select>
-              <span className={hintClass}>{"Changing providers updates the recommended model and endpoint."}</span>
+              <span className={hintClass}>切换提供商会更新推荐模型和端点。</span>
             </label>
 
             <label className="grid gap-2">
@@ -440,13 +285,13 @@ export function Settings() {
                   type="button"
                   onClick={() => applyProviderDefaults()}
                   className="inline-flex shrink-0 items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
-                  title={"Use provider defaults"}
+                  title="使用提供商默认值"
                 >
                   <RotateCcw className="h-4 w-4" />
-                  <span className="hidden sm:inline">{"Use provider defaults"}</span>
+                  <span className="hidden sm:inline">使用默认值</span>
                 </button>
               </div>
-              <span className={hintClass}>{"Use the exact model id required by your provider."}</span>
+              <span className={hintClass}>使用提供商要求的确切模型ID。</span>
             </label>
 
             <label className="grid gap-2">
@@ -489,7 +334,7 @@ export function Settings() {
                       }}
                       className="h-3.5 w-3.5 accent-primary"
                     />
-                    {"Clear saved API key"}
+                    {"清除已保存的API密钥"}
                   </label>
                 ) : null}
               </div>
@@ -500,7 +345,7 @@ export function Settings() {
         <section className="rounded-lg border bg-card p-5 shadow-sm">
           <div className="mb-5 flex items-center gap-2">
             <SlidersHorizontal className="h-4 w-4 text-primary" />
-            <h2 className="text-base font-semibold">{"Generation"}</h2>
+            <h2 className="text-base font-semibold">生成参数</h2>
           </div>
 
           <div className="grid gap-4">
@@ -556,11 +401,11 @@ export function Settings() {
                 <option value="high">high</option>
                 <option value="max">max</option>
               </select>
-              <span className={hintClass}>{"How hard the model thinks before answering. Higher is more thorough but slower; leave Off for fastest replies."}</span>
+              <span className={hintClass}>模型回答前的思考深度。越高越彻底但越慢；关闭可获得最快回复。</span>
             </label>
 
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              <span className="font-medium text-foreground">{i18n.t("settings.saved")}: </span>
+              <span className="font-medium text-foreground">保存位置: </span>
               <span className="break-all font-mono">{settings.env_path}</span>
             </div>
 
@@ -570,7 +415,7 @@ export function Settings() {
               className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {saving ? i18n.t("settings.saving") : i18n.t("settings.save")}
+              {saving ? "保存中..." : "保存"}
             </button>
           </div>
         </section>
@@ -580,9 +425,9 @@ export function Settings() {
         <div className="mb-5 space-y-1">
           <div className="flex items-center gap-2">
             <Database className="h-4 w-4 text-primary" />
-            <h2 className="text-base font-semibold">{"Data Source Settings"}</h2>
+            <h2 className="text-base font-semibold">数据源设置</h2>
           </div>
-          <p className="text-sm text-muted-foreground">{"Configure optional market data credentials used by backtests and research agents."}</p>
+          <p className="text-sm text-muted-foreground">配置回测和研究代理使用的市场数据凭证。</p>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
@@ -602,7 +447,7 @@ export function Settings() {
                 />
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className={hintClass}>{"Used for China A-share, futures, fund, and macro data. If unset, the project falls back to AKShare where available."}</span>
+                <span className={hintClass}>用于A股、期货、基金和宏观数据。未设置时回退到AKShare。</span>
                 <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
@@ -613,13 +458,13 @@ export function Settings() {
                     }}
                     className="h-3.5 w-3.5 accent-primary"
                   />
-                  {"Clear saved Tushare token"}
+                  {"清除已保存的Tushare token"}
                 </label>
               </div>
             </label>
 
             <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              <span className="font-medium text-foreground">{i18n.t("settings.saved")}: </span>
+              <span className="font-medium text-foreground">保存位置: </span>
               <span className="break-all font-mono">{dataSettings.env_path}</span>
             </div>
 
@@ -629,7 +474,7 @@ export function Settings() {
               className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-70"
             >
               {dataSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {dataSaving ? i18n.t("settings.saving") : "Save data source settings"}
+              {dataSaving ? "保存中..." : "保存数据源设置"}
             </button>
           </div>
 
@@ -637,15 +482,15 @@ export function Settings() {
             <div className="mb-3 flex items-center justify-between gap-3">
               <span className="text-sm font-medium">{"BaoStock"}</span>
               <span className={`rounded-full px-2 py-0.5 text-xs ${dataSettings.baostock_supported ? "bg-success/10 text-success" : "bg-warning/10 text-warning"}`}>
-                {dataSettings.baostock_supported ? "Loader available" : "No project loader"}
+                {dataSettings.baostock_supported ? "加载器可用" : "无项目加载器"}
               </span>
             </div>
             <div className="space-y-2 text-sm text-muted-foreground">
               <p>{dataSettings.baostock_message}</p>
               <p>
                 {dataSettings.baostock_installed
-                  ? "Python package installed"
-                  : "Python package not installed"}
+                  ? "Python包已安装"
+                  : "Python包未安装"}
               </p>
             </div>
           </div>

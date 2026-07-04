@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Target, Wallet, Search, Star, Calculator } from "lucide-react";
+import { Target, Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper } from "lucide-react";
 
 const TOOLS = [
   {
@@ -27,7 +27,7 @@ const TOOLS = [
     to: "/watchlist",
     icon: Star,
     title: "自选股",
-    desc: "自定义关注股票列表，实时查看价格和指标",
+    desc: "自定义关注股票列表，实时查看价格和E/X/跑路价",
     color: "text-yellow-500",
   },
   {
@@ -37,6 +37,34 @@ const TOOLS = [
     desc: "跑路价、出货价、斐波那契价位等实用计算",
     color: "text-orange-500",
   },
+  {
+    to: "/journal",
+    icon: BookOpen,
+    title: "交易日志",
+    desc: "交易记录管理、盈亏统计、周度回顾报告",
+    color: "text-teal-500",
+  },
+  {
+    to: "/ai-analysis",
+    icon: Brain,
+    title: "AI 分析",
+    desc: "LLM 驱动的个股分析，生成买卖建议报告",
+    color: "text-purple-600",
+  },
+  {
+    to: "/backtest-eval",
+    icon: TrendingUp,
+    title: "回测评估",
+    desc: "评估选股后续N日收益表现，验证策略有效性",
+    color: "text-red-500",
+  },
+  {
+    to: "/news",
+    icon: Newspaper,
+    title: "新闻查询",
+    desc: "多源新闻聚合，关键词搜索和个股新闻查询",
+    color: "text-cyan-500",
+  },
 ];
 
 export function Tools() {
@@ -44,7 +72,7 @@ export function Tools() {
     <div className="p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-bold">工具</h1>
-        <p className="text-sm text-muted-foreground mt-1">选股策略、模拟盘、预期管理</p>
+        <p className="text-sm text-muted-foreground mt-1">选股策略、模拟盘、预期管理、分析工具</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
