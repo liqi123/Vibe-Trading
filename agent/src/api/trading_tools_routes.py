@@ -716,17 +716,10 @@ def get_market_realtime() -> dict:
 # Prices (行情代理，解决浏览器CORS)
 # ---------------------------------------------------------------------------
 
-import urllib.request
-
 @router.get("/prices")
 def get_prices(codes: str = "") -> dict:
-    """Proxy Tencent quotes API for frontend consumption.
+    from utils.tencent_quotes import add_prefix, fetch_detail
 
-    Args:
-        codes: Comma-separated stock codes, e.g. "sh600519,sz000001"
-    Returns:
-        {prices: {code: {price, change_pct, prev_close, open, high, low, volume}}}
-    """
     if not codes:
         return {"prices": {}}
     code_list = [c.strip() for c in codes.split(",") if c.strip()]
@@ -734,60 +727,20 @@ def get_prices(codes: str = "") -> dict:
         return {"prices": {}}
 
     results = {}
-    # Add market prefix if missing: 6xx→sh, 0xx/3xx→sz
-    def add_prefix(c: str) -> str:
-        if c.startswith(("sh", "sz")):
-            return c
-        if c.startswith("6"):
-            return "sh" + c
-        return "sz" + c
-
-    # Batch query 50 at a time via Tencent API
     for i in range(0, len(code_list), 50):
         batch = [add_prefix(c) for c in code_list[i:i+50]]
-        # Build a mapping from raw 6-digit code back to the prefixed code we sent
-        raw_to_sent = {}
-        for sent in batch:
-            raw_code = sent[2:] if sent.startswith(("sh", "sz")) else sent
-            raw_to_sent[raw_code] = sent
-        url = f"https://qt.gtimg.cn/q={','.join(batch)}"
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("gbk", errors="replace")
-            for line in text.strip().split(";"):
-                line = line.strip()
-                if not line or "=" not in line:
-                    continue
-                key = line.split("=")[0].split("_")[-1]
-                raw = line.split('"')[1] if '"' in line else ""
-                if not raw:
-                    continue
-                fields = raw.split("~")
-                if len(fields) < 48:
-                    continue
-                # Use the original prefixed code from the request
-                raw_code = fields[2]
-                code = raw_to_sent.get(raw_code, ("sh" if raw_code.startswith("6") else "sz") + raw_code)
-                try:
-                    price = float(fields[3]) if fields[3] else 0
-                    change_pct = float(fields[32]) if fields[32] else 0
-                    prev_close = float(fields[4]) if fields[4] else 0
-                    open_price = float(fields[5]) if fields[5] else 0
-                    high = float(fields[33]) if fields[33] else 0
-                    low = float(fields[34]) if fields[34] else 0
-                    volume = float(fields[6]) if fields[6] else 0
-                except (ValueError, IndexError):
-                    continue
-                results[code] = {
-                    "name": fields[1],
-                    "price": price,
-                    "change_pct": change_pct,
-                    "prev_close": prev_close,
-                    "open": open_price,
-                    "high": high,
-                    "low": low,
-                    "volume": volume,
+            quotes = fetch_detail(batch)
+            for full_code, q in quotes.items():
+                results[full_code] = {
+                    "name": q["name"],
+                    "price": q["price"],
+                    "change_pct": q["change_pct"],
+                    "prev_close": q["prev_close"],
+                    "open": q["open"],
+                    "high": q["high"],
+                    "low": q["low"],
+                    "volume": q["volume"],
                 }
         except Exception:
             continue
@@ -1178,35 +1131,44 @@ def search_news(q: str = "", stock_code: str = "") -> dict:
 
 @router.get("/sectors/momentum")
 def sector_momentum() -> dict:
-    """Get sector momentum rankings."""
+    """Get sector momentum via Tencent industry index quotes (no DB dependency)."""
+    # Tencent深证行业板块指数 sz3992xx
+    SECTOR_CODES = [
+        ("sz399231", "农林牧渔"), ("sz399232", "采矿"), ("sz399233", "制造"),
+        ("sz399234", "水电燃气"), ("sz399235", "建筑"), ("sz399236", "批发零售"),
+        ("sz399237", "交通运输"), ("sz399238", "餐饮住宿"), ("sz399239", "信息技术"),
+        ("sz399240", "金融"), ("sz399241", "房地产"), ("sz399242", "商务服务"),
+        ("sz399243", "科研服务"), ("sz399244", "公共管理"), ("sz399248", "文化体育"),
+    ]
+    codes_str = ",".join(c for c, _ in SECTOR_CODES)
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from sector_utils import calc_sector_momentum
-
-        # Use latest trading date
-        db = _get_db()
-        if db is None:
-            return {"sectors": []}
-        try:
-            cur = db.cursor()
+        url = f"https://qt.gtimg.cn/q={codes_str}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            text = resp.read().decode("gbk", errors="replace")
+        sectors = []
+        for line in text.strip().split(";"):
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            raw = line.split('"')[1] if '"' in line else ""
+            if not raw or "pv_none" in raw:
+                continue
+            fields = raw.split("~")
+            if len(fields) < 33:
+                continue
             try:
-                cur.execute("SELECT date FROM daily_kline LIMIT 1")
-                date_col = "date"
-            except Exception:
-                date_col = "trade_date"
-            cur.execute(f"SELECT MAX({date_col}) FROM daily_kline")
-            latest = cur.fetchone()[0]
-        finally:
-            db.close()
-
-        if not latest:
-            return {"sectors": []}
-
-        momentum = calc_sector_momentum(str(latest))
-        sorted_sectors = sorted(momentum.items(), key=lambda x: x[1], reverse=True)
-        return {"sectors": [{"name": s, "momentum": round(m, 4)} for s, m in sorted_sectors]}
-    except Exception as e:
-        return {"sectors": [], "error": str(e)}
+                change_pct = float(fields[32])
+            except (ValueError, IndexError):
+                continue
+            # Match name from SECTOR_CODES lookup
+            tencent_code = "sz" + fields[2]
+            name = next((n for c, n in SECTOR_CODES if c == tencent_code), fields[1])
+            sectors.append({"name": name, "momentum": round(change_pct / 100, 4)})
+        sectors.sort(key=lambda x: x["momentum"], reverse=True)
+        return {"sectors": sectors}
+    except Exception:
+        return {"sectors": []}
 
 
 @router.get("/sectors/stocks")
