@@ -215,6 +215,8 @@ def remove_expectation(data: dict):
 @router.post("/expectations/collect-auction")
 def collect_auction():
     """Collect auction data for all expectation stocks via Tencent API."""
+    from utils.tencent_quotes import fetch_detail, add_prefix
+
     state = _read_json(_PAPER_DIR / "expectation_state.json")
     positions = state.get("positions", [])
     if not positions:
@@ -224,53 +226,23 @@ def collect_auction():
     if not codes:
         return {"stocks": []}
 
-    # Batch fetch from Tencent
+    data = fetch_detail(codes)
+    prefixed = {code: add_prefix(code) for code in data}
+    raw_to_code = {v: k for k, v in prefixed.items()}
+
     results = []
-    import urllib.request
-    for i in range(0, len(codes), 50):
-        batch = codes[i:i+50]
-        url = f"https://qt.gtimg.cn/q={','.join(batch)}"
-        try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("gbk", errors="replace")
-            for line in text.strip().split(";"):
-                line = line.strip()
-                if not line or "=" not in line:
-                    continue
-                raw = line.split('"')[1] if '"' in line else ""
-                if not raw:
-                    continue
-                fields = raw.split("~")
-                if len(fields) < 48:
-                    continue
-                code_field = fields[2]
-                if code_field.startswith("6") or code_field.startswith("000"):
-                    code = "sh" + code_field
-                else:
-                    code = "sz" + code_field
-
-                name = fields[1]
-                price = float(fields[3]) if fields[3] else 0
-                prev_close = float(fields[4]) if fields[4] else 0
-                change_pct = float(fields[32]) if fields[32] else 0
-
-                # Auction vol (use volume as proxy)
-                today_vol = int(fields[6]) if fields[6] else 0
-                prev_vol = int(fields[36]) if fields[36] else 0
-                vol_ratio = prev_vol > 0 and today_vol > 0 and today_vol / prev_vol or 0
-
-                results.append({
-                    "code": code,
-                    "name": name,
-                    "auction_price": price,
-                    "auction_change_pct": change_pct,
-                    "today_vol": today_vol,
-                    "prev_vol": prev_vol,
-                    "vol_ratio": round(vol_ratio, 2),
-                })
-        except Exception:
-            continue
+    for raw_code, q in data.items():
+        code = add_prefix(raw_code)
+        vol_ratio = q["prev_volume"] > 0 and q["volume"] > 0 and q["volume"] / q["prev_volume"] or 0
+        results.append({
+            "code": code,
+            "name": q["name"],
+            "auction_price": q["price"],
+            "auction_change_pct": q["change_pct"],
+            "today_vol": int(q["volume"]),
+            "prev_vol": q["prev_volume"],
+            "vol_ratio": round(vol_ratio, 2),
+        })
 
     return {"stocks": results}
 
@@ -597,13 +569,10 @@ def get_market_overview() -> dict:
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        cur = db.cursor()
-        try:
-            cur.execute("SELECT date FROM daily_kline LIMIT 1")
-            date_col = "date"
-        except Exception:
-            date_col = "trade_date"
+        from utils.config import get_date_col
+        date_col, _ = get_date_col()
 
+        cur = db.cursor()
         cur.execute(f"SELECT MAX({date_col}) FROM daily_kline")
         latest = cur.fetchone()[0]
         if not latest:
@@ -927,12 +896,8 @@ def get_watchlist_auction(codes: str = "") -> dict:
         # Yesterday trading volume from daily_kline
         prev_vol_map = {}
         if prev_date:
-            # Detect date column
-            try:
-                db.execute("SELECT date FROM daily_kline LIMIT 1")
-                date_col = "date"
-            except Exception:
-                date_col = "trade_date"
+            from utils.config import get_date_col
+            date_col, _ = get_date_col()
 
             kline_rows = db.execute(
                 f"SELECT code, volume FROM daily_kline WHERE {date_col}=? AND code IN ({placeholders})",
