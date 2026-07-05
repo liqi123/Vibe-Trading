@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Target, Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper } from "lucide-react";
+import { Target, Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign } from "lucide-react";
 
 const TOOLS = [
   {
@@ -71,6 +71,34 @@ const TOOLS = [
     title: "新闻查询",
     desc: "多源新闻聚合，关键词搜索和个股新闻查询",
     color: "text-cyan-500",
+  },
+  {
+    to: "/auction-board",
+    icon: BarChart3,
+    title: "集合竞价看板",
+    desc: "每日竞价量能排行、竞价占比监控、多日竞价对比分析",
+    color: "text-violet-500",
+  },
+  {
+    to: "/stock-analysis",
+    icon: LineChart,
+    title: "个股深度分析",
+    desc: "斐波那契价位、技术指标、摆动周期、K线数据一站式分析",
+    color: "text-rose-500",
+  },
+  {
+    to: "/market-ladder",
+    icon: Layers,
+    title: "连板梯队",
+    desc: "涨停板高度与题材聚类，识别市场龙头与资金进攻方向",
+    color: "text-red-500",
+  },
+  {
+    to: "/volume-rank",
+    icon: DollarSign,
+    title: "成交额排行",
+    desc: "全市场成交额TOP 50，按行业聚类分析主力资金流向",
+    color: "text-blue-500",
   },
 ];
 

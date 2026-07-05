@@ -1,5 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import { RefreshCw, TrendingUp, Wallet, BookOpen, BarChart3, FileText } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+
+function localDate(date?: Date): string {
+  const d = date || new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 
 interface MarketStats {
   total: number; up: number; down: number; flat: number;
@@ -64,11 +71,12 @@ function PosCard({ title, state, color }: { title: string; state: PaperState | n
       {positions.length > 0 && (
         <div className="space-y-1.5">
           {positions.map((p) => {
-            const pnl = p.shares > 0 ? ((p.current_price || p.buy_price) - p.cost / p.shares) / (p.cost / p.shares) : 0;
+            const avgCost = p.shares > 0 ? p.cost / p.shares : 0;
+            const pnl = avgCost > 0 ? ((p.current_price || p.buy_price) - avgCost) / avgCost : 0;
             return (
               <div key={p.code} className="flex items-center justify-between text-xs py-1 border-b last:border-0">
                 <span className="font-mono">{p.code} {p.name}</span>
-                <span className="text-muted-foreground">{(p.cost / p.shares).toFixed(2)} → {p.current_price.toFixed(2)}</span>
+                <span className="text-muted-foreground">{avgCost.toFixed(2)} → {(p.current_price || 0).toFixed(2)}</span>
                 <span className={`font-medium ${pnlClass(pnl)}`}>{(pnl * 100).toFixed(1)}%</span>
               </div>
             );
@@ -91,6 +99,21 @@ export function DailyReview() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [report, setReport] = useState<string | null>(null);
+
+  useEffect(() => {
+    const today = localDate();
+    const ctrl = new AbortController();
+    fetch(`/tools/review-report?date=${today}`, { signal: ctrl.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.content) setReport(d.content); })
+      .catch(() => {
+        if (!ctrl.signal.aborted) {
+          const cached = localStorage.getItem(`review_report_${today}`);
+          if (cached) setReport(cached);
+        }
+      });
+    return () => ctrl.abort();
+  }, []);
 
   const fetchAll = async () => {
     setLoading(true);
@@ -116,7 +139,7 @@ export function DailyReview() {
         ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
         ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
       ]);
-    } catch { /* ignore */ }
+    } catch (e) { console.error("DailyReview fetchAll", e); }
     setLoading(false);
   };
 
@@ -133,12 +156,15 @@ export function DailyReview() {
       const resp = await fetch("/tools/run-script", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script: "review" }),
+        body: JSON.stringify({ script: "review_v5" }),
       });
-      if (!resp.ok) { setReport("调用失败: " + resp.statusText); setGenerating(false); return; }
+      if (!resp.ok) {
+        await loadExistingReport();
+        setGenerating(false);
+        return;
+      }
       const { task_id } = await resp.json();
 
-      // Poll for completion
       let output = "";
       for (let i = 0; i < 120; i++) {
         await new Promise(r => setTimeout(r, 2000));
@@ -149,15 +175,41 @@ export function DailyReview() {
         if (output.includes("执行完成") || output.includes("错误") || output.includes("超时")) break;
       }
 
-      // Strip header line like "[HH:MM:SS] 执行完成 (exit=0)\n\n"
       const body = output.replace(/^\[.*?\] 执行完成 \(exit=\d+\)\s*\n\n?/, "").trim();
-      setReport(body || output);
-    } catch (e: any) {
-      setReport("异常: " + (e?.message || String(e)));
+      const result = body || output;
+
+      if (!result || result.includes("401") || result.includes("Unauthorized") || result.includes("查询失败")) {
+        await loadExistingReport();
+      } else {
+        setReport(result);
+        const today = localDate();
+        localStorage.setItem(`review_report_${today}`, result);
+      }
+    } catch (e) {
+      await loadExistingReport();
     } finally {
       setGenerating(false);
     }
   }, []);
+
+  // 从后端加载已有的复盘报告
+  const loadExistingReport = async () => {
+    try {
+      const today = localDate();
+      const r = await fetch(`/tools/review-report?date=${today}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (d?.content) {
+          setReport(d.content);
+          localStorage.setItem(`review_report_${today}`, d.content);
+          return;
+        }
+      }
+      const cached = localStorage.getItem(`review_report_${today}`);
+      if (cached) { setReport(cached); return; }
+      setReport("生成失败，且无已有报告可展示");
+    } catch { /* ignore */ }
+  };
 
   const todayTrades = journal.filter(t => t.action === "sell" || t.action === "buy");
   const sells = todayTrades.filter(t => t.action === "sell");
@@ -177,11 +229,6 @@ export function DailyReview() {
           <p className="text-sm text-muted-foreground mt-1">今日市场、持仓回顾、交易统计</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={generateReport} disabled={generating || loading}
-            className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50">
-            <FileText className={`h-4 w-4 ${generating ? "animate-pulse" : ""}`} />
-            {generating ? "生成中..." : "生成复盘报告"}
-          </button>
           <button onClick={fetchAll} disabled={loading}
             className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted disabled:opacity-50">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
@@ -352,23 +399,42 @@ export function DailyReview() {
       )}
 
       {/* Report */}
-      {report && (
-        <div className="border rounded-lg bg-card overflow-hidden">
-          <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-            <h2 className="font-semibold flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              复盘报告
-            </h2>
-            <div className="flex items-center gap-2">
-              <button onClick={() => {
-                navigator.clipboard.writeText(report);
-              }} className="text-xs text-muted-foreground hover:text-foreground">复制</button>
-              <button onClick={() => setReport(null)} className="text-xs text-muted-foreground hover:text-foreground">关闭</button>
+      <div className="border rounded-lg bg-card overflow-hidden">
+        <div className="px-4 py-3 border-b flex items-center justify-between">
+          <h2 className="font-semibold flex items-center gap-2">
+            <FileText className="h-4 w-4" />
+            复盘报告
+          </h2>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={generateReport}
+              disabled={generating}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${generating ? "animate-spin" : ""}`} />
+              {generating ? "生成中..." : (report ? "生成新报告" : "生成")}
+            </button>
+          </div>
+        </div>
+        {report ? (
+          <div className="relative">
+            <button
+              onClick={() => { navigator.clipboard.writeText(report); }}
+              className="absolute top-2 right-2 z-10 text-xs px-2 py-1 border rounded hover:bg-muted"
+            >
+              复制
+            </button>
+            <div className="p-4 text-sm overflow-auto max-h-[600px] leading-relaxed prose prose-sm dark:prose-invert max-w-none">
+              <ReactMarkdown rehypePlugins={[rehypeHighlight]}>{report}</ReactMarkdown>
             </div>
           </div>
-          <pre className="p-4 text-sm overflow-auto max-h-[600px] whitespace-pre-wrap font-mono leading-relaxed">{report}</pre>
-        </div>
-      )}
+        ) : (
+          <div className="p-8 text-center text-muted-foreground">
+            <FileText className="h-8 w-8 mx-auto mb-2 opacity-40" />
+            <p className="text-sm">点击上方「生成」按钮生成今日复盘报告</p>
+          </div>
+        )}
+      </div>
 
       {todayTrades.length === 0 && closedTrades.length === 0 && (
         <div className="text-center py-12 text-muted-foreground">

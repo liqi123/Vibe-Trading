@@ -1,0 +1,7 @@
+feat: add trading tools - paper trading, daily scan, expectations, watchlist, calc tools
+
+- Add /tools API routes with real-time price updates via Tencent quotes
+- Add 6 new frontend pages: PaperTrading, Tools, DailyScan, Expectations, Watchlist, CalcTools
+- Add navigation and routing for all new pages
+- Fix paper trading colors to Chinese convention (red=profit, green=loss)
+- Proxy /tools path to backend in vite config

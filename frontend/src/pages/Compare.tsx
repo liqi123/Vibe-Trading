@@ -213,7 +213,7 @@ export function Compare() {
       setRuns(Array.isArray(items) ? items : []);
       if (items.length >= 2) { setLeftId(items[1].run_id); setRightId(items[0].run_id); }
       else if (items.length === 1) { setLeftId(items[0].run_id); }
-    }).catch(() => {});
+    }).catch((e) => console.error("fetch runs", e));
   }, []);
 
   useEffect(() => {

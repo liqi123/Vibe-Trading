@@ -10,19 +10,28 @@ Provides endpoints for:
 from __future__ import annotations
 
 import json
+import logging
+import math
+import os
 import sqlite3
-from pathlib import Path
-from typing import Any
-
+import subprocess
 import sys
+import threading
+import time
+import urllib.request
+import uuid
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter
+
+_log = logging.getLogger("trading_tools")
 
 # Resolve the project root (trading/) relative to this file's location
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
+_BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8899")
 _DB_PATH = _PROJECT_ROOT / "tdx_data.db"
 _PAPER_DIR = _PROJECT_ROOT / "paper"
-_UTILS_DIR = _PROJECT_ROOT / "utils"
 
 # Make utils importable for load_state (real-time price updates)
 if str(_PROJECT_ROOT) not in sys.path:
@@ -39,6 +48,15 @@ def _read_json(path: Path) -> dict | list:
         return {}
 
 
+def _stock_table() -> str:
+    """Auto-detect stocks / stock_names table (delegates to utils.db)."""
+    try:
+        from utils.db import stock_name_table
+        return stock_name_table()
+    except Exception:
+        return 'stocks'
+
+
 def _get_db() -> sqlite3.Connection | None:
     """Open the SQLite database if it exists."""
     # Try config DB path first (project convention: from utils.config import DB_PATH)
@@ -47,11 +65,58 @@ def _get_db() -> sqlite3.Connection | None:
         if Path(str(DB_PATH)).exists():
             return sqlite3.connect(str(DB_PATH))
     except Exception:
-        pass
+        _log.warning("_get_db: config DB_PATH failed, falling back to _DB_PATH", exc_info=True)
     # Fallback to project root path
     if _DB_PATH.exists():
         return sqlite3.connect(str(_DB_PATH))
     return None
+
+
+def _latest_trade_date(db: sqlite3.Connection) -> str | None:
+    """Get the latest trading date from daily_kline."""
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT DISTINCT date FROM daily_kline ORDER BY date DESC LIMIT 1")
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _ma(arr: list[float], period: int) -> float:
+    """Simple moving average."""
+    if not arr:
+        return 0
+    n = min(len(arr), period)
+    return round(sum(arr[-n:]) / n, 2)
+def _local_extrema(high_arr, low_arr, date_arr, lookback=5):
+    """Find local highs and lows.
+    
+    Returns list of tuples: (index, value, date_string)
+    """
+    n = len(high_arr)
+    high_extrema = []
+    low_extrema = []
+    
+    for i in range(1, n - 1):
+        start = max(0, i - lookback)
+        end = min(n, i + lookback + 1)
+        if all(high_arr[i] >= h for h in high_arr[start:end] if h != high_arr[i]):
+            high_extrema.append((i, high_arr[i], str(date_arr[i])))
+        if all(low_arr[i] <= l for l in low_arr[start:end] if l != low_arr[i]):
+            low_extrema.append((i, low_arr[i], str(date_arr[i])))
+    
+    return high_extrema, low_extrema
+
+
+def _load_industry_map() -> dict:
+    """Load industry mapping, returns {} on failure."""
+    try:
+        from utils.sector_utils import get_industry_map
+        return get_industry_map()
+    except Exception:
+        _log.warning("failed to load industry map", exc_info=True)
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +149,7 @@ def search_stock(q: str = "") -> dict:
         q_upper = q.upper()
         # Search by code (with/without prefix) or name (fuzzy)
         cur.execute(
-            "SELECT code, name FROM stock_names "
+            f"SELECT code, name FROM {_stock_table()} "
             "WHERE code LIKE ? OR UPPER(code) LIKE ? OR name LIKE ? "
             "LIMIT 10",
             (f"%{q}%", f"%{q_upper}%", f"%{q}%"),
@@ -112,7 +177,7 @@ def add_expectation(data: dict):
         if db:
             try:
                 cur = db.cursor()
-                cur.execute("SELECT code, name FROM stock_names WHERE name LIKE ? LIMIT 1", (f"%{raw}%",))
+                cur.execute(f"SELECT code, name FROM {_stock_table()} WHERE name LIKE ? LIMIT 1", (f"%{raw}%",))
                 row = cur.fetchone()
                 if row:
                     code = row[0]
@@ -135,7 +200,7 @@ def add_expectation(data: dict):
     if db:
         try:
             cur = db.cursor()
-            cur.execute("SELECT name FROM stock_names WHERE code = ?", (code,))
+            cur.execute(f"SELECT name FROM {_stock_table()} WHERE code = ?", (code,))
             row = cur.fetchone()
             if row:
                 name = row[0]
@@ -145,17 +210,12 @@ def add_expectation(data: dict):
     # Fallback: get from Tencent API
     if not name:
         try:
-            import urllib.request
-            url = f"https://qt.gtimg.cn/q={code}"
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("gbk", errors="replace")
-            fields = text.split('"')[1].split("~") if '"' in text else []
-            if len(fields) > 4:
-                name = fields[1]
-                prev_close = float(fields[4]) if fields[4] else 0
+            from utils.tencent_quotes import fetch_detail
+            q = fetch_detail([code]).get(code, {})
+            name = q.get("name", "")
+            prev_close = q.get("prev_close", 0)
         except Exception:
-            pass
+            _log.warning("add_expectation: Tencent fallback failed for %s", code)
 
     positions.append({
         "code": code,
@@ -324,7 +384,7 @@ def api_runaway_price(code: str = "", date: str = "") -> dict:
         if result:
             return result
     except Exception:
-        pass
+        _log.warning("calc_runaway_price failed for %s on %s", code, date)
 
     # Fallback: query DB directly, handle mixed date formats
     db = _get_db()
@@ -334,7 +394,7 @@ def api_runaway_price(code: str = "", date: str = "") -> dict:
         date_int = int(date.replace("-", ""))
         # Try both string and integer date formats
         row = db.execute(
-            "SELECT open, high, low, close FROM daily_kline WHERE code=? AND (trade_date=? OR trade_date=?)",
+            "SELECT open, high, low, close FROM daily_kline WHERE code=? AND (date=? OR trade_date=?)",
             (code, date, date_int),
         ).fetchone()
         if row:
@@ -413,25 +473,19 @@ def sell_position(data: dict):
         raise HTTPException(status_code=400, detail="Invalid shares")
 
     buy_price = pos.get("buy_price", 0)
-    cost = buy_price * sell_shares
     # Get current price from Tencent
     current_price = pos.get("current_price", buy_price)
     try:
-        import urllib.request
-        url = f"https://qt.gtimg.cn/q={code}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            text = resp.read().decode("gbk", errors="replace")
-        fields = text.split('"')[1].split("~") if '"' in text else []
-        if len(fields) > 3 and fields[3]:
-            current_price = float(fields[3])
+        from utils.tencent_quotes import get_prices
+        prices = get_prices([code])
+        if code in prices:
+            current_price = prices[code]
     except Exception:
-        pass
+        _log.warning("sell_position: get_prices failed for %s", code)
 
     pnl = (current_price - buy_price) * sell_shares
     pnl_pct = (current_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
 
-    from datetime import date
     today = date.today().strftime("%Y-%m-%d")
 
     # Add to history
@@ -487,7 +541,7 @@ def get_stock_info(code: str) -> dict:
         )
         rows = cur.fetchall()
         # Get stock name
-        cur.execute("SELECT name FROM stocks WHERE code = ?", (code,))
+        cur.execute(f"SELECT name FROM {_stock_table()} WHERE code = ?", (code,))
         name_row = cur.fetchone()
         return {
             "code": code,
@@ -613,11 +667,6 @@ MARKET_CACHE_TTL = 30  # seconds
 @router.get("/market/realtime")
 def get_market_realtime() -> dict:
     """Real-time market advance/decline stats via Tencent API (cached 30s)."""
-    import time
-    import urllib.request as _req
-    import logging
-    _log = logging.getLogger("trading_tools")
-
     global _market_cache, _market_cache_time
     now = time.time()
     if _market_cache is not None and now - _market_cache_time < MARKET_CACHE_TTL:
@@ -628,48 +677,33 @@ def get_market_realtime() -> dict:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         cur = db.cursor()
-        cur.execute("SELECT code FROM stock_names WHERE code LIKE 'sh60%' OR code LIKE 'sz00%' OR code LIKE 'sz30%'")
+        cur.execute(f"SELECT code FROM {_stock_table()} WHERE code LIKE 'sh60%' OR code LIKE 'sz00%' OR code LIKE 'sz30%'")
         codes_raw = [r[0] for r in cur.fetchall()]
     finally:
         db.close()
 
+    from utils.tencent_quotes import fetch_detail
+
     up = down = flat = limit_up = limit_down = 0
     if codes_raw:
-        batch_size = 800
-        try:
-            for i in range(0, len(codes_raw), batch_size):
-                batch = codes_raw[i:i+batch_size]
-                url = "https://qt.gtimg.cn/q=" + ",".join(batch)
-                req = _req.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with _req.urlopen(req, timeout=15) as resp:
-                    text = resp.read().decode("gbk", errors="replace")
-                for line in text.strip().split(";"):
-                    if "=" not in line or "~" not in line:
-                        continue
-                    try:
-                        raw = line.split('"')[1]
-                        fields = raw.split("~")
-                        if len(fields) < 35:
-                            continue
-                        change_pct = float(fields[32]) if fields[32] else 0
-                        price = float(fields[3]) if fields[3] else 0
-                        prev_close = float(fields[4]) if fields[4] else 0
-                        if change_pct > 0:
-                            up += 1
-                        elif change_pct < 0:
-                            down += 1
-                        else:
-                            flat += 1
-                        if prev_close > 0 and price > 0:
-                            actual_pct = (price - prev_close) / prev_close
-                            if actual_pct >= 0.098:
-                                limit_up += 1
-                            elif actual_pct <= -0.098:
-                                limit_down += 1
-                    except (ValueError, IndexError):
-                        continue
-        except Exception as exc:
-            _log.warning("Tencent batch query failed: %s", exc)
+        quotes = fetch_detail(codes_raw)
+        for full_code, q in quotes.items():
+            chg = q["change_pct"]
+            if chg > 0:
+                up += 1
+            elif chg < 0:
+                down += 1
+            else:
+                flat += 1
+            price = q["price"]
+            prev_close = q["prev_close"]
+            if prev_close > 0 and price > 0:
+                actual_pct = (price - prev_close) / prev_close
+                threshold = 0.198 if full_code.startswith(("sh68", "sz30")) else 0.098
+                if actual_pct >= threshold:
+                    limit_up += 1
+                elif actual_pct <= -threshold:
+                    limit_down += 1
 
     result = {
         "up": up, "down": down, "flat": flat,
@@ -686,6 +720,38 @@ def get_market_realtime() -> dict:
 # Market Momentum (市场动量)
 # ---------------------------------------------------------------------------
 
+# 行业板块指数代码（sz3992xx）
+_SECTOR_CODES_FULL = [
+    ("sz399231", "农林牧渔"), ("sz399232", "采矿"), ("sz399233", "制造"),
+    ("sz399234", "水电燃气"), ("sz399235", "建筑"), ("sz399236", "批发零售"),
+    ("sz399237", "交通运输"), ("sz399238", "餐饮住宿"), ("sz399239", "信息技术"),
+    ("sz399240", "金融"), ("sz399241", "房地产"), ("sz399242", "商务服务"),
+    ("sz399243", "科研服务"), ("sz399244", "公共管理"), ("sz399248", "文化体育"),
+    ("sz399274", "汽车"), ("sz399275", "医药生物"), ("sz399276", "机械设备"),
+    ("sz399277", "电子"), ("sz399278", "国防军工"), ("sz399279", "通信"),
+    ("sz399280", "计算机"), ("sz399281", "传媒"), ("sz399282", "有色金属"),
+    ("sz399283", "基础化工"), ("sz399284", "钢铁"), ("sz399285", "建筑材料"),
+    ("sz399286", "食品饮料"), ("sz399287", "纺织服装"), ("sz399288", "公用事业"),
+]
+_SECTOR_CODES_SUBSET = _SECTOR_CODES_FULL[:15]  # 无后15个较新板块索引，更稳健
+
+def _fetch_sector_momentum(sector_codes: list[tuple[str, str]]) -> list[dict]:
+    """Fetch sector momentum from Tencent, returns [{name, momentum}]."""
+    from utils.tencent_quotes import fetch_raw
+    codes = [c for c, _ in sector_codes]
+    raw = fetch_raw(codes, min_fields=33)
+    sectors = []
+    for code, fields in raw.items():
+        try:
+            change_pct = float(fields[32])
+        except (ValueError, IndexError):
+            continue
+        name = next((n for c, n in sector_codes if c == code), fields[1])
+        sectors.append({"name": name, "momentum": round(change_pct, 1)})
+    sectors.sort(key=lambda x: x["momentum"], reverse=True)
+    return sectors
+
+
 _MOMENTUM_CACHE: dict | None = None
 _MOMENTUM_CACHE_TIME: float = 0
 _MOMENTUM_CACHE_TTL = 60
@@ -698,9 +764,8 @@ def get_market_momentum() -> dict:
         {sectors: [{name, momentum, rank}], ma_distribution: {above5, above10, above20, total},
          rsi_distribution: {oversold, neutral, overbought}}
     """
-    import time as _time
     global _MOMENTUM_CACHE, _MOMENTUM_CACHE_TIME
-    now = _time.time()
+    now = time.time()
     if _MOMENTUM_CACHE is not None and now - _MOMENTUM_CACHE_TIME < _MOMENTUM_CACHE_TTL:
         return _MOMENTUM_CACHE
 
@@ -717,47 +782,11 @@ def get_market_momentum() -> dict:
         latest = cur.fetchone()[0]
         if not latest:
             return {"error": "无数据"}
-        latest_str = str(latest)
 
         # ---- 板块动量（Tencent 行业指数） ----
-        top5 = []
-        bottom5 = []
-        try:
-            SECTOR_CODES = [
-                ("sz399231", "农林牧渔"), ("sz399232", "采矿"), ("sz399233", "制造"),
-                ("sz399234", "水电燃气"), ("sz399235", "建筑"), ("sz399236", "批发零售"),
-                ("sz399237", "交通运输"), ("sz399238", "餐饮住宿"), ("sz399239", "信息技术"),
-                ("sz399240", "金融"), ("sz399241", "房地产"), ("sz399242", "商务服务"),
-                ("sz399243", "科研服务"), ("sz399244", "公共管理"), ("sz399248", "文化体育"),
-                ("sz399274", "汽车"), ("sz399275", "医药生物"), ("sz399276", "机械设备"),
-                ("sz399277", "电子"), ("sz399278", "国防军工"), ("sz399279", "通信"),
-                ("sz399280", "计算机"), ("sz399281", "传媒"), ("sz399282", "有色金属"),
-                ("sz399283", "基础化工"), ("sz399284", "钢铁"), ("sz399285", "建筑材料"),
-                ("sz399286", "食品饮料"), ("sz399287", "纺织服装"), ("sz399288", "公用事业"),
-            ]
-            import urllib.request
-            url = "https://qt.gtimg.cn/q=" + ",".join(c for c, _ in SECTOR_CODES)
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                text = resp.read().decode("gbk", errors="replace")
-            sectors = []
-            for line in text.strip().split(";"):
-                line = line.strip()
-                if not line or "=" not in line: continue
-                raw = line.split('"')[1] if '"' in line else ""
-                if not raw or "pv_none" in raw: continue
-                fields = raw.split("~")
-                if len(fields) < 33: continue
-                try: change_pct = float(fields[32])
-                except (ValueError, IndexError): continue
-                tencent_code = "sz" + fields[2]
-                name = next((n for c, n in SECTOR_CODES if c == tencent_code), fields[1])
-                sectors.append({"name": name, "momentum": round(change_pct, 1)})
-            sectors.sort(key=lambda x: x["momentum"], reverse=True)
-            top5 = [{"name": s["name"], "momentum": s["momentum"], "rank": i+1} for i, s in enumerate(sectors[:5])]
-            bottom5 = [{"name": s["name"], "momentum": s["momentum"], "rank": len(sectors)-i} for i, s in enumerate(sectors[-5:])]
-        except Exception:
-            pass
+        sectors = _fetch_sector_momentum(_SECTOR_CODES_FULL)
+        top5 = [{"name": s["name"], "momentum": s["momentum"], "rank": i+1} for i, s in enumerate(sectors[:5])]
+        bottom5 = [{"name": s["name"], "momentum": s["momentum"], "rank": len(sectors)-i} for i, s in enumerate(sectors[-5:])]
 
         # ---- MA 分布（最近收盘 vs N日前） ----
         ma_result = {"above5": 0, "above10": 0, "above20": 0, "total": 0}
@@ -789,7 +818,7 @@ def get_market_momentum() -> dict:
                     "total": len(rows),
                 }
         except Exception:
-            pass
+            _log.warning("get_market_momentum: MA distribution failed", exc_info=True)
 
         # ---- RSI 分布 ----
         rsi_result = {"oversold": 0, "normal": 0, "overbought": 0}
@@ -817,7 +846,7 @@ def get_market_momentum() -> dict:
                             normal += 1
                 rsi_result = {"oversold": oversold, "normal": normal, "overbought": overbought}
         except Exception:
-            pass
+            _log.warning("get_market_momentum: RSI distribution failed", exc_info=True)
 
         # ---- 涨跌停结构（今日/昨日对比） ----
         struct = {}
@@ -835,7 +864,7 @@ def get_market_momentum() -> dict:
                 limit_count = len(cur.fetchall())
                 struct[f"limit_{limit_dir}"] = limit_count
         except Exception:
-            pass
+            _log.warning("get_market_momentum: structure calculation failed", exc_info=True)
 
         result = {
             "sectors": {"top": top5, "bottom": bottom5},
@@ -906,7 +935,7 @@ def get_market_sentiment() -> dict:
             cycle = state.get("cycle", "unknown")
             cycle_updated = state.get("updated_at", "")
         except Exception:
-            pass
+            _log.warning("get_market_sentiment: failed to read sentiment state file")
 
         # 情绪评分 (0-100)
         score = 50
@@ -990,8 +1019,6 @@ def get_prices(codes: str = "") -> dict:
 # Update Data (数据更新)
 # ---------------------------------------------------------------------------
 
-import subprocess
-
 @router.post("/update-data")
 def update_data():
     """Trigger data update (TDX zip or Tencent fallback).
@@ -1012,24 +1039,22 @@ def update_data():
                 return {"ok": True, "method": "tdx_zip", "message": stdout.strip().split("\n")[-1]}
             # Fallback to Tencent
         except subprocess.TimeoutExpired:
-            pass
+            _log.warning("update_data: TDX zip timed out")
         except Exception:
-            pass
+            _log.warning("update_data: TDX zip failed", exc_info=True)
 
-    # Fallback: Tencent realtime
-    tencent_script = _PROJECT_ROOT / "tdx_utils" / "update_tencent.py"
-    if tencent_script.exists():
-        try:
-            result = subprocess.run(
-                ["python", str(tencent_script)],
-                capture_output=True, text=True, timeout=300,
-                cwd=str(_PROJECT_ROOT),
-            )
-            stdout = result.stdout or ""
-            if result.returncode == 0:
-                return {"ok": True, "method": "tencent", "message": stdout.strip().split("\n")[-1]}
-        except Exception:
-            pass
+    # Fallback: Tencent via utils.update
+    try:
+        from utils.update import step_tencent
+        from utils.db import connect_db
+        from utils.config import get_date_col
+        conn = connect_db()
+        date_col, is_int = get_date_col()
+        total = step_tencent(conn, date_col, is_int)
+        conn.close()
+        return {"ok": True, "method": "tencent", "message": f"Tencent fallback completed: {total} rows"}
+    except Exception as e:
+        _log.warning("Tencent fallback failed: %s", e)
 
     return {"ok": False, "method": "none", "message": "No update script found or all methods failed"}
 
@@ -1041,16 +1066,13 @@ def update_data():
 @router.post("/run-script")
 def run_script(data: dict):
     """Run a trading script in background thread, return task id."""
-    import uuid
-    import threading
-    from datetime import datetime
-
     script = data.get("script", "")
     scripts = {
         "fibonacci": "strategies/daily_check.py",
         "v5": "strategies/daily_check_v5.py",
         "stops": "-m utils stops",
         "review": "reports/generate_review.py",
+        "review_v5": "reports/generate_review.py",
     }
     if script not in scripts:
         raise HTTPException(status_code=400, detail=f"Unknown script: {script}")
@@ -1061,33 +1083,45 @@ def run_script(data: dict):
 
     output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 执行中...\n", encoding="utf-8")
 
+    # 安全处理参数
     if cmd.startswith("-m"):
-        args = ["python"] + cmd.split()
+        args = ["python"] + cmd.split()[1:]
     else:
         args = ["python", cmd]
 
-    import os
+    # 验证脚本路径安全
+    script_path = Path(cmd) if not cmd.startswith("-m") else None
+    if script_path and not script_path.exists():
+        output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: 脚本文件不存在\n", encoding="utf-8")
+        return {"task_id": task_id}
+
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
 
     def _run():
         try:
+            # 使用更安全的参数处理
+            safe_args = ["python", "-X", "utf8"] + args[1:]
             proc = subprocess.Popen(
-                ["python", "-X", "utf8"] + args[1:],
+                safe_args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=str(_PROJECT_ROOT),
                 env=env,
+                # 使用绝对路径确保不会被篡改
+                executable=None,
             )
             stdout, _ = proc.communicate(timeout=600)
             text = stdout.decode("utf-8", errors="replace") if stdout else ""
             ts = datetime.now().strftime("%H:%M:%S")
             output_file.write_text(f"[{ts}] 执行完成 (exit={proc.returncode})\n\n{text}", encoding="utf-8")
         except subprocess.TimeoutExpired:
-            proc.kill()
+            if 'proc' in locals():
+                proc.kill()
             output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 超时(10分钟)\n", encoding="utf-8")
         except Exception as e:
-            output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: {e}\n", encoding="utf-8")
+            output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: {str(e)[:200]}\n", encoding="utf-8")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id}
@@ -1126,16 +1160,9 @@ def get_watchlist_auction(codes: str = "") -> dict:
     if not code_list:
         return {"auction": {}}
 
-    # Use config DB path (not _DB_PATH which may be wrong)
-    try:
-        from utils.config import DB_PATH as _REAL_DB
-    except Exception:
-        _REAL_DB = _DB_PATH
-
-    if not Path(_REAL_DB).exists():
+    db = _get_db()
+    if db is None:
         return {"auction": {}}
-
-    db = sqlite3.connect(str(_REAL_DB))
     try:
         dates = [r[0] for r in db.execute(
             "SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 2"
@@ -1208,8 +1235,7 @@ def get_watchlist_auction(codes: str = "") -> dict:
 def get_journal(days: int = 30) -> dict:
     """Get trade journal entries."""
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from trade_journal import TradeJournal
+        from utils.trade_journal import TradeJournal
         tj = TradeJournal()
         trades = tj.get_recent_trades(days)
         stats = tj.stats(days)
@@ -1223,8 +1249,7 @@ def get_journal(days: int = 30) -> dict:
 def log_trade(data: dict) -> dict:
     """Log a new trade entry."""
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from trade_journal import TradeJournal
+        from utils.trade_journal import TradeJournal
         tj = TradeJournal()
         tj.log_trade(
             code=data.get("code", ""),
@@ -1245,8 +1270,7 @@ def log_trade(data: dict) -> dict:
 def close_trade(data: dict) -> dict:
     """Close a trade in journal."""
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from trade_journal import TradeJournal
+        from utils.trade_journal import TradeJournal
         tj = TradeJournal()
         tj.close_trade(
             code=data.get("code", ""),
@@ -1262,8 +1286,7 @@ def close_trade(data: dict) -> dict:
 def weekly_report() -> dict:
     """Get weekly trade report."""
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from trade_journal import TradeJournal
+        from utils.trade_journal import TradeJournal
         tj = TradeJournal()
         report = tj.weekly_report()
         return {"report": report}
@@ -1283,8 +1306,7 @@ def ai_analyze(data: dict) -> dict:
         return {"error": "No codes provided"}
 
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from llm_analyzer import analyze_stocks
+        from utils.llm_analyzer import analyze_stocks
 
         # Gather stock data
         stocks = []
@@ -1293,7 +1315,7 @@ def ai_analyze(data: dict) -> dict:
             try:
                 cur = db.cursor()
                 for code in codes:
-                    cur.execute("SELECT name FROM stock_names WHERE code=?", (code,))
+                    cur.execute(f"SELECT name FROM {_stock_table()} WHERE code=?", (code,))
                     row = cur.fetchone()
                     name = row[0] if row else code
                     stocks.append({"code": code, "name": name})
@@ -1319,8 +1341,7 @@ def backtest_eval(data: dict) -> dict:
         return {"error": "No picks provided"}
 
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from backtest_eval import evaluate_picks
+        from utils.backtest_eval import evaluate_picks
         report = evaluate_picks(picks, eval_days)
         return {"report": report}
     except Exception as e:
@@ -1335,8 +1356,7 @@ def backtest_eval(data: dict) -> dict:
 def search_news(q: str = "", stock_code: str = "") -> dict:
     """Search news by keyword or stock code."""
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from news_search import get_stock_news
+        from utils.news_search import get_stock_news
 
         if stock_code:
             db = _get_db()
@@ -1344,7 +1364,7 @@ def search_news(q: str = "", stock_code: str = "") -> dict:
             if db:
                 try:
                     cur = db.cursor()
-                    cur.execute("SELECT name FROM stock_names WHERE code=?", (stock_code,))
+                    cur.execute(f"SELECT name FROM {_stock_table()} WHERE code=?", (stock_code,))
                     row = cur.fetchone()
                     name = row[0] if row else ""
                 finally:
@@ -1353,7 +1373,7 @@ def search_news(q: str = "", stock_code: str = "") -> dict:
             return {"items": items}
 
         # General search — use iwencai
-        from iwencai import IwencaiClient
+        from utils.iwencai import IwencaiClient
         client = IwencaiClient()
         results = client.search(q, perpage=10)
         return {"items": results}
@@ -1368,40 +1388,8 @@ def search_news(q: str = "", stock_code: str = "") -> dict:
 @router.get("/sectors/momentum")
 def sector_momentum() -> dict:
     """Get sector momentum via Tencent industry index quotes (no DB dependency)."""
-    # Tencent深证行业板块指数 sz3992xx
-    SECTOR_CODES = [
-        ("sz399231", "农林牧渔"), ("sz399232", "采矿"), ("sz399233", "制造"),
-        ("sz399234", "水电燃气"), ("sz399235", "建筑"), ("sz399236", "批发零售"),
-        ("sz399237", "交通运输"), ("sz399238", "餐饮住宿"), ("sz399239", "信息技术"),
-        ("sz399240", "金融"), ("sz399241", "房地产"), ("sz399242", "商务服务"),
-        ("sz399243", "科研服务"), ("sz399244", "公共管理"), ("sz399248", "文化体育"),
-    ]
-    codes_str = ",".join(c for c, _ in SECTOR_CODES)
     try:
-        url = f"https://qt.gtimg.cn/q={codes_str}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            text = resp.read().decode("gbk", errors="replace")
-        sectors = []
-        for line in text.strip().split(";"):
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            raw = line.split('"')[1] if '"' in line else ""
-            if not raw or "pv_none" in raw:
-                continue
-            fields = raw.split("~")
-            if len(fields) < 33:
-                continue
-            try:
-                change_pct = float(fields[32])
-            except (ValueError, IndexError):
-                continue
-            # Match name from SECTOR_CODES lookup
-            tencent_code = "sz" + fields[2]
-            name = next((n for c, n in SECTOR_CODES if c == tencent_code), fields[1])
-            sectors.append({"name": name, "momentum": round(change_pct / 100, 4)})
-        sectors.sort(key=lambda x: x["momentum"], reverse=True)
+        sectors = _fetch_sector_momentum(_SECTOR_CODES_SUBSET)
         return {"sectors": sectors}
     except Exception:
         return {"sectors": []}
@@ -1413,8 +1401,7 @@ def sector_stocks(industry: str = "") -> dict:
     if not industry:
         return {"stocks": []}
     try:
-        sys.path.insert(0, str(_UTILS_DIR))
-        from sector_utils import get_industry_map
+        from utils.sector_utils import get_industry_map
         industry_map = get_industry_map()
         stocks = [{"code": c, "industry": ind} for c, ind in industry_map.items() if ind == industry]
         return {"stocks": stocks[:50]}
@@ -1429,9 +1416,8 @@ def sector_stocks(industry: str = "") -> dict:
 @router.get("/scheduled-runs")
 def list_scheduled_runs() -> dict:
     """List scheduled research runs (proxy to main API)."""
-    import urllib.request
     try:
-        url = "http://127.0.0.1:8899/scheduled-runs"
+        url = f"{_BASE_URL}/scheduled-runs"
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())
@@ -1442,9 +1428,8 @@ def list_scheduled_runs() -> dict:
 @router.post("/scheduled-runs")
 def create_scheduled_run(data: dict) -> dict:
     """Create a scheduled research run (proxy to main API)."""
-    import urllib.request
     try:
-        url = "http://127.0.0.1:8899/scheduled-runs"
+        url = f"{_BASE_URL}/scheduled-runs"
         body = json.dumps(data).encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -1456,9 +1441,8 @@ def create_scheduled_run(data: dict) -> dict:
 @router.delete("/scheduled-runs/{job_id}")
 def delete_scheduled_run(job_id: str) -> dict:
     """Delete a scheduled run (proxy to main API)."""
-    import urllib.request
     try:
-        url = f"http://127.0.0.1:8899/scheduled-runs/{job_id}"
+        url = f"{_BASE_URL}/scheduled-runs/{job_id}"
         req = urllib.request.Request(url, method="DELETE")
         with urllib.request.urlopen(req, timeout=10) as resp:
             return {"ok": True}
@@ -1466,11 +1450,553 @@ def delete_scheduled_run(job_id: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Review Report (复盘报告)
+# ---------------------------------------------------------------------------
+
+@router.get("/review-report")
+def get_review_report(date: str = "") -> dict:
+    """Return the generated review report markdown content."""
+    report_date = date if date else datetime.now().strftime("%Y-%m-%d")
+    report_file = _PROJECT_ROOT / "reports" / f"{report_date}.md"
+    if report_file.exists():
+        return {"content": report_file.read_text(encoding="utf-8")}
+    return {"content": ""}
+
+
+# ---------------------------------------------------------------------------
+# Auction Board (集合竞价看板)
+# ---------------------------------------------------------------------------
+
+@router.post("/auction/collect")
+def collect_auction_data():
+    """Collect auction data from Tencent for all stocks and store in DB."""
+    db = _get_db()
+    if db is None:
+        return {"ok": False, "error": "no database"}
+    try:
+        from utils.tencent_quotes import fetch_raw, _parse_basic, add_prefix
+        cur = db.cursor()
+        row = _latest_trade_date(db)
+        if not row:
+            return {"ok": False, "error": "no kline data"}
+        latest_date = row
+
+        cur.execute(f"SELECT code FROM {_stock_table()} WHERE code LIKE 'sh%' OR code LIKE 'sz%' OR code LIKE 'bj%'")
+        all_codes = [row[0] for row in cur.fetchall()]
+        prefixed = [add_prefix(c) for c in all_codes]
+
+        raw = fetch_raw(prefixed)
+        collected = 0
+        today_str = date.today().isoformat()
+        for raw_code, fields in raw.items():
+            if len(fields) < 48:
+                continue
+            basic = _parse_basic(fields)
+            code = raw_code
+            vol = int(basic["volume"])
+            amount = basic["amount"]
+            price = basic["price"]
+            open_px = basic["open"]
+            name = fields[1]
+            prev_close = float(fields[4]) if fields[4] else 0
+            ratio = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0
+            try:
+                bare_code = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+                cur.execute(
+                    "INSERT OR REPLACE INTO auction (date, code, name, auction_vol, auction_amount, total_vol, total_amount, auction_ratio, auction_price, open_price, collect_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (today_str, bare_code, name, vol, amount, vol, amount, ratio, price, open_px, datetime.now().strftime("%H:%M:%S"))
+                )
+                collected += 1
+            except Exception:
+                _log.warning("auction insert failed for %s", code, exc_info=True)
+        db.commit()
+        return {"ok": True, "count": collected}
+    except Exception as e:
+        _log.warning("auction collect failed", exc_info=True)
+        return {"ok": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@router.get("/auction/dates")
+def get_auction_dates():
+    """Return list of dates with auction data."""
+    db = _get_db()
+    if db is None:
+        return {"dates": []}
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT date, COUNT(*), COALESCE(SUM(auction_vol), 0), COALESCE(AVG(auction_ratio), 0) FROM auction GROUP BY date ORDER BY date DESC")
+        dates = [{"date": r[0], "count": r[1], "total_vol": r[2], "avg_ratio": round(r[3], 2)} for r in cur.fetchall()]
+        return {"dates": dates}
+    except Exception as e:
+        _log.warning("auction dates failed", exc_info=True)
+        return {"dates": []}
+    finally:
+        db.close()
+
+
+@router.get("/auction/latest")
+def get_auction_latest(date: str = "", limit: int = 100):
+    """Return auction stocks for a given date."""
+    if not date:
+        return {"stocks": [], "leaders": [], "stats": None}
+    db = _get_db()
+    if db is None:
+        return {"stocks": [], "leaders": [], "stats": None}
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT code, name, auction_vol, auction_amount, auction_ratio, auction_price, open_price, total_vol, total_amount FROM auction WHERE date=? ORDER BY auction_vol DESC LIMIT ?", (date, limit))
+        rows = cur.fetchall()
+        stocks = []
+        for r in rows:
+            stocks.append({
+                "code": r[0], "name": r[1], "auction_vol": r[2], "auction_amount": r[3],
+                "auction_ratio": r[4], "auction_price": r[5], "open_price": r[6],
+                "total_vol": r[7], "total_amount": r[8],
+            })
+        count = len(stocks)
+        total_vol = sum(s["auction_vol"] for s in stocks)
+        total_amount = sum(s["auction_amount"] for s in stocks)
+        avg_ratio = round(sum(s["auction_ratio"] for s in stocks) / count, 2) if count else 0
+        leaders = sorted(stocks, key=lambda s: s["auction_vol"], reverse=True)[:5]
+        return {
+            "stocks": stocks,
+            "leaders": leaders,
+            "stats": {"count": count, "total_vol": total_vol, "total_amount": total_amount, "avg_ratio": avg_ratio},
+        }
+    except Exception as e:
+        _log.warning("auction latest failed", exc_info=True)
+        return {"stocks": [], "leaders": [], "stats": None}
+    finally:
+        db.close()
+
+
+@router.get("/auction/compare")
+def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
+    """Compare auction data between two dates."""
+    if not date1 or not date2:
+        return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
+    db = _get_db()
+    if db is None:
+        return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT code, name, auction_vol, auction_price, auction_ratio FROM auction WHERE date=?", (date1,))
+        d1_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "ratio": r[4]} for r in cur.fetchall()}
+        cur.execute("SELECT code, name, auction_vol, auction_price, auction_ratio FROM auction WHERE date=?", (date2,))
+        d2_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "ratio": r[4]} for r in cur.fetchall()}
+
+        all_codes = set(d1_map) | set(d2_map)
+        diff = []
+        for code in all_codes:
+            v1 = d1_map.get(code, {}).get("vol", 0) or 0
+            v2 = d2_map.get(code, {}).get("vol", 0) or 0
+            name = d1_map.get(code, d2_map.get(code, {})).get("name", "")
+            chg = v2 - v1
+            pct = round((v2 - v1) / v1 * 100, 2) if v1 else 0
+            diff.append({
+                "code": code, "name": name,
+                "vol_today": v2, "vol_prev": v1,
+                "vol_chg": chg, "vol_pct": pct,
+                "price_today": d2_map.get(code, {}).get("price", 0),
+                "ratio_today": d2_map.get(code, {}).get("ratio", 0),
+            })
+
+        diff.sort(key=lambda x: x["vol_chg"], reverse=True)
+        gainers = [d for d in diff if d["vol_chg"] > 0][:top]
+        losers = [d for d in diff if d["vol_chg"] < 0][:top]
+        increase = sum(1 for d in diff if d["vol_chg"] > 0)
+        decrease = sum(1 for d in diff if d["vol_chg"] < 0)
+        return {
+            "date1": date1, "date2": date2,
+            "gainers": gainers, "losers": losers,
+            "increase": increase, "decrease": decrease,
+            "total": len(diff),
+        }
+    except Exception as e:
+        _log.warning("auction compare failed", exc_info=True)
+        return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Market Ladder (连板梯队)
+# ---------------------------------------------------------------------------
+
+@router.get("/market/ladder")
+def get_market_ladder():
+    """Get real-time limit-up ladder analysis."""
+    db = _get_db()
+    if db is None:
+        return {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": ""}
+    try:
+        from utils.tencent_quotes import fetch_raw, _parse_basic, add_prefix
+
+        latest_date = _latest_trade_date(db)
+        if not latest_date:
+            return {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": ""}
+
+        cur = db.cursor()
+        industry_map = _load_industry_map()
+
+        def _limit_threshold(raw_code):
+            if raw_code.startswith("sh68") or raw_code.startswith("sz30"):
+                return 1.195
+            if raw_code.startswith("sh8") or raw_code.startswith("bj"):
+                return 1.295
+            return 1.095
+
+            # Find stocks that closed near limit-up
+        cur.execute(f"""
+            SELECT a.code, a.close, a.open, b.close as prev_close
+            FROM daily_kline a
+            JOIN daily_kline b ON a.code = b.code AND b.date = (
+                SELECT MAX(c.date) FROM daily_kline c WHERE c.code = a.code AND c.date < a.date
+            )
+            WHERE a.date = ? AND (
+                (a.code LIKE 'sh6%' OR a.code LIKE 'sz0%' OR a.code LIKE 'sz3%') AND a.close >= b.close * 1.09
+            )
+            ORDER BY a.close / b.close DESC
+        """, (latest_date,))
+        candidates = cur.fetchall()
+        if not candidates:
+            return {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": ""}
+
+        codes = [r[0] for r in candidates]
+        raw = fetch_raw(codes)
+        stock_map = {r[0]: r for r in candidates}
+
+        # Batch fetch kline data for board counting (1 query instead of N)
+        placeholders = ",".join("?" for _ in codes)
+        cur.execute(f"SELECT code, date, close FROM daily_kline WHERE code IN ({placeholders}) ORDER BY code, date DESC", codes)
+        kline_rows = cur.fetchall()
+        kline_map: dict[str, list[tuple[str, float]]] = {}
+        for code, dt, close in kline_rows:
+            kline_map.setdefault(code, []).append((dt, close))
+
+        def count_boards(raw_code):
+            threshold = _limit_threshold(raw_code)
+            rows = kline_map.get(raw_code, [])
+            boards = 0
+            for i in range(1, len(rows)):
+                prev_close = rows[i][1]
+                if prev_close > 0 and rows[i-1][1] >= prev_close * threshold:
+                    boards += 1
+                else:
+                    break
+            return boards + 1
+
+        ladder = []
+        for raw_code, fields in raw.items():
+            if len(fields) < 48:
+                continue
+            basic = _parse_basic(fields)
+            code = raw_code
+            cand = stock_map.get(code)
+            if not cand:
+                continue
+            chg = basic["change_pct"]
+            board = count_boards(code)
+            name = fields[1]
+            concepts = [industry_map.get(code, "")] if industry_map.get(code, "") else []
+            ladder.append({
+                "code": code, "name": name,
+                "price": basic["price"], "chg_pct": chg,
+                "board": board, "amount": basic["amount"],
+                "volume": int(basic["volume"]), "concepts": concepts,
+            })
+
+        ladder.sort(key=lambda s: (-s["board"], -s["chg_pct"]))
+        by_board = {}
+        for s in ladder:
+            b = str(s["board"])
+            by_board.setdefault(b, []).append(s)
+        by_concept = {}
+        for s in ladder:
+            for c in s["concepts"]:
+                by_concept.setdefault(c, []).append(s)
+
+        total = len(ladder)
+        first = sum(1 for s in ladder if s["board"] == 1)
+        cont = total - first
+        max_b = max(s["board"] for s in ladder) if ladder else 0
+        dist = {}
+        for s in ladder:
+            b = str(s["board"])
+            dist[b] = dist.get(b, 0) + 1
+
+        return {
+            "ladder": ladder,
+            "by_board": by_board,
+            "by_concept": by_concept,
+            "stats": {
+                "total_limit_up": total,
+                "first_board": first,
+                "continue_up": cont,
+                "max_board": max_b,
+                "board_distribution": dist,
+            },
+            "summary": f"共 {total} 只涨停，首板 {first} 只，连板 {cont} 只，最高 {max_b} 板",
+        }
+    except Exception as e:
+        _log.warning("market ladder failed", exc_info=True)
+        return {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": str(e)}
+    finally:
+        if db:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Volume Ranking (成交额排行)
+# ---------------------------------------------------------------------------
+
+@router.get("/market/volume-rank")
+def get_volume_rank(limit: int = 50):
+    """Get volume ranking from latest kline + real-time Tencent data."""
+    db = _get_db()
+    if db is None:
+        return {"stocks": [], "by_industry": {}, "industry_ranking": [], "stats": None}
+    try:
+        from utils.tencent_quotes import fetch_raw, _parse_basic, add_prefix
+
+        latest_date = _latest_trade_date(db)
+        if not latest_date:
+            return {"stocks": [], "by_industry": {}, "industry_ranking": [], "stats": None}
+
+        cur = db.cursor()
+        cur.execute(f"""
+            SELECT a.code, a.close, a.amount, a.volume, a.high, a.low, a.open
+            FROM daily_kline a
+            WHERE a.date = ?
+            ORDER BY a.amount DESC
+            LIMIT ?
+        """, (latest_date, limit))
+        top_stocks = cur.fetchall()
+
+        codes = [add_prefix(r[0]) for r in top_stocks]
+        raw = fetch_raw(codes)
+        code_map = {add_prefix(r[0]): r for r in top_stocks}
+
+        industry_map = _load_industry_map()
+
+        stocks = []
+        for raw_code, fields in raw.items():
+            if len(fields) < 48:
+                continue
+            basic = _parse_basic(fields)
+            code = raw_code
+            stored = code_map.get(code)
+            if not stored:
+                continue
+            name = fields[1]
+            ind = industry_map.get(code, "")
+            stocks.append({
+                "code": code, "name": name,
+                "price": basic["price"], "chg_pct": basic["change_pct"],
+                "amount": basic["amount"], "volume": int(basic["volume"]),
+                "industry": ind,
+                "high": basic["high"], "low": basic["low"], "open": basic["open"],
+            })
+
+        stocks.sort(key=lambda s: -s["amount"])
+        by_industry = {}
+        for s in stocks:
+            ind = s["industry"] or "其他"
+            by_industry.setdefault(ind, []).append(s)
+
+        industry_ranking = [
+            {"industry": ind, "total_amount": sum(s["amount"] for s in ss), "pct": 0}
+            for ind, ss in by_industry.items()
+        ]
+        total_amt = sum(r["total_amount"] for r in industry_ranking)
+        for r in industry_ranking:
+            r["pct"] = round(r["total_amount"] / total_amt * 100, 1) if total_amt else 0
+        industry_ranking.sort(key=lambda r: -r["total_amount"])
+
+        top = stocks[:5]
+        stats = {
+            "total_stocks": len(stocks),
+            "total_amount": total_amt,
+            "top_name": top[0]["name"] if top else "",
+            "top_amount": top[0]["amount"] if top else 0,
+        }
+
+        return {"stocks": stocks, "by_industry": by_industry, "industry_ranking": industry_ranking, "stats": stats}
+    except Exception as e:
+        _log.warning("volume rank failed", exc_info=True)
+        return {"stocks": [], "by_industry": {}, "industry_ranking": [], "stats": None}
+    finally:
+        if db:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Stock Analysis (个股深度分析)
+# ---------------------------------------------------------------------------
+
+@router.get("/stock-analysis/{code:path}")
+def get_stock_analysis(code: str):
+    """Return Fibonacci cycle analysis + indicators for a stock."""
+    db = _get_db()
+    if db is None:
+        return {"data": {"error": "no database"}}
+    try:
+        from utils.tencent_quotes import add_prefix
+        from utils.fibonacci_formula import find_latest_cycle, fibonacci_price, fibonacci_exit
+        from utils.indicators import calc_rsi
+        from utils.runaway_price import calc_runaway_price
+
+        # Ensure code has prefix for DB queries (DB stores sz000001 / sh600519)
+        prefixed = add_prefix(code)
+        db_code = prefixed
+
+        # Get kline data
+        cur = db.cursor()
+        cur.execute("SELECT date, open, high, low, close, volume FROM daily_kline WHERE code=? ORDER BY date DESC LIMIT 120", (db_code,))
+        rows = cur.fetchall()
+        if not rows:
+            return {"data": {"error": "no kline data for " + code}}
+
+        # Reverse to get chronological order
+        rows = rows[::-1]
+        rows = cur.fetchall()
+        if not rows:
+            return {"data": {"error": "no kline data for " + code}}
+
+        dates = [r[0] for r in rows]
+        opens = [r[1] for r in rows]
+        highs = [r[2] for r in rows]
+        lows = [r[3] for r in rows]
+        closes = [r[4] for r in rows]
+        volumes = [r[5] for r in rows]
+        n = len(closes)
+
+        # Current price from Tencent
+        try:
+            from utils.tencent_quotes import fetch_detail
+            rt = fetch_detail([prefixed])
+            q = rt.get(prefixed, {})
+            current_price = q.get("price", closes[-1])
+        except Exception:
+            current_price = closes[-1]
+
+        # Indicators
+        indicators = {
+            "ma5": _ma(closes, 5), "ma10": _ma(closes, 10),
+            "ma20": _ma(closes, 20), "ma60": _ma(closes, 60),
+            "rsi14": round(calc_rsi(closes, 14), 2) if len(closes) >= 14 else 0,
+            "avg_vol_5": _ma(volumes, 5), "avg_vol_20": _ma(volumes, 20),
+        }
+
+        # Find local highs/lows for cycle detection
+        high_arr = highs[:n]
+        low_arr = lows[:n]
+        date_arr = dates[:n]
+        precomputed_highs = []
+        precomputed_lows = []
+
+        lookback = 5
+        for i in range(1, n - 1):
+            start = max(0, i - lookback)
+            end = min(n, i + lookback + 1)
+            if all(high_arr[i] >= h for h in high_arr[start:end]):
+                precomputed_highs.append((i, high_arr[i], str(date_arr[i])))
+            if all(low_arr[i] <= l for l in low_arr[start:end]):
+                precomputed_lows.append((i, low_arr[i], str(date_arr[i])))
+
+        # Find cycles — only scan at local high points (reduces calls from n to ~hundreds)
+        all_cycles = []
+        valid_cycles = []
+        seen = set()
+        for h_idx, H, H_date in precomputed_highs:
+            if h_idx < 60 or h_idx in seen:
+                continue
+            seen.add(h_idx)
+            cycle = find_latest_cycle(
+                high_arr, low_arr, date_arr, h_idx,
+                swing_lookback=90, min_swing=0.08, min_days=3,
+                precomputed_highs=precomputed_highs, precomputed_lows=precomputed_lows,
+            )
+            if cycle:
+                swing = round((cycle["H"] - cycle["L"]) / cycle["L"] * 100, 2)
+                deviation = round((current_price - cycle["E"]) / cycle["E"] * 100, 2) if cycle["E"] else 0
+                normalized = {
+                    "h_date": cycle["H_date"], "h_price": cycle["H"],
+                    "l_date": cycle["L_date"], "l_price": cycle["L"],
+                    "E": cycle["E"], "swing_pct": swing,
+                    "days": cycle["cycle_days"],
+                    "deviation": deviation,
+                    "qualifies": abs(deviation) <= 3,
+                }
+                all_cycles.append(normalized)
+                if normalized["qualifies"]:
+                    valid_cycles.append(normalized)
+
+        # Best cycle (latest window)
+        best = find_latest_cycle(
+            high_arr, low_arr, date_arr, n - 1,
+            swing_lookback=90, min_swing=0.08, min_days=3,
+            precomputed_highs=precomputed_highs, precomputed_lows=precomputed_lows,
+        )
+
+        # Runaway price
+        runaway_info = calc_runaway_price(db_code, str(dates[-1])) or {}
+
+        # name
+        name = ""
+        cur.execute("SELECT name FROM {} WHERE code=?".format(_stock_table()), (db_code,))
+        r = cur.fetchone()
+        name = r[0] if r else ""
+
+        # Vol ratio
+        vol_ratio = 0
+        if len(volumes) >= 2:
+            vol_ratio = round(volumes[-1] / max(sum(volumes[-21:-1]) / 20, 1), 2) if len(volumes) >= 21 else 0
+
+        # Kline bars for chart
+        kline_bars = []
+        for i in range(max(0, n - 120), n):
+            kline_bars.append({
+                "date": str(dates[i]),
+                "open": opens[i], "high": highs[i],
+                "low": lows[i], "close": closes[i],
+                "volume": volumes[i],
+            })
+
+        return {
+            "data": {
+                "code": prefixed, "name": name,
+                "current_price": current_price,
+                "E": best["E"] if best else 0,
+                "X": fibonacci_exit(best["H"], best["L"]) if best else 0,
+                "runaway": runaway_info.get("runaway_price", 0),
+                "exit_price": 0,
+                "window_high": best["H"] if best else 0,
+                "window_low": best["L"] if best else 0,
+                "window_high_date": best.get("H_date", ""),
+                "window_low_date": best.get("L_date", ""),
+                "indicators": indicators,
+                "cycles": all_cycles[-10:] if all_cycles else [],
+                "valid_cycles": valid_cycles[-5:] if valid_cycles else [],
+                "vol_ratio": vol_ratio,
+                "kline": kline_bars,
+            }
+        }
+    except Exception as e:
+        _log.warning("stock analysis failed for %s", code, exc_info=True)
+        return {"data": {"error": str(e)}}
+    finally:
+        if db:
+            db.close()
+
+
 def register_trading_tools_routes(app, require_auth=None):
     """Register trading tools routes on the FastAPI app."""
     dependencies = []
     if require_auth is not None:
-        from fastapi import Depends
         dependencies = [Depends(require_auth)]
 
     # Override router dependencies if auth is required

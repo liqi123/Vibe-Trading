@@ -121,7 +121,7 @@ export function RunDetail() {
     if (!runId) return;
     Promise.all([
       api.getRun(runId, { chart_payload: "summary" }).catch(() => null),
-      api.getRunCode(runId).catch(() => ({})),
+      api.getRunCode(runId).catch((e) => { console.error("getRunCode", e); return {}; }),
     ]).then(([r, c]) => {
       setRun(r);
       setCode(c || {});

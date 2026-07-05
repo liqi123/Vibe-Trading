@@ -64,6 +64,18 @@ const DailyReview = lazy(() =>
 const ScheduledTasks = lazy(() =>
   import("@/pages/ScheduledTasks").then((m) => ({ default: m.ScheduledTasks })),
 );
+const AuctionBoard = lazy(() =>
+  import("@/pages/AuctionBoard").then((m) => ({ default: m.AuctionBoard })),
+);
+const StockAnalysis = lazy(() =>
+  import("@/pages/tools/StockAnalysis").then((m) => ({ default: m.StockAnalysis })),
+);
+const MarketLadder = lazy(() =>
+  import("@/pages/MarketLadder").then((m) => ({ default: m.MarketLadder })),
+);
+const VolumeRank = lazy(() =>
+  import("@/pages/VolumeRank").then((m) => ({ default: m.VolumeRank })),
+);
 
 function PageLoader() {
   return (
@@ -110,6 +122,10 @@ export const router = createBrowserRouter([
       { path: "/news", element: wrap(NewsSearch) },
       { path: "/daily-review", element: wrap(DailyReview) },
       { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
+      { path: "/auction-board", element: wrap(AuctionBoard) },
+      { path: "/stock-analysis", element: wrap(StockAnalysis) },
+      { path: "/market-ladder", element: wrap(MarketLadder) },
+      { path: "/volume-rank", element: wrap(VolumeRank) },
     ],
   },
 ]);
