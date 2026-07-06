@@ -125,8 +125,28 @@ def _load_industry_map() -> dict:
 
 @router.get("/expectations")
 def get_expectations() -> dict:
-    """Return expectation state for all positions."""
-    return _read_json(_PAPER_DIR / "expectation_state.json")
+    """Return expectation state for all positions, with live prev_close from DB."""
+    state = _read_json(_PAPER_DIR / "expectation_state.json")
+    positions = state.get("positions", [])
+    if not positions:
+        return state
+
+    db = _get_db()
+    if db is None:
+        return state
+    try:
+        from utils.config import get_date_col
+        date_col, _ = get_date_col()
+        for p in positions:
+            row = db.execute(
+                f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 1",
+                (p["code"],)
+            ).fetchone()
+            if row and row[0]:
+                p["prev_close"] = row[0]
+    finally:
+        db.close()
+    return state
 
 
 @router.get("/expectations/sentiment")
@@ -1081,7 +1101,7 @@ def run_script(data: dict):
     cmd = scripts[script]
     output_file = _PAPER_DIR / f"script_output_{task_id}.txt"
 
-    output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 执行中...\n", encoding="utf-8")
+    ts_start = datetime.now()
 
     # 安全处理参数
     if cmd.startswith("-m"):
@@ -1090,7 +1110,7 @@ def run_script(data: dict):
         args = ["python", cmd]
 
     # 验证脚本路径安全
-    script_path = Path(cmd) if not cmd.startswith("-m") else None
+    script_path = _PROJECT_ROOT / cmd if not cmd.startswith("-m") else None
     if script_path and not script_path.exists():
         output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: 脚本文件不存在\n", encoding="utf-8")
         return {"task_id": task_id}
@@ -1099,9 +1119,11 @@ def run_script(data: dict):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
 
+    # 初始内容：前端靠"执行中"判断任务是否活跃
+    output_file.write_text(f"[{ts_start.strftime('%H:%M:%S')}] 执行中...\n", encoding="utf-8")
+
     def _run():
         try:
-            # 使用更安全的参数处理
             safe_args = ["python", "-X", "utf8"] + args[1:]
             proc = subprocess.Popen(
                 safe_args,
@@ -1109,19 +1131,30 @@ def run_script(data: dict):
                 stderr=subprocess.STDOUT,
                 cwd=str(_PROJECT_ROOT),
                 env=env,
-                # 使用绝对路径确保不会被篡改
+                bufsize=1,
                 executable=None,
             )
-            stdout, _ = proc.communicate(timeout=600)
-            text = stdout.decode("utf-8", errors="replace") if stdout else ""
+            lines = []
+            for line in iter(proc.stdout.readline, b''):
+                text = line.decode("utf-8", errors="replace")
+                lines.append(text)
+                # 保持"执行中"前缀，让前端知道任务还在跑
+                content = f"[{ts_start.strftime('%H:%M:%S')}] 执行中...\n" + "".join(lines)
+                output_file.write_text(content, encoding="utf-8")
+            proc.stdout.close()
+            proc.wait(timeout=10)
             ts = datetime.now().strftime("%H:%M:%S")
-            output_file.write_text(f"[{ts}] 执行完成 (exit={proc.returncode})\n\n{text}", encoding="utf-8")
-        except subprocess.TimeoutExpired:
-            if 'proc' in locals():
-                proc.kill()
-            output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 超时(10分钟)\n", encoding="utf-8")
+            # 去除"执行中"前缀，写入最终结果
+            content = "".join(lines) + f"\n[{ts}] 执行完成 (exit={proc.returncode})\n"
+            output_file.write_text(content, encoding="utf-8")
+        except FileNotFoundError as e:
+            output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: 找不到可执行文件 - {str(e)[:200]}\n", encoding="utf-8")
         except Exception as e:
-            output_file.write_text(f"[{datetime.now().strftime('%H:%M:%S')}] 错误: {str(e)[:200]}\n", encoding="utf-8")
+            try:
+                existing = output_file.read_text(encoding="utf-8")
+            except Exception:
+                existing = ""
+            output_file.write_text(existing + f"[{datetime.now().strftime('%H:%M:%S')}] 错误: {str(e)[:200]}\n", encoding="utf-8")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id}
@@ -1134,7 +1167,8 @@ def get_script_output(task_id: str):
     if not output_file.exists():
         raise HTTPException(status_code=404, detail="Task not found")
     content = output_file.read_text(encoding="utf-8")
-    return {"output": content}
+    is_running = "执行完成" not in content and "超时" not in content and "错误:" not in content
+    return {"output": content, "status": "running" if is_running else "completed"}
 
 
 @router.get("/trades")
@@ -1195,19 +1229,14 @@ def get_watchlist_auction(codes: str = "") -> dict:
         prev_vol_map = {}
         if prev_date:
             from utils.config import get_date_col
-            date_col, _ = get_date_col()
+            date_col, is_int = get_date_col()
+            prev_date_val = int(prev_date.replace("-", "")) if is_int else prev_date
 
             kline_rows = db.execute(
                 f"SELECT code, volume FROM daily_kline WHERE {date_col}=? AND code IN ({placeholders})",
-                [prev_date] + code_list,
+                [prev_date_val] + code_list,
             ).fetchall()
-            if not kline_rows and date_col == "date":
-                prev_date_int = int(prev_date.replace("-", ""))
-                kline_rows = db.execute(
-                    f"SELECT code, volume FROM daily_kline WHERE trade_date=? AND code IN ({placeholders})",
-                    [prev_date_int] + code_list,
-                ).fetchall()
-            prev_vol_map = {r[0]: r[1] for r in kline_rows}
+            prev_vol_map = {r[0]: r[1] // 100 for r in kline_rows}  # 股→手
 
         # Build result - map bare codes back to full codes
         result = {}

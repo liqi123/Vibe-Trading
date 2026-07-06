@@ -9,7 +9,8 @@
 
 import os
 import sys
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict
 
 # smartmoneyconcepts prints emoji on import — force UTF-8 on Windows
 if sys.platform == "win32":
@@ -17,39 +18,58 @@ if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+# 添加项目根目录到 sys.path，复用共享 utils
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[5])  # trading/
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import numpy as np
 import pandas as pd
 from smartmoneyconcepts import smc
 
+from utils.config import DB_PATH, get_date_col
+from utils.db import connect_db
+from utils.tencent_quotes import add_prefix
 
-def _fetch_okx(inst_id: str, bar: str = "1D", limit: int = 300) -> pd.DataFrame:
-    """从 OKX 获取K线数据。
+
+def _fetch_astock(code: str, limit: int = 300) -> pd.DataFrame:
+    """从本地 SQLite 读取A股日线数据。
 
     Args:
-        inst_id: 交易对，如 "BTC-USDT"。
-        bar: K线周期，默认日线。
-        limit: 获取K线数量。
+        code: 股票代码，如 "sh600519"、"sz000001"、"301618"。
+        limit: 读取K线数量（取最近N根）。
 
     Returns:
         包含 open/high/low/close/volume 列的 DataFrame，index 为 datetime。
     """
-    import requests
+    code = add_prefix(code)
 
-    resp = requests.get(
-        "https://www.okx.com/api/v5/market/candles",
-        params={"instId": inst_id, "bar": bar, "limit": str(limit)},
-    )
-    candles = resp.json()["data"]
-    columns = [
-        "ts", "open", "high", "low", "close",
-        "vol", "volCcy", "volCcyQuote", "confirm",
-    ]
-    df = pd.DataFrame(reversed(candles), columns=columns)
-    df["ts"] = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
-    df = df.set_index("ts")
-    for col in ["open", "high", "low", "close"]:
+    date_col, is_int = get_date_col()
+    conn = connect_db()
+    try:
+        sql = f"""
+            SELECT {date_col} as date, open, high, low, close, volume
+            FROM daily_kline
+            WHERE code = ?
+            ORDER BY {date_col} DESC
+            LIMIT ?
+        """
+        df = pd.read_sql(sql, conn, params=[code, limit])
+    finally:
+        conn.close()
+
+    if df.empty:
+        raise ValueError(f"数据库中无 {code} 的K线数据")
+
+    # 日期处理
+    if is_int:
+        df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+    else:
+        df["date"] = pd.to_datetime(df["date"])
+
+    df = df.sort_values("date").set_index("date")
+    for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    df["volume"] = df["vol"].astype(float)
     return df
 
 
@@ -64,8 +84,8 @@ class SignalEngine:
 
     Example:
         >>> engine = SignalEngine(swing_length=50)
-        >>> signals = engine.generate({"BTC-USDT": df})
-        >>> print(signals["BTC-USDT"].value_counts())
+        >>> signals = engine.generate({"sh600519": df})
+        >>> print(signals["sh600519"].value_counts())
     """
 
     def __init__(self, swing_length: int = 10, close_break: bool = True):
@@ -153,20 +173,21 @@ class SignalEngine:
 
 
 if __name__ == "__main__":
-    instruments = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+    stocks = ["sh600519", "sz000001", "sz300750"]
     data_map = {}
 
     print("=" * 50)
-    print("Smart Money Concepts 信号引擎 E2E 测试")
+    print("Smart Money Concepts 信号引擎 E2E 测试 (A股)")
+    print(f"数据库: {DB_PATH}")
     print("=" * 50)
 
-    for inst in instruments:
-        print(f"\n获取 {inst} 日线数据...")
+    for code in stocks:
+        print(f"\n读取 {code} 日线数据...")
         try:
-            data_map[inst] = _fetch_okx(inst, bar="1D", limit=300)
-            print(f"  {inst}: {len(data_map[inst])} 根K线")
+            data_map[code] = _fetch_astock(code, limit=300)
+            print(f"  {code}: {len(data_map[code])} 根K线")
         except Exception as e:
-            print(f"  {inst} 获取失败: {e}")
+            print(f"  {code} 失败: {e}")
 
     if not data_map:
         print("无数据，退出")

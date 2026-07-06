@@ -280,7 +280,9 @@ export function Expectations() {
                   const todayVol = a.today_vol || 0;
                   const prevVol = a.prev_vol || 0;
                   const prevVolume = a.prev_volume || 0;
-                  const auctionChg = prevVol > 0 ? ((todayVol - prevVol) / prevVol * 100) : 0;
+                  const auctionChg = stock.prev_close > 0 && a.auction_price > 0
+                    ? ((a.auction_price - stock.prev_close) / stock.prev_close * 100)
+                    : null;
                   return (
                     <tr key={stock.code} className="border-t">
                       <td className="px-3 py-2 font-mono">{stock.code}</td>
@@ -295,8 +297,8 @@ export function Expectations() {
                       <td className="px-3 py-2 text-right text-muted-foreground">
                         {prevVolume ? prevVolume.toLocaleString() : "-"}
                       </td>
-                      <td className={`px-3 py-2 text-right font-medium ${auctionChg >= 0 ? "text-red-600" : "text-green-600"}`}>
-                        {prevVol > 0 ? `${auctionChg >= 0 ? "+" : ""}${auctionChg.toFixed(1)}%` : "-"}
+                      <td className={`px-3 py-2 text-right font-medium ${auctionChg != null && auctionChg >= 0 ? "text-red-600" : "text-green-600"}`}>
+                        {auctionChg != null ? `${auctionChg >= 0 ? "+" : ""}${auctionChg.toFixed(2)}%` : "-"}
                       </td>
                       <td className="px-3 py-2 text-center">
                         <button
