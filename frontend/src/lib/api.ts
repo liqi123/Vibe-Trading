@@ -221,6 +221,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ broker }),
     }),
+  tools: {
+    get: <T>(path: string, signal?: AbortSignal) => request<T>(`/tools${path}`, { signal }),
+    post: <T>(path: string, body?: unknown) =>
+      request<T>(`/tools${path}`, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+    del: <T>(path: string) => request<T>(`/tools${path}`, { method: "DELETE" }),
+  },
 };
 
 // --- Swarm types ---

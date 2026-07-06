@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface AuctionStat {
   count: number; total_vol: number; total_amount: number; avg_ratio: number;
@@ -45,13 +46,10 @@ export function AuctionBoard() {
 
   const fetchDates = async () => {
     try {
-      const res = await fetch("/tools/auction/dates");
-      if (res.ok) {
-        const data = await res.json();
-        setDates(data.dates || []);
-        if (data.dates?.length > 0 && !selectedDate) {
-          setSelectedDate(data.dates[0].date);
-        }
+      const data = await api.tools.get<any>("/auction/dates");
+      setDates(data.dates || []);
+      if (data.dates?.length > 0 && !selectedDate) {
+        setSelectedDate(data.dates[0].date);
       }
     } catch (e) { console.error("fetch dates", e); }
   };
@@ -59,13 +57,10 @@ export function AuctionBoard() {
   const fetchDateData = async (date: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/tools/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
-      if (res.ok) {
-        const data = await res.json();
-        setStocks(data.stocks || []);
-        setLeaders(data.leaders || []);
-        setStats(data.stats || null);
-      }
+      const data = await api.tools.get<any>(`/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
+      setStocks(data.stocks || []);
+      setLeaders(data.leaders || []);
+      setStats(data.stats || null);
     } catch (e) { console.error("fetch date data", e); }
     finally { setLoading(false); }
   };
@@ -77,10 +72,8 @@ export function AuctionBoard() {
     if (!d2) return;
     setLoading(true);
     try {
-      const res = await fetch(`/tools/auction/compare?date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}&top=30`);
-      if (res.ok) {
-        setCompareData(await res.json());
-      }
+      const cd = await api.tools.get<any>(`/auction/compare?date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}&top=30`);
+      setCompareData(cd);
     } catch (e) { console.error("fetch compare", e); }
     finally { setLoading(false); }
   };
@@ -88,7 +81,7 @@ export function AuctionBoard() {
   const handleCollect = async () => {
     setCollecting(true);
     try {
-      await fetch("/tools/auction/collect", { method: "POST" });
+      await api.tools.post<any>("/auction/collect");
     } catch (e) { console.error("handle collect", e); }
     finally { setCollecting(false); }
   };

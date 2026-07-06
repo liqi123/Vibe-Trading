@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Wallet, History, RefreshCw, Clock, TrendingDown, Save } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useModalStore } from "../stores/modal";
+import { api } from "@/lib/api";
 
 interface V1Position {
   code: string;
@@ -42,6 +44,7 @@ interface TradeRecord {
   pnl?: number;
   note?: string;
   score?: number;
+  strategy?: string;
 }
 
 interface PaperState {
@@ -82,26 +85,25 @@ export function PaperTrading() {
   const [editingE, setEditingE] = useState<Record<string, string>>({});
   const [savingE, setSavingE] = useState<string | null>(null);
   const openStock = useModalStore((s) => s.open);
-  const [trades, setTrades] = useState<any[]>([]);
+  const [trades, setTrades] = useState<TradeRecord[]>([]);
+  const { t } = useTranslation();
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [r1, r5, t1, t5] = await Promise.all([
-        fetch("/tools/portfolio"),
-        fetch("/tools/portfolio/v5"),
-        fetch("/tools/trades"),
-        fetch("/tools/trades/v5"),
+      const [v1Data, v5Data, t1Data, t5Data] = await Promise.all([
+        api.tools.get<any>("/portfolio"),
+        api.tools.get<any>("/portfolio/v5"),
+        api.tools.get<any>("/trades"),
+        api.tools.get<any>("/trades/v5"),
       ]);
-      setV1(await r1.json());
-      setV5(await r5.json());
-      const d1 = await t1.json();
-      const d5 = await t5.json();
+      setV1(v1Data);
+      setV5(v5Data);
       setTrades([
-        ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
-        ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
+        ...(t1Data.history || []).map((t: TradeRecord) => ({ ...t, strategy: "V1" })),
+        ...(t5Data.history || []).map((t: TradeRecord) => ({ ...t, strategy: "V5" })),
       ]);
-    } catch { /* ignore */ }
+    } catch (e) { console.error('Failed to fetch paper trading data:', e); }
     setLoading(false);
   };
 
@@ -112,35 +114,26 @@ export function PaperTrading() {
     if (isNaN(val)) return;
     setSavingE(code);
     try {
-      await fetch("/tools/portfolio/update-field", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, portfolio, field: "E", value: val }),
-      });
+      await api.tools.post<any>("/portfolio/update-field", { code, portfolio, field: "E", value: val });
       fetchData();
-    } catch { /* ignore */ }
+    } catch (e) { console.error('Failed to save E price:', e); }
     setSavingE(null);
     setEditingE(prev => { const n = { ...prev }; delete n[code]; return n; });
   };
 
   const handleSell = async (code: string, portfolio: string) => {
-    if (!confirm(`确认卖出 ${code}？`)) return;
+    if (!confirm(t("paperTrading.confirmSell", { code }))) return;
     setSellingCode(code);
     try {
-      const resp = await fetch("/tools/portfolio/sell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, portfolio, reason: "手动卖出" }),
-      });
-      const result = await resp.json();
+      const result = await api.tools.post<any>("/portfolio/sell", { code, portfolio, reason: "手动卖出" });
       if (result.ok) {
-        alert(`卖出成功，盈亏: ${formatMoney(result.pnl)}`);
+        console.log(`卖出成功，盈亏: ${formatMoney(result.pnl)}`);
         fetchData();
       } else {
-        alert(`卖出失败: ${result.detail || "未知错误"}`);
+        console.log(`卖出失败: ${result.detail || "未知错误"}`);
       }
     } catch (e) {
-      alert("卖出请求失败");
+      console.log("卖出请求失败");
     }
     setSellingCode(null);
   };
@@ -160,9 +153,9 @@ export function PaperTrading() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">模拟盘</h1>
+          <h1 className="text-2xl font-bold">{t("paperTrading.title")}</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : "趋势策略")}
+            {activeTab === "history" ? t("paperTrading.allTradeHistory") : state?.name || (activeTab === "v1" ? t("paperTrading.fibStrategy") : t("paperTrading.trendStrategy"))}
           </p>
         </div>
         <button
@@ -170,8 +163,8 @@ export function PaperTrading() {
           disabled={loading}
           className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
         >
-          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          刷新
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+           {t("paperTrading.refresh")}
         </button>
       </div>
 
@@ -187,7 +180,7 @@ export function PaperTrading() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : "交易历史"}
+            {tab === "v1" ? t("paperTrading.tabV1") : tab === "v5" ? t("paperTrading.tabV5") : t("paperTrading.tabHistory")}
           </button>
         ))}
       </div>
@@ -196,28 +189,28 @@ export function PaperTrading() {
       {activeTab !== "history" && <div className="grid gap-4 md:grid-cols-5">
         <div className="border rounded-lg p-4 bg-card">
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-1">
-            <Wallet className="h-4 w-4" />
-            总资产
+             <Wallet className="h-4 w-4" />
+             {t("paperTrading.totalAssets")}
           </div>
           <p className="text-xl font-bold">{formatMoney(totalValue)}</p>
           <p className={`text-xs ${pnlClass(totalReturn)}`}>{formatPct(totalReturn)}</p>
         </div>
         <div className="border rounded-lg p-4 bg-card">
-          <div className="text-sm text-muted-foreground mb-1">可用现金</div>
+          <div className="text-sm text-muted-foreground mb-1">{t("paperTrading.availableCash")}</div>
           <p className="text-xl font-bold">{formatMoney(cash)}</p>
-          <p className="text-xs text-muted-foreground">占比 {(cash / totalValue * 100).toFixed(1)}%</p>
+          <p className="text-xs text-muted-foreground">{t("paperTrading.ratio")} {(cash / totalValue * 100).toFixed(1)}%</p>
         </div>
         <div className="border rounded-lg p-4 bg-card">
-          <div className="text-sm text-muted-foreground mb-1">持仓市值</div>
+          <div className="text-sm text-muted-foreground mb-1">{t("paperTrading.marketValue")}</div>
           <p className="text-xl font-bold">{formatMoney(marketValue)}</p>
         </div>
         <div className="border rounded-lg p-4 bg-card">
-          <div className="text-sm text-muted-foreground mb-1">持仓盈亏</div>
+          <div className="text-sm text-muted-foreground mb-1">{t("paperTrading.positionPnl")}</div>
           <p className={`text-xl font-bold ${pnlClass(totalPnl)}`}>{formatMoney(totalPnl)}</p>
           <p className={`text-xs ${pnlClass(totalPnl)}`}>{formatPct(totalPnl / totalCost)}</p>
         </div>
         <div className="border rounded-lg p-4 bg-card">
-          <div className="text-sm text-muted-foreground mb-1">持仓数量</div>
+          <div className="text-sm text-muted-foreground mb-1">{t("paperTrading.positionCount")}</div>
           <p className="text-xl font-bold">{positions.length} / 5</p>
         </div>
       </div>}
@@ -226,8 +219,8 @@ export function PaperTrading() {
       {activeTab === "v5" && v5?.pending_orders && v5.pending_orders.length > 0 && (
         <div className="border rounded-lg bg-card p-4">
           <h2 className="font-semibold flex items-center gap-2 mb-3">
-            <Clock className="h-4 w-4 text-yellow-500" />
-            待执行挂单
+             <Clock className="h-4 w-4 text-yellow-500" />
+             {t("paperTrading.pendingOrders")}
           </h2>
           <div className="flex flex-wrap gap-2">
             {v5.pending_orders.map((o, i) => (
@@ -242,29 +235,29 @@ export function PaperTrading() {
       {/* Positions */}
       {activeTab !== "history" && <div className="border rounded-lg bg-card overflow-hidden">
         <div className="px-4 py-3 border-b">
-          <h2 className="font-semibold">当前持仓</h2>
+          <h2 className="font-semibold">{t("paperTrading.currentPositions")}</h2>
         </div>
         {loading ? (
-          <div className="p-8 text-center text-muted-foreground">加载中...</div>
+          <div className="p-8 text-center text-muted-foreground">{t("paperTrading.loading")}</div>
         ) : positions.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">暂无持仓</div>
+          <div className="p-8 text-center text-muted-foreground">{t("paperTrading.noPositions")}</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/50">
-                  <th className="px-4 py-2 text-left font-medium">代码</th>
-                  <th className="px-4 py-2 text-left font-medium">名称</th>
-                  <th className="px-4 py-2 text-right font-medium">成本价</th>
-                  <th className="px-4 py-2 text-right font-medium">现价</th>
-                  <th className="px-4 py-2 text-right font-medium">数量</th>
-                  <th className="px-4 py-2 text-right font-medium">成本</th>
-                  <th className="px-4 py-2 text-right font-medium">市值</th>
-                  <th className="px-4 py-2 text-right font-medium">盈亏</th>
-                  {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">跑路价</th>}
-                  {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">评分</th>}
-                  {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">最高</th>}
-                  <th className="px-4 py-2 text-center font-medium">操作</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thCode")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thName")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thCostPrice")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thCurrentPrice")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thShares")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thCost")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thMarketValue")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thPnl")}</th>
+                  {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thEscapePrice")}</th>}
+                  {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thScore")}</th>}
+                  {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thHighest")}</th>}
+                  <th className="px-4 py-2 text-center font-medium">{t("paperTrading.thAction")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -344,7 +337,7 @@ export function PaperTrading() {
                           className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 border border-red-200 rounded hover:bg-red-50 transition-colors disabled:opacity-50"
                         >
                           <TrendingDown className="h-3 w-3" />
-                          {sellingCode === pos.code ? "卖出中..." : "卖出"}
+                          {sellingCode === pos.code ? t("paperTrading.selling") : t("paperTrading.sell")}
                         </button>
                       </td>
                     </tr>
@@ -361,53 +354,53 @@ export function PaperTrading() {
         <div className="border rounded-lg bg-card overflow-hidden">
           <div className="px-4 py-3 border-b flex items-center gap-2">
             <History className="h-4 w-4" />
-            <h2 className="font-semibold">全部交易历史</h2>
-            <span className="text-xs text-muted-foreground">（V1 + V5 合计 {trades.length} 条）</span>
+            <h2 className="font-semibold">{t("paperTrading.allTradeHistory")}</h2>
+            <span className="text-xs text-muted-foreground">{t("paperTrading.tradeCountTotal", { count: trades.length })}</span>
           </div>
           <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-muted/50">
                 <tr className="border-b">
-                  <th className="px-4 py-2 text-left font-medium">日期</th>
-                  <th className="px-4 py-2 text-left font-medium">策略</th>
-                  <th className="px-4 py-2 text-left font-medium">代码</th>
-                  <th className="px-4 py-2 text-left font-medium">名称</th>
-                  <th className="px-4 py-2 text-left font-medium">操作</th>
-                  <th className="px-4 py-2 text-right font-medium">价格</th>
-                  <th className="px-4 py-2 text-right font-medium">数量</th>
-                  <th className="px-4 py-2 text-right font-medium">盈亏</th>
-                  <th className="px-4 py-2 text-left font-medium">备注</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thDate")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thStrategy")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thCode")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thName")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thAction")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thPrice")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thShares")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thPnl")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thNote")}</th>
                 </tr>
               </thead>
               <tbody>
-                {trades.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">暂无交易记录</td></tr>
+                  {trades.length === 0 ? (
+                    <tr><td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">{t("paperTrading.noTrades")}</td></tr>
                 ) : (
-                  trades.map((t, i) => (
+                  trades.map((tr, i) => (
                     <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{tr.date}</td>
                       <td className="px-4 py-2.5">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${t.strategy === "V1" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
-                          {t.strategy}
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${tr.strategy === "V1" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                          {tr.strategy}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
-                      <td className="px-4 py-2.5">{t.name || "-"}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(tr.code)}>{tr.code}</td>
+                      <td className="px-4 py-2.5">{tr.name || "-"}</td>
                       <td className="px-4 py-2.5">
                         <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                          t.action === "buy" ? "bg-green-100 text-green-700" :
-                          t.action === "sell" ? "bg-red-100 text-red-700" :
+                          tr.action === "buy" ? "bg-green-100 text-green-700" :
+                          tr.action === "sell" ? "bg-red-100 text-red-700" :
                           "bg-yellow-100 text-yellow-700"
                         }`}>
-                          {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action}
+                          {tr.action === "buy" ? t("paperTrading.buyAction") : tr.action === "sell" ? t("paperTrading.sellAction") : tr.action}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-right">{t.price?.toFixed(2) || "-"}</td>
-                      <td className="px-4 py-2.5 text-right">{t.shares || "-"}</td>
-                      <td className={`px-4 py-2.5 text-right font-medium ${t.pnl != null ? pnlClass(t.pnl > 0 ? 1 : -1) : "text-muted-foreground"}`}>
-                        {t.pnl != null ? formatMoney(t.pnl) : "-"}
+                      <td className="px-4 py-2.5 text-right">{tr.price?.toFixed(2) || "-"}</td>
+                      <td className="px-4 py-2.5 text-right">{tr.shares || "-"}</td>
+                      <td className={`px-4 py-2.5 text-right font-medium ${tr.pnl != null ? pnlClass(tr.pnl > 0 ? 1 : -1) : "text-muted-foreground"}`}>
+                        {tr.pnl != null ? formatMoney(tr.pnl) : "-"}
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{t.note || ""}</td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{tr.note || ""}</td>
                     </tr>
                   ))
                 )}
@@ -422,44 +415,44 @@ export function PaperTrading() {
         <div className="border rounded-lg bg-card overflow-hidden">
           <div className="px-4 py-3 border-b flex items-center gap-2">
             <History className="h-4 w-4" />
-            <h2 className="font-semibold">交易记录</h2>
-            <span className="text-xs text-muted-foreground">（最近 {Math.min(state.history.length, 30)} 条）</span>
+            <h2 className="font-semibold">{t("paperTrading.tradeHistory")}</h2>
+            <span className="text-xs text-muted-foreground">{t("paperTrading.recentCount", { count: Math.min(state.history.length, 30) })}</span>
           </div>
           <div className="overflow-x-auto max-h-96 overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-muted/50">
                 <tr className="border-b">
-                  <th className="px-4 py-2 text-left font-medium">日期</th>
-                  <th className="px-4 py-2 text-left font-medium">代码</th>
-                  <th className="px-4 py-2 text-left font-medium">名称</th>
-                  <th className="px-4 py-2 text-left font-medium">操作</th>
-                  <th className="px-4 py-2 text-right font-medium">价格</th>
-                  <th className="px-4 py-2 text-right font-medium">数量</th>
-                  <th className="px-4 py-2 text-right font-medium">盈亏</th>
-                  <th className="px-4 py-2 text-left font-medium">备注</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thDate")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thCode")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thName")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thAction")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thPrice")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thShares")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("paperTrading.thPnl")}</th>
+                  <th className="px-4 py-2 text-left font-medium">{t("paperTrading.thNote")}</th>
                 </tr>
               </thead>
               <tbody>
-                {state.history.slice(0, 30).map((t, i) => (
+                {state.history.slice(0, 30).map((tr, i) => (
                   <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
-                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
-                    <td className="px-4 py-2.5">{t.name || "-"}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{tr.date}</td>
+                    <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(tr.code)}>{tr.code}</td>
+                    <td className="px-4 py-2.5">{tr.name || "-"}</td>
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        t.action === "buy" ? "bg-green-100 text-green-700" :
-                        t.action === "sell" ? "bg-red-100 text-red-700" :
+                        tr.action === "buy" ? "bg-green-100 text-green-700" :
+                        tr.action === "sell" ? "bg-red-100 text-red-700" :
                         "bg-yellow-100 text-yellow-700"
                       }`}>
-                        {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action}
+                        {tr.action === "buy" ? t("paperTrading.buyAction") : tr.action === "sell" ? t("paperTrading.sellAction") : tr.action}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 text-right">{t.price?.toFixed(2) || "-"}</td>
-                    <td className="px-4 py-2.5 text-right">{t.shares || "-"}</td>
-                    <td className={`px-4 py-2.5 text-right font-medium ${t.pnl != null ? pnlClass(t.pnl > 0 ? 1 : -1) : "text-muted-foreground"}`}>
-                      {t.pnl != null ? formatMoney(t.pnl) : "-"}
+                    <td className="px-4 py-2.5 text-right">{tr.price?.toFixed(2) || "-"}</td>
+                    <td className="px-4 py-2.5 text-right">{tr.shares || "-"}</td>
+                    <td className={`px-4 py-2.5 text-right font-medium ${tr.pnl != null ? pnlClass(tr.pnl > 0 ? 1 : -1) : "text-muted-foreground"}`}>
+                      {tr.pnl != null ? formatMoney(tr.pnl) : "-"}
                     </td>
-                    <td className="px-4 py-2.5 text-xs text-muted-foreground">{t.note || ""}</td>
+                    <td className="px-4 py-2.5 text-xs text-muted-foreground">{tr.note || ""}</td>
                   </tr>
                 ))}
               </tbody>

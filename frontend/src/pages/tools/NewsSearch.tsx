@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Newspaper, Search, Loader2, ExternalLink } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface NewsItem {
   title?: string;
@@ -23,11 +24,10 @@ export function NewsSearch() {
     setItems([]);
     setSearched(true);
     try {
-      const url = byCode
-        ? `/tools/news?stock_code=${encodeURIComponent(q.trim())}`
-        : `/tools/news?q=${encodeURIComponent(q.trim())}`;
-      const res = await fetch(url);
-      const data = await res.json();
+      const path = byCode
+        ? `/news?stock_code=${encodeURIComponent(q.trim())}`
+        : `/news?q=${encodeURIComponent(q.trim())}`;
+      const data = await api.tools.get<any>(path);
       setItems(data.items || []);
     } catch { /* ignore */ }
     setLoading(false);

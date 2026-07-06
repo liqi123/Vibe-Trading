@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Brain, Loader2 } from "lucide-react";
+import { api } from "@/lib/api";
 
 export function AIAnalysis() {
   const [codes, setCodes] = useState("");
@@ -12,12 +13,7 @@ export function AIAnalysis() {
     setLoading(true);
     setReport("");
     try {
-      const res = await fetch("/tools/ai/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ codes: codeList }),
-      });
-      const data = await res.json();
+      const data = await api.tools.post<any>("/ai/analyze", { codes: codeList });
       setReport(data.report || data.error || "分析失败");
     } catch (e: any) {
       setReport(`请求失败: ${e.message}`);

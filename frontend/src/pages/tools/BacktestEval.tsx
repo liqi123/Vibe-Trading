@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { TrendingUp, Loader2, Plus, Trash2 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Pick {
   code: string;
@@ -26,12 +27,7 @@ export function BacktestEval() {
     setLoading(true);
     setReport("");
     try {
-      const res = await fetch("/tools/backtest/eval", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ picks: valid, eval_days: evalDays }),
-      });
-      const data = await res.json();
+      const data = await api.tools.post<any>("/backtest/eval", { picks: valid, eval_days: evalDays });
       setReport(data.report || data.error || "评估失败");
     } catch (e: any) {
       setReport(`请求失败: ${e.message}`);

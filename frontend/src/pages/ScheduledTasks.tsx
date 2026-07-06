@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Clock, Plus, Trash2, RefreshCw, Loader2 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface ScheduledJob {
   id: string;
@@ -21,12 +22,9 @@ export function ScheduledTasks() {
   const fetchJobs = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/tools/scheduled-runs");
-      if (res.ok) {
-        const data = await res.json();
-        setJobs(data.jobs || []);
-      }
-    } catch { /* ignore */ }
+      const data = await api.tools.get<any>("/scheduled-runs");
+      setJobs(data.jobs || []);
+    } catch (e) { console.error('Failed to fetch jobs:', e); }
     setLoading(false);
   };
 
@@ -36,24 +34,20 @@ export function ScheduledTasks() {
     if (!newPrompt.trim() || !newSchedule.trim()) return;
     setCreating(true);
     try {
-      await fetch("/tools/scheduled-runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: newPrompt.trim(), schedule: newSchedule.trim() }),
-      });
+      await api.tools.post<any>("/scheduled-runs", { prompt: newPrompt.trim(), schedule: newSchedule.trim() });
       setNewPrompt("");
       setNewSchedule("");
       setShowAdd(false);
       fetchJobs();
-    } catch { /* ignore */ }
+    } catch (e) { console.error('Failed to create job:', e); }
     setCreating(false);
   };
 
   const handleDelete = async (id: string) => {
     try {
-      await fetch(`/tools/scheduled-runs/${id}`, { method: "DELETE" });
+      await api.tools.del<any>(`/scheduled-runs/${id}`);
       fetchJobs();
-    } catch { /* ignore */ }
+    } catch (e) { console.error('Failed to delete job:', e); }
   };
 
   return (

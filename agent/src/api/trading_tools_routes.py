@@ -27,6 +27,8 @@ from fastapi import APIRouter
 
 _log = logging.getLogger("trading_tools")
 
+_VALID_DATE_COLS = {"date", "trade_date"}
+
 # Resolve the project root (trading/) relative to this file's location
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 _BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8899")
@@ -125,8 +127,30 @@ def _load_industry_map() -> dict:
 
 @router.get("/expectations")
 def get_expectations() -> dict:
-    """Return expectation state for all positions."""
-    return _read_json(_PAPER_DIR / "expectation_state.json")
+    """Return expectation state for all positions, with live prev_close from DB."""
+    state = _read_json(_PAPER_DIR / "expectation_state.json")
+    positions = state.get("positions", [])
+    if not positions:
+        return state
+
+    db = _get_db()
+    if db is None:
+        return state
+    try:
+        from utils.config import get_date_col
+        date_col, _ = get_date_col()
+        if date_col not in _VALID_DATE_COLS:
+            raise ValueError(f"Invalid date_col: {date_col}")
+        for p in positions:
+            row = db.execute(
+                f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 1",
+                (p["code"],)
+            ).fetchone()
+            if row and row[0]:
+                p["prev_close"] = row[0]
+    finally:
+        db.close()
+    return state
 
 
 @router.get("/expectations/sentiment")
@@ -625,6 +649,8 @@ def get_market_overview() -> dict:
     try:
         from utils.config import get_date_col
         date_col, _ = get_date_col()
+        if date_col not in _VALID_DATE_COLS:
+            raise ValueError(f"Invalid date_col: {date_col}")
 
         cur = db.cursor()
         cur.execute(f"SELECT MAX({date_col}) FROM daily_kline")
@@ -752,6 +778,78 @@ def _fetch_sector_momentum(sector_codes: list[tuple[str, str]]) -> list[dict]:
     return sectors
 
 
+_CONCEPT_CACHE: list[dict] | None = None
+_CONCEPT_CACHE_TIME: float = 0
+_CONCEPT_CACHE_TTL = 300  # 5 min
+_CONCEPT_LAST_CALL: float = 0
+_CONCEPT_MIN_INTERVAL = 3.0  # seconds between concept source calls
+
+def _fetch_concept_momentum() -> list[dict]:
+    """Fetch concept sector momentum from 同花顺 (10jqka) gn page.
+
+    Uses urllib + Referer for anti-blocking. Independent 5 min cache.
+    Falls back to empty list on failure.
+    """
+    global _CONCEPT_CACHE, _CONCEPT_CACHE_TIME, _CONCEPT_LAST_CALL
+    now = time.time()
+    if _CONCEPT_CACHE is not None and now - _CONCEPT_CACHE_TIME < _CONCEPT_CACHE_TTL:
+        return _CONCEPT_CACHE
+
+    import json
+    import urllib.request
+    import re
+
+    wait = _CONCEPT_MIN_INTERVAL - (now - _CONCEPT_LAST_CALL)
+    if wait > 0:
+        time.sleep(wait)
+    _CONCEPT_LAST_CALL = time.time()
+
+    url = "http://q.10jqka.com.cn/gn/"
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            req.add_header("Referer", "http://q.10jqka.com.cn/")
+            resp = urllib.request.urlopen(req, timeout=15)
+            html = resp.read().decode("utf-8", errors="replace")
+            raw = None
+            for pat in [
+                r'id="gnSection"[^>]*value=\'([^\']+)\'',
+                r'id="gnSection"[^>]*value="([^"]+)"',
+                r'gnSection[^>]*?=\s*[\'"]([^\'"]+)[\'"]',
+            ]:
+                m = re.search(pat, html)
+                if m:
+                    raw = m.group(1)
+                    break
+            if not raw:
+                _log.warning("_fetch_concept_momentum: gnSection not found in page")
+                break
+            raw = raw.replace('&quot;', '"').replace('&#39;', "'")
+            raw = raw.replace('\\"', '"').replace("\\'", "'")
+            data = json.loads(raw)
+            sectors = []
+            for v in data.values():
+                if not isinstance(v, dict) or "platename" not in v:
+                    continue
+                name = v["platename"]
+                pct = float(v.get("199112", 0))
+                sectors.append({"name": name, "momentum": round(pct, 1)})
+            if not sectors:
+                _log.warning("_fetch_concept_momentum: no sectors parsed")
+                break
+            sectors.sort(key=lambda x: x["momentum"], reverse=True)
+            _CONCEPT_CACHE = sectors
+            _CONCEPT_CACHE_TIME = time.time()
+            return sectors
+        except Exception as exc:
+            _log.warning("_fetch_concept_momentum attempt %d/2: %s", attempt + 1, exc)
+            if attempt < 1:
+                time.sleep(3)
+    _CONCEPT_CACHE_TIME = time.time()
+    return []
+
+
 _MOMENTUM_CACHE: dict | None = None
 _MOMENTUM_CACHE_TIME: float = 0
 _MOMENTUM_CACHE_TTL = 60
@@ -775,6 +873,8 @@ def get_market_momentum() -> dict:
     try:
         from utils.config import get_date_col, fmt_date
         date_col, _ = get_date_col()
+        if date_col not in _VALID_DATE_COLS:
+            raise ValueError(f"Invalid date_col: {date_col}")
         cur = db.cursor()
 
         # 获取最新日期
@@ -783,10 +883,13 @@ def get_market_momentum() -> dict:
         if not latest:
             return {"error": "无数据"}
 
-        # ---- 板块动量（Tencent 行业指数） ----
+        # ---- 行业板块动量（Tencent 行业指数） ----
         sectors = _fetch_sector_momentum(_SECTOR_CODES_FULL)
         top5 = [{"name": s["name"], "momentum": s["momentum"], "rank": i+1} for i, s in enumerate(sectors[:5])]
         bottom5 = [{"name": s["name"], "momentum": s["momentum"], "rank": len(sectors)-i} for i, s in enumerate(sectors[-5:])]
+
+        # ---- 概念板块动量（东方财富） ----
+        concepts = _fetch_concept_momentum()
 
         # ---- MA 分布（最近收盘 vs N日前） ----
         ma_result = {"above5": 0, "above10": 0, "above20": 0, "total": 0}
@@ -866,8 +969,12 @@ def get_market_momentum() -> dict:
         except Exception:
             _log.warning("get_market_momentum: structure calculation failed", exc_info=True)
 
+        concept_top = [{"name": c["name"], "momentum": c["momentum"], "rank": i+1} for i, c in enumerate(concepts[:5])]
+        concept_bottom = [{"name": c["name"], "momentum": c["momentum"], "rank": len(concepts)-i} for i, c in enumerate(concepts[-5:])]
+
         result = {
-            "sectors": {"top": top5, "bottom": bottom5},
+            "sectors": {"top": top5, "bottom": bottom5, "source": "tencent"},
+            "concept_sectors": {"top": concept_top, "bottom": concept_bottom, "source": "10jqka"},
             "ma_distribution": ma_result,
             "rsi_distribution": rsi_result,
             "structure": struct,
@@ -898,6 +1005,8 @@ def get_market_sentiment() -> dict:
     try:
         from utils.config import get_date_col
         date_col, _ = get_date_col()
+        if date_col not in _VALID_DATE_COLS:
+            raise ValueError(f"Invalid date_col: {date_col}")
         cur = db.cursor()
 
         # 最新两日
@@ -1050,6 +1159,8 @@ def update_data():
         from utils.config import get_date_col
         conn = connect_db()
         date_col, is_int = get_date_col()
+        if date_col not in _VALID_DATE_COLS:
+            raise ValueError(f"Invalid date_col: {date_col}")
         total = step_tencent(conn, date_col, is_int)
         conn.close()
         return {"ok": True, "method": "tencent", "message": f"Tencent fallback completed: {total} rows"}
@@ -1195,7 +1306,10 @@ def get_watchlist_auction(codes: str = "") -> dict:
         prev_vol_map = {}
         if prev_date:
             from utils.config import get_date_col
-            date_col, _ = get_date_col()
+            date_col, is_int = get_date_col()
+            if date_col not in _VALID_DATE_COLS:
+                raise ValueError(f"Invalid date_col: {date_col}")
+            prev_date_val = int(prev_date.replace("-", "")) if is_int else prev_date
 
             kline_rows = db.execute(
                 f"SELECT code, volume FROM daily_kline WHERE {date_col}=? AND code IN ({placeholders})",
