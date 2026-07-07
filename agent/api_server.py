@@ -3405,7 +3405,7 @@ register_alpha_routes(app, require_auth=require_auth, require_event_stream_auth=
 # ============================================================================
 
 from src.api.trading_tools_routes import register_trading_tools_routes  # noqa: E402
-register_trading_tools_routes(app)
+register_trading_tools_routes(app, require_auth=require_auth)
 
 
 # ============================================================================

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar } from "lucide-react";
 
 interface AuctionStat {
@@ -88,7 +89,18 @@ export function AuctionBoard() {
   const handleCollect = async () => {
     setCollecting(true);
     try {
-      await fetch("/tools/auction/collect", { method: "POST" });
+      const res = await fetch("/tools/auction/collect", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === "exists") {
+          toast.info("已使用今日已有竞价数据");
+        } else if (data.status === "no_data") {
+          toast.error(data.error || "今日尚无竞价数据（09:30后无法采集）");
+        } else if (data.status === "collected") {
+          toast.success(`已采集 ${data.count} 只股票竞价数据`);
+        }
+        fetchDateData(selectedDate || "");
+      }
     } catch (e) { console.error("handle collect", e); }
     finally { setCollecting(false); }
   };
@@ -232,8 +244,8 @@ export function AuctionBoard() {
                     <th className="px-3 py-2 text-left font-medium">排名</th>
                     <th className="px-3 py-2 text-left font-medium">代码</th>
                     <th className="px-3 py-2 text-left font-medium">名称</th>
-                    <th className="px-3 py-2 text-right font-medium">今日竞价量</th>
-                    <th className="px-3 py-2 text-right font-medium">昨日竞价量</th>
+                    <th className="px-3 py-2 text-right font-medium">今日竞价量（手）</th>
+                    <th className="px-3 py-2 text-right font-medium">昨日竞价量（手）</th>
                     <th className="px-3 py-2 text-right font-medium">变化量</th>
                     <th className="px-3 py-2 text-right font-medium">变化%</th>
                     <th className="px-3 py-2 text-right font-medium">竞价价</th>
@@ -245,10 +257,10 @@ export function AuctionBoard() {
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                       <td className="px-3 py-2 font-mono">{s.code}</td>
                       <td className="px-3 py-2">{s.name}</td>
-                      <td className="px-3 py-2 text-right">{s.vol_today.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right">{Math.round(s.vol_today / 100).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{Math.round(s.vol_prev / 100).toLocaleString()}</td>
                       <td className={`px-3 py-2 text-right ${volClass(s.vol_chg)}`}>
-                        {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
+                        {(s.vol_chg > 0 ? "+" : "") + Math.round(Math.abs(s.vol_chg) / 100).toLocaleString()}
                       </td>
                       <td className={`px-3 py-2 text-right font-medium ${volClass(s.vol_pct)}`}>
                         {s.vol_pct >= 999 ? "NEW" : `${s.vol_pct >= 0 ? "+" : ""}${s.vol_pct.toFixed(1)}%`}
@@ -274,8 +286,8 @@ export function AuctionBoard() {
                     <th className="px-3 py-2 text-left font-medium">排名</th>
                     <th className="px-3 py-2 text-left font-medium">代码</th>
                     <th className="px-3 py-2 text-left font-medium">名称</th>
-                    <th className="px-3 py-2 text-right font-medium">今日竞价量</th>
-                    <th className="px-3 py-2 text-right font-medium">昨日竞价量</th>
+                    <th className="px-3 py-2 text-right font-medium">今日竞价量（手）</th>
+                    <th className="px-3 py-2 text-right font-medium">昨日竞价量（手）</th>
                     <th className="px-3 py-2 text-right font-medium">变化量</th>
                     <th className="px-3 py-2 text-right font-medium">变化%</th>
                     <th className="px-3 py-2 text-right font-medium">竞价价</th>
@@ -287,10 +299,10 @@ export function AuctionBoard() {
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                       <td className="px-3 py-2 font-mono">{s.code}</td>
                       <td className="px-3 py-2">{s.name}</td>
-                      <td className="px-3 py-2 text-right">{s.vol_today.toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right">{Math.round(s.vol_today / 100).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{Math.round(s.vol_prev / 100).toLocaleString()}</td>
                       <td className={`px-3 py-2 text-right ${volClass(s.vol_chg)}`}>
-                        {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
+                        {(s.vol_chg > 0 ? "+" : "") + Math.round(Math.abs(s.vol_chg) / 100).toLocaleString()}
                       </td>
                       <td className={`px-3 py-2 text-right font-medium ${volClass(s.vol_pct)}`}>
                         {s.vol_pct >= 999 ? "NEW" : `${s.vol_pct >= 0 ? "+" : ""}${s.vol_pct.toFixed(1)}%`}
@@ -319,7 +331,7 @@ export function AuctionBoard() {
                   <th className="px-3 py-2 text-left font-medium">排名</th>
                   <th className="px-3 py-2 text-left font-medium">代码</th>
                   <th className="px-3 py-2 text-left font-medium">名称</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价量</th>
+                  <th className="px-3 py-2 text-right font-medium">竞价量（手）</th>
                   <th className="px-3 py-2 text-right font-medium">竞价额</th>
                   <th className="px-3 py-2 text-right font-medium">竞价占比</th>
                   <th className="px-3 py-2 text-right font-medium">竞价价</th>
@@ -333,7 +345,7 @@ export function AuctionBoard() {
                     <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                     <td className="px-3 py-2 font-mono">{s.code}</td>
                     <td className="px-3 py-2">{s.name}</td>
-                    <td className="px-3 py-2 text-right font-medium">{s.auction_vol.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right font-medium">{Math.round(s.auction_vol / 100).toLocaleString()}</td>
                     <td className="px-3 py-2 text-right">{s.auction_amount ? (s.auction_amount / 10000).toFixed(0) + "万" : "-"}</td>
                     <td className={`px-3 py-2 text-right font-medium ${(s.auction_ratio || 0) > 15 ? "text-red-600" : ""}`}>
                       {s.auction_ratio ? s.auction_ratio.toFixed(1) + "%" : "-"}
@@ -371,7 +383,7 @@ export function AuctionBoard() {
                   <th className="px-3 py-2 text-left font-medium">代码</th>
                   <th className="px-3 py-2 text-left font-medium">名称</th>
                   <th className="px-3 py-2 text-right font-medium">竞价占比</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价量</th>
+                  <th className="px-3 py-2 text-right font-medium">竞价量（手）</th>
                   <th className="px-3 py-2 text-right font-medium">竞价价</th>
                   <th className="px-3 py-2 text-right font-medium">开盘价</th>
                 </tr>
@@ -383,7 +395,7 @@ export function AuctionBoard() {
                     <td className="px-3 py-2 font-mono">{s.code}</td>
                     <td className="px-3 py-2">{s.name}</td>
                     <td className="px-3 py-2 text-right font-medium text-red-600">{s.auction_ratio?.toFixed(1)}%</td>
-                    <td className="px-3 py-2 text-right">{s.auction_vol.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-right">{Math.round(s.auction_vol / 100).toLocaleString()}</td>
                     <td className="px-3 py-2 text-right">{s.auction_price?.toFixed(2)}</td>
                     <td className="px-3 py-2 text-right">{s.open_price?.toFixed(2)}</td>
                   </tr>

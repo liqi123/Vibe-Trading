@@ -23,7 +23,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 _log = logging.getLogger("trading_tools")
 
@@ -294,7 +294,10 @@ def remove_expectation(data: dict):
 
 @router.post("/expectations/collect-auction")
 def collect_auction():
-    """Collect auction data for all expectation stocks via Tencent API."""
+    """Collect auction data for all expectation stocks via Tencent API.
+    
+    Before 09:30: fetch live from Tencent. After 09:30: read from auction table.
+    """
     from utils.tencent_quotes import fetch_detail, add_prefix
 
     state = _read_json(_PAPER_DIR / "expectation_state.json")
@@ -306,10 +309,40 @@ def collect_auction():
     if not codes:
         return {"stocks": []}
 
-    data = fetch_detail(codes)
-    prefixed = {code: add_prefix(code) for code in data}
-    raw_to_code = {v: k for k, v in prefixed.items()}
+    blocked, _ = _check_auction_time()
+    if blocked:
+        try:
+            db = _get_db()
+            if db:
+                cur = db.cursor()
+                today_str = date.today().isoformat()
+                results = []
+                for code in codes:
+                    bare = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+                    row = cur.execute(
+                        "SELECT auction_vol, auction_price, open_price FROM auction WHERE date=? AND (code=? OR code=?)",
+                        (today_str, code, bare)
+                    ).fetchone()
+                    if row:
+                        auction_price = row[1] or 0
+                        open_price = row[2] or 0
+                        change_pct = round((auction_price - open_price) / open_price * 100, 2) if open_price else 0
+                        results.append({
+                            "code": code,
+                            "auction_price": auction_price,
+                            "auction_change_pct": change_pct,
+                            "today_vol": row[0],
+                            "prev_vol": 0,
+                            "vol_ratio": 0,
+                        })
+                db.close()
+                if results:
+                    return {"stocks": results, "status": "exists"}
+        except Exception:
+            pass
+        return {"stocks": [], "status": "no_data"}
 
+    data = fetch_detail(codes)
     results = []
     for raw_code, q in data.items():
         code = add_prefix(raw_code)
@@ -380,6 +413,26 @@ def get_portfolio_v5() -> dict:
     if "history" in state:
         state["history"] = sorted(state["history"], key=lambda x: x.get("date", ""), reverse=True)
     return state
+
+
+@router.get("/scan-results")
+def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
+    """Return cached scan results for given strategy and date."""
+    if not date:
+        from datetime import date as _date
+        date = _date.today().strftime("%Y-%m-%d")
+    prefix = "v1" if strategy == "fibonacci" else "v5"
+    path = _PAPER_DIR / f"{prefix}_screening_cache_{date}.json"
+    try:
+        raw = _read_json(path)
+        if not raw:
+            return {"date": date, "candidates": [], "message": "no cache found"}
+        # Normalize: V5 cache uses "results", unify to "candidates"
+        if "candidates" not in raw and "results" in raw:
+            raw["candidates"] = raw.pop("results")
+        return raw
+    except Exception:
+        return {"date": date, "candidates": [], "message": "no cache found"}
 
 
 @router.get("/runaway-price")
@@ -552,27 +605,109 @@ def get_stock_info(code: str) -> dict:
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
+        from utils.config import get_date_col
+        date_col, is_int = get_date_col()
         cur = db.cursor()
         # Get latest kline
         cur.execute(
-            "SELECT date, open, high, low, close, volume FROM daily_kline "
-            "WHERE code = ? ORDER BY date DESC LIMIT 30",
+            f"SELECT {date_col}, open, high, low, close, volume FROM daily_kline "
+            f"WHERE code = ? ORDER BY {date_col} DESC LIMIT 30",
             (code,),
         )
         rows = cur.fetchall()
         # Get stock name
         cur.execute(f"SELECT name FROM {_stock_table()} WHERE code = ?", (code,))
         name_row = cur.fetchone()
+        def _fmt(d):
+            s = str(d)
+            return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if is_int else s
         return {
             "code": code,
             "name": name_row[0] if name_row else "",
             "kline": [
-                {"date": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+                {"date": _fmt(r[0]), "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
                 for r in rows
             ],
         }
     finally:
         db.close()
+
+
+@router.post("/stock/{code}/buy")
+def buy_stock(code: str, data: dict):
+    """Buy a stock into paper trading portfolio.
+
+    Expects: {strategy: "fibonacci"|"v5", name, price, score?, E?, stop?, ...}
+    """
+    strategy = data.get("strategy", "fibonacci")
+    state_file = "paper_trading_state.json" if strategy == "fibonacci" else "paper_trading_state_v2.json"
+    path = _PAPER_DIR / state_file
+    state = _read_json(path)
+    if not state:
+        state = {"initial_capital": 200000, "cash": 200000, "positions": [], "history": []}
+
+    # Check if already held
+    if any(p.get("code") == code for p in state.get("positions", [])):
+        return {"success": False, "message": "已持仓"}
+
+    # Check max positions (5)
+    if len(state.get("positions", [])) >= 5:
+        return {"success": False, "message": "持仓已达上限(5只)"}
+
+    from utils.config import INITIAL_CAPITAL, COMMISSION, SLIPPAGE
+
+    layer_divisor = 6
+    layer = state.get("initial_capital", INITIAL_CAPITAL) / layer_divisor
+    buy_amount = min(layer, state["cash"] - layer)
+    if buy_amount <= 0:
+        return {"success": False, "message": "现金不足"}
+
+    price = data.get("price", 0)
+    if price <= 0:
+        return {"success": False, "message": "无效价格"}
+
+    shares = int(buy_amount / price / 100) * 100
+    if shares <= 0:
+        return {"success": False, "message": "股数不足(最少100股)"}
+
+    buy_price_adj = price * (1 + SLIPPAGE)
+    total_cost = shares * buy_price_adj * (1 + COMMISSION)
+
+    name = data.get("name", "")
+    state["cash"] -= total_cost
+
+    if strategy == "fibonacci":
+        pos = {
+            "code": code, "name": name,
+            "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
+            "current_price": buy_price_adj,
+            "E": data.get("E", 0), "stop": data.get("stop", 0),
+        }
+    else:  # v5
+        score = data.get("score", 0)
+        pos = {
+            "code": code, "name": name,
+            "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
+            "current_price": buy_price_adj,
+            "highest": buy_price_adj, "score": score,
+        }
+
+    state.setdefault("positions", []).append(pos)
+    today = date.today().strftime("%Y-%m-%d")
+    state.setdefault("history", []).append({
+        "date": today, "action": "buy",
+        "code": code, "name": name,
+        "price": buy_price_adj, "shares": shares,
+    })
+
+    try:
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "success": True, "message": f"买入 {name} {code}: {shares}股 @{buy_price_adj:.2f}",
+            "shares": shares, "price": buy_price_adj, "cost": total_cost,
+        }
+    except Exception as e:
+        return {"success": False, "message": f"保存失败: {e}"}
 
 
 @router.get("/stock/{code}/indicators")
@@ -1207,21 +1342,23 @@ def get_watchlist_auction(codes: str = "") -> dict:
         today_date = dates[0]
         prev_date = dates[1] if len(dates) > 1 else None
 
-        # Auction table stores codes without sh/sz prefix
+        # Auction table stores codes without sh/sz prefix (mostly),
+        # but some dates have mixed formats (both bare and prefixed)
         bare_codes = [c[2:] if c.startswith(("sh", "sz")) else c for c in code_list]
-        placeholders = ",".join("?" * len(bare_codes))
+        search_codes = list(dict.fromkeys(bare_codes + code_list))  # dedup
+        auction_placeholders = ",".join("?" * len(search_codes))
 
         today_rows = db.execute(
-            f"SELECT code, auction_vol, auction_price, auction_ratio FROM auction WHERE date=? AND code IN ({placeholders})",
-            [today_date] + bare_codes,
+            f"SELECT code, auction_vol, auction_price, auction_ratio FROM auction WHERE date=? AND code IN ({auction_placeholders})",
+            [today_date] + search_codes,
         ).fetchall()
         today_map = {r[0]: {"today_vol": r[1], "auction_price": r[2], "auction_ratio": r[3]} for r in today_rows}
 
         prev_map = {}
         if prev_date:
             prev_rows = db.execute(
-                f"SELECT code, auction_vol FROM auction WHERE date=? AND code IN ({placeholders})",
-                [prev_date] + bare_codes,
+                f"SELECT code, auction_vol FROM auction WHERE date=? AND code IN ({auction_placeholders})",
+                [prev_date] + search_codes,
             ).fetchall()
             prev_map = {r[0]: r[1] for r in prev_rows}
 
@@ -1232,20 +1369,21 @@ def get_watchlist_auction(codes: str = "") -> dict:
             date_col, is_int = get_date_col()
             prev_date_val = int(prev_date.replace("-", "")) if is_int else prev_date
 
+            kline_placeholders = ",".join("?" * len(code_list))
             kline_rows = db.execute(
-                f"SELECT code, volume FROM daily_kline WHERE {date_col}=? AND code IN ({placeholders})",
+                f"SELECT code, volume FROM daily_kline WHERE {date_col}=? AND code IN ({kline_placeholders})",
                 [prev_date_val] + code_list,
             ).fetchall()
-            prev_vol_map = {r[0]: r[1] // 100 for r in kline_rows}  # 股→手
+            prev_vol_map = {r[0]: r[1] for r in kline_rows}
 
-        # Build result - map bare codes back to full codes
+        # Build result - try bare code first, fall back to prefixed
         result = {}
         for i, code in enumerate(code_list):
             bare = bare_codes[i]
-            t = today_map.get(bare, {})
+            t = today_map.get(bare) or today_map.get(code) or {}
             result[code] = {
                 "today_vol": t.get("today_vol", 0),
-                "prev_vol": prev_map.get(bare, 0),
+                "prev_vol": prev_map.get(bare) or prev_map.get(code) or 0,
                 "auction_price": t.get("auction_price", 0),
                 "auction_ratio": t.get("auction_ratio", 0),
                 "prev_volume": prev_vol_map.get(code, 0),
@@ -1487,8 +1625,9 @@ def delete_scheduled_run(job_id: str) -> dict:
 def get_review_report(date: str = "") -> dict:
     """Return the generated review report markdown content."""
     report_date = date if date else datetime.now().strftime("%Y-%m-%d")
-    report_file = _PROJECT_ROOT / "reports" / f"{report_date}.md"
-    if report_file.exists():
+    safe_name = Path(report_date).name
+    report_file = _PROJECT_ROOT / "reports" / f"{safe_name}.md"
+    if report_file.exists() and report_file.parent == _PROJECT_ROOT / "reports":
         return {"content": report_file.read_text(encoding="utf-8")}
     return {"content": ""}
 
@@ -1497,15 +1636,47 @@ def get_review_report(date: str = "") -> dict:
 # Auction Board (集合竞价看板)
 # ---------------------------------------------------------------------------
 
+def _check_auction_time() -> tuple[bool, dict | None]:
+    """Check if auction collection is allowed.
+    
+    Returns (blocked, response). If blocked, response contains the payload to return.
+    After 09:30, collection is blocked and existing data is returned if available.
+    """
+    now = datetime.now()
+    after_cutoff = now.hour > 9 or (now.hour == 9 and now.minute >= 30)
+    if not after_cutoff:
+        return False, None
+
+    db = _get_db()
+    if db is None:
+        return True, {"ok": False, "error": "no database"}
+    try:
+        today_str = date.today().isoformat()
+        cur = db.cursor()
+        existing = cur.execute("SELECT COUNT(*) FROM auction WHERE date=?", (today_str,)).fetchone()[0]
+        if existing > 0:
+            return True, {"ok": True, "count": existing, "status": "exists"}
+        return True, {"ok": False, "error": "今日尚无竞价数据（09:30后无法采集）", "status": "no_data"}
+    finally:
+        db.close()
+
+
 @router.post("/auction/collect")
 def collect_auction_data():
-    """Collect auction data from Tencent for all stocks and store in DB."""
+    """Collect auction data from Tencent for all stocks and store in DB.
+    
+    Only collects before 09:30. After 09:30, returns existing data if available.
+    """
+    blocked, resp = _check_auction_time()
+    if blocked:
+        return resp
+
     db = _get_db()
     if db is None:
         return {"ok": False, "error": "no database"}
+    today_str = date.today().isoformat()
     try:
         from utils.tencent_quotes import fetch_raw, _parse_basic, add_prefix
-        cur = db.cursor()
         row = _latest_trade_date(db)
         if not row:
             return {"ok": False, "error": "no kline data"}
@@ -1517,7 +1688,6 @@ def collect_auction_data():
 
         raw = fetch_raw(prefixed)
         collected = 0
-        today_str = date.today().isoformat()
         for raw_code, fields in raw.items():
             if len(fields) < 48:
                 continue
@@ -1540,7 +1710,7 @@ def collect_auction_data():
             except Exception:
                 _log.warning("auction insert failed for %s", code, exc_info=True)
         db.commit()
-        return {"ok": True, "count": collected}
+        return {"ok": True, "count": collected, "status": "collected"}
     except Exception as e:
         _log.warning("auction collect failed", exc_info=True)
         return {"ok": False, "error": str(e)}
@@ -1866,7 +2036,7 @@ def get_volume_rank(limit: int = 50):
 # Stock Analysis (个股深度分析)
 # ---------------------------------------------------------------------------
 
-@router.get("/stock-analysis/{code:path}")
+@router.get("/stock-analysis/{code}")
 def get_stock_analysis(code: str):
     """Return Fibonacci cycle analysis + indicators for a stock."""
     db = _get_db()
@@ -1891,9 +2061,6 @@ def get_stock_analysis(code: str):
 
         # Reverse to get chronological order
         rows = rows[::-1]
-        rows = cur.fetchall()
-        if not rows:
-            return {"data": {"error": "no kline data for " + code}}
 
         dates = [r[0] for r in rows]
         opens = [r[1] for r in rows]
@@ -2020,6 +2187,138 @@ def get_stock_analysis(code: str):
     finally:
         if db:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# Shadow Account (影子账户)
+# ---------------------------------------------------------------------------
+
+@router.post("/shadow/analyze")
+def shadow_analyze():
+    """Run full shadow account analysis: convert paper history → extract rules → render report."""
+    import subprocess
+    import sys as _sys
+
+    # Step 1: Convert paper trading history to CSV
+    convert_script = str(_PROJECT_ROOT / "utils" / "paper_to_shadow.py")
+    csv_path = str(_PAPER_DIR / "shadow_account_input.csv")
+    try:
+        result = subprocess.run(
+            [_sys.executable, convert_script],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(_PROJECT_ROOT),
+        )
+        if result.returncode != 0:
+            return {"ok": False, "detail": f"转换失败: {result.stderr[:500]}"}
+    except Exception as e:
+        return {"ok": False, "detail": f"转换异常: {e}"}
+
+    # Step 2: Extract shadow profile + render report via Vibe-Trading agent
+    agent_dir = str(Path(__file__).resolve().parent.parent.parent)
+    analyze_script = f"""
+import sys, json
+sys.path.insert(0, r"{agent_dir}")
+sys.stdout.reconfigure(encoding='utf-8')
+
+from src.shadow_account import extract_shadow_profile, save_profile, load_profile, run_shadow_backtest, render_shadow_report
+from src.shadow_account.backtester import load_cached_result
+from pathlib import Path
+
+csv_path = r"{csv_path}"
+profile = extract_shadow_profile(csv_path, min_support=3, max_rules=5)
+save_profile(profile)
+
+result = load_cached_result(profile.shadow_id)
+if result is None:
+    try:
+        result = run_shadow_backtest(
+            profile,
+            window_start='2026-01-01',
+            window_end='2026-12-31',
+            journal_path=csv_path,
+        )
+    except Exception:
+        from src.shadow_account.models import AttributionBreakdown, ShadowBacktestResult
+        result = ShadowBacktestResult(
+            shadow_id=profile.shadow_id,
+            per_market=dict(), combined=dict(), equity_curves=dict(),
+            attribution=AttributionBreakdown(
+                missed_signals_pnl=0.0, noise_trades_pnl=0.0, early_exit_pnl=0.0,
+                late_exit_pnl=0.0, overtrading_pnl=0.0, counterfactual_trades=(),
+            ),
+            shadow_total_pnl=0.0, real_total_pnl=0.0, delta_pnl=0.0,
+        )
+
+report = render_shadow_report(profile, result, today_signals=[])
+
+# Output JSON summary
+rules = []
+for r in profile.rules:
+    rules.append({{
+        'rule_id': r.rule_id,
+        'human_text': r.human_text,
+        'support_count': r.support_count,
+        'coverage_rate': r.coverage_rate,
+        'holding_days_range': list(r.holding_days_range),
+    }})
+
+summary = {{
+    'shadow_id': profile.shadow_id,
+    'profitable_roundtrips': profile.profitable_roundtrips,
+    'total_roundtrips': profile.total_roundtrips,
+    'source_market': profile.source_market,
+    'typical_holding_days': list(profile.typical_holding_days),
+    'rules': rules,
+    'shadow_pnl': result.shadow_total_pnl,
+    'real_pnl': result.real_total_pnl,
+    'delta_pnl': result.delta_pnl,
+    'html_path': report['html_path'],
+}}
+print(json.dumps(summary, ensure_ascii=False))
+"""
+    try:
+        result = subprocess.run(
+            [_sys.executable, "-c", analyze_script],
+            capture_output=True, text=True, timeout=120,
+            cwd=agent_dir,
+        )
+        if result.returncode != 0:
+            return {"ok": False, "detail": f"分析失败: {result.stderr[:500]}"}
+        summary = json.loads(result.stdout.strip().split("\n")[-1])
+        return {"ok": True, **summary}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": "分析超时（>120s）"}
+    except Exception as e:
+        return {"ok": False, "detail": f"分析异常: {e}"}
+
+
+@router.get("/shadow/report/{shadow_id}")
+def shadow_report(shadow_id: str):
+    """Return the shadow account HTML report content."""
+    import re
+    if not re.match(r"^shadow_[0-9a-f]{8}$", shadow_id):
+        return {"ok": False, "detail": "invalid shadow_id"}
+    report_path = Path.home() / ".vibe-trading" / "shadow_reports" / f"{shadow_id}.html"
+    if not report_path.exists():
+        return {"ok": False, "detail": "报告不存在，请先运行分析"}
+    html = report_path.read_text(encoding="utf-8")
+    return {"ok": True, "html": html}
+
+
+@router.get("/shadow/list")
+def shadow_list():
+    """List all existing shadow account reports."""
+    reports_dir = Path.home() / ".vibe-trading" / "shadow_reports"
+    if not reports_dir.exists():
+        return {"ok": True, "reports": []}
+    reports = []
+    for f in sorted(reports_dir.glob("shadow_*.html"), key=lambda p: p.stat().st_mtime, reverse=True):
+        shadow_id = f.stem
+        reports.append({
+            "shadow_id": shadow_id,
+            "updated_at": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+        })
+    return {"ok": True, "reports": reports}
 
 
 def register_trading_tools_routes(app, require_auth=None):

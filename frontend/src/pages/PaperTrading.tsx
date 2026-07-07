@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Wallet, History, RefreshCw, Clock, TrendingDown, Save } from "lucide-react";
+import { Wallet, History, RefreshCw, Clock, TrendingDown, Save, Brain, Loader2, AlertCircle } from "lucide-react";
 import { useModalStore } from "../stores/modal";
 
 interface V1Position {
@@ -77,7 +77,11 @@ export function PaperTrading() {
   const [v1, setV1] = useState<PaperState | null>(null);
   const [v5, setV5] = useState<PaperState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "history">("v1");
+  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "history" | "shadow">("v1");
+  const [shadowLoading, setShadowLoading] = useState(false);
+  const [shadowResult, setShadowResult] = useState<any>(null);
+  const [shadowError, setShadowError] = useState<string | null>(null);
+  const [shadowReportHtml, setShadowReportHtml] = useState<string | null>(null);
   const [sellingCode, setSellingCode] = useState<string | null>(null);
   const [editingE, setEditingE] = useState<Record<string, string>>({});
   const [savingE, setSavingE] = useState<string | null>(null);
@@ -145,6 +149,31 @@ export function PaperTrading() {
     setSellingCode(null);
   };
 
+  const handleShadowAnalyze = async () => {
+    setShadowLoading(true);
+    setShadowError(null);
+    setShadowResult(null);
+    setShadowReportHtml(null);
+    try {
+      const resp = await fetch("/tools/shadow/analyze", { method: "POST" });
+      const data = await resp.json();
+      if (data.ok) {
+        setShadowResult(data);
+        // Load the HTML report
+        const reportResp = await fetch(`/tools/shadow/report/${data.shadow_id}`);
+        const reportData = await reportResp.json();
+        if (reportData.ok) {
+          setShadowReportHtml(reportData.html);
+        }
+      } else {
+        setShadowError(data.detail || "分析失败");
+      }
+    } catch (e) {
+      setShadowError("请求失败: " + String(e));
+    }
+    setShadowLoading(false);
+  };
+
   const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : null;
   const positions = state?.positions || [];
   const cash = state?.cash || 0;
@@ -177,7 +206,7 @@ export function PaperTrading() {
 
       {/* Tabs */}
       <div className="flex gap-2 border-b">
-        {(["v1", "v5", "history"] as const).map(tab => (
+        {(["v1", "v5", "history", "shadow"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -187,7 +216,7 @@ export function PaperTrading() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : "交易历史"}
+            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : tab === "shadow" ? "影子账户" : "交易历史"}
           </button>
         ))}
       </div>
@@ -417,8 +446,107 @@ export function PaperTrading() {
         </div>
       )}
 
+      {/* Shadow Account */}
+      {activeTab === "shadow" && (
+        <div className="space-y-4">
+          <div className="border rounded-lg bg-card p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <Brain className="h-6 w-6 text-purple-500" />
+                <div>
+                  <h2 className="font-semibold text-lg">影子账户分析</h2>
+                  <p className="text-sm text-muted-foreground">从模拟盘交易记录中提取交易规则，分析实际操作与规则的偏差</p>
+                </div>
+              </div>
+              <button
+                onClick={handleShadowAnalyze}
+                disabled={shadowLoading}
+                className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50"
+              >
+                {shadowLoading ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> 分析中...</>
+                ) : (
+                  <>开始分析</>
+                )}
+              </button>
+            </div>
+
+            {shadowError && (
+              <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                {shadowError}
+              </div>
+            )}
+
+            {shadowResult && !shadowReportHtml && (
+              <div className="grid gap-4 md:grid-cols-4">
+                <div className="border rounded-lg p-4">
+                  <div className="text-sm text-muted-foreground mb-1">盈利轮次</div>
+                  <p className="text-xl font-bold">{shadowResult.profitable_roundtrips} / {shadowResult.total_roundtrips}</p>
+                </div>
+                <div className="border rounded-lg p-4">
+                  <div className="text-sm text-muted-foreground mb-1">提取规则</div>
+                  <p className="text-xl font-bold">{shadowResult.rules?.length || 0} 条</p>
+                </div>
+                <div className="border rounded-lg p-4">
+                  <div className="text-sm text-muted-foreground mb-1">实盘盈亏</div>
+                  <p className={`text-xl font-bold ${(shadowResult.real_pnl || 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                    {(shadowResult.real_pnl || 0).toFixed(2)}
+                  </p>
+                </div>
+                <div className="border rounded-lg p-4">
+                  <div className="text-sm text-muted-foreground mb-1">盈亏差值</div>
+                  <p className={`text-xl font-bold ${(shadowResult.delta_pnl || 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                    {(shadowResult.delta_pnl || 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {shadowResult && (
+              <div className="mt-4">
+                <h3 className="font-medium mb-2">提取规则</h3>
+                <div className="space-y-2">
+                  {shadowResult.rules?.map((r: any) => (
+                    <div key={r.rule_id} className="flex items-center gap-3 p-3 bg-muted/50 rounded-lg">
+                      <span className="px-2 py-0.5 text-xs font-mono bg-purple-100 text-purple-700 rounded">{r.rule_id}</span>
+                      <span className="text-sm flex-1">{r.human_text}</span>
+                      <span className="text-xs text-muted-foreground">支撑 {r.support_count} 笔</span>
+                      <span className="text-xs text-muted-foreground">覆盖 {(r.coverage_rate * 100).toFixed(0)}%</span>
+                      <span className="text-xs text-muted-foreground">持仓 {r.holding_days_range[0]}-{r.holding_days_range[1]}天</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {shadowReportHtml && (
+            <div className="border rounded-lg bg-card overflow-hidden">
+              <div className="px-4 py-3 border-b flex items-center justify-between">
+                <h2 className="font-semibold">影子账户报告</h2>
+                <a
+                  href={shadowResult ? `/shadow-reports/${shadowResult.shadow_id}` : "#"}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  在新窗口打开
+                </a>
+              </div>
+              <iframe
+                srcDoc={shadowReportHtml}
+                className="w-full border-0"
+                style={{ height: "80vh" }}
+                title="Shadow Account Report"
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Trade History (per strategy) */}
-      {activeTab !== "history" && state?.history && state.history.length > 0 && (
+      {activeTab !== "history" && activeTab !== "shadow" && state?.history && state.history.length > 0 && (
         <div className="border rounded-lg bg-card overflow-hidden">
           <div className="px-4 py-3 border-b flex items-center gap-2">
             <History className="h-4 w-4" />

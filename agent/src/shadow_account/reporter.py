@@ -37,17 +37,17 @@ _HTML_TEMPLATE = "shadow_report.html"
 _CSS_TEMPLATE = "shadow_report.css"
 
 _MARKET_LABELS = {
-    "china_a": "China A-share",
-    "us": "US equity",
-    "hk": "HK equity",
-    "crypto": "Crypto",
-    "other": "Other",
+    "china_a": "A股",
+    "us": "美股",
+    "hk": "港股",
+    "crypto": "加密货币",
+    "other": "其他",
 }
 
 _REASON_LABELS = {
-    "rule_violation": "Outside any shadow rule",
-    "early_exit": "Exited winner too early",
-    "late_exit": "Held loser too long",
+    "rule_violation": "不在影子规则范围内",
+    "early_exit": "过早止盈",
+    "late_exit": "过晚止损",
 }
 
 
@@ -188,7 +188,7 @@ def _render_equity_curve(result: ShadowBacktestResult, path: Path) -> None:
     values = [pt[1] for pt in curve]
     ax.plot(dates, values, color="#1f7a3a", linewidth=1.3)
     ax.fill_between(dates, values, color="#1f7a3a", alpha=0.08)
-    ax.set_title("Shadow — Portfolio Equity Curve")
+    ax.set_title("影子 — 组合净值曲线")
     ax.set_xlabel("")
     ax.set_ylabel("Equity")
     ax.grid(True, linestyle=":", alpha=0.4)
@@ -213,7 +213,7 @@ def _render_per_market_bar(result: ShadowBacktestResult, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 3), dpi=150)
     bars = ax.bar(labels, sharpes, color="#4a5fb0")
     ax.axhline(0, color="#8a8f99", linewidth=0.8)
-    ax.set_title("Sharpe by Market")
+    ax.set_title("各市场夏普比率")
     ax.grid(True, axis="y", linestyle=":", alpha=0.4)
     for bar, value in zip(bars, sharpes):
         ax.text(
@@ -232,13 +232,13 @@ def _render_per_market_bar(result: ShadowBacktestResult, path: Path) -> None:
 def _render_attribution_waterfall(result: ShadowBacktestResult, path: Path) -> None:
     attr = result.attribution
     components = [
-        ("Real PnL", result.real_total_pnl),
-        ("Noise Trades", attr.noise_trades_pnl),
-        ("Early Exit", attr.early_exit_pnl),
-        ("Late Exit", attr.late_exit_pnl),
-        ("Overtrading", attr.overtrading_pnl),
-        ("Missed Signals", attr.missed_signals_pnl),
-        ("Shadow PnL", result.shadow_total_pnl),
+        ("实盘盈亏", result.real_total_pnl),
+        ("噪音交易", attr.noise_trades_pnl),
+        ("过早止盈", attr.early_exit_pnl),
+        ("过晚止损", attr.late_exit_pnl),
+        ("过度交易", attr.overtrading_pnl),
+        ("错过信号", attr.missed_signals_pnl),
+        ("影子盈亏", result.shadow_total_pnl),
     ]
     if all(value == 0.0 for _, value in components):
         return
@@ -270,7 +270,7 @@ def _render_attribution_waterfall(result: ShadowBacktestResult, path: Path) -> N
     fig, ax = plt.subplots(figsize=(8, 3.2), dpi=150, facecolor=bg)
     ax.bar(labels, values, bottom=bases, color=colors, edgecolor="none", width=0.55)
     ax.axhline(0, color=grid, linewidth=0.8)
-    ax.set_title("Delta Attribution (positive = shadow would outperform)")
+    ax.set_title("盈亏归因（正值=影子策略占优）")
     ax.grid(True, axis="y", linestyle=":", alpha=0.4)
     plt.setp(ax.get_xticklabels(), rotation=18, ha="right")
     fig.tight_layout()
