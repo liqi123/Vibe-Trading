@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Trade {
   date: string;
@@ -31,19 +32,13 @@ export function TradeJournal() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [rJ, rW] = await Promise.all([
-        fetch("/tools/journal?days=90"),
-        fetch("/tools/journal/weekly"),
+      const [jData, wData] = await Promise.all([
+        api.tools.get<any>("/journal?days=90"),
+        api.tools.get<any>("/journal/weekly"),
       ]);
-      if (rJ.ok) {
-        const d = await rJ.json();
-        setTrades(d.trades || []);
-        setStats(d.stats || null);
-      }
-      if (rW.ok) {
-        const d = await rW.json();
-        setWeekly(d.report || "");
-      }
+      setTrades(jData.trades || []);
+      setStats(jData.stats || null);
+      setWeekly(wData.report || "");
     } catch { /* ignore */ }
     setLoading(false);
   };

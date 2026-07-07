@@ -278,7 +278,7 @@ export function RunDetail() {
           <div className="ml-auto flex gap-1">
             {run.trade_log && run.trade_log.length > 0 && (
               <button
-                onClick={() => downloadCsv(`trades_${runId}.csv`, buildTradesCsv(run.trade_log!))}
+                onClick={() => downloadCsv(`trades_${runId}.csv`, buildTradesCsv(run.trade_log ?? []))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-muted transition-colors"
                 title={i18n.t("runDetail.downloadTradesCsv")}
               >
@@ -287,7 +287,7 @@ export function RunDetail() {
             )}
             {run.metrics && (
               <button
-                onClick={() => downloadCsv(`metrics_${runId}.csv`, buildMetricsCsv(run.metrics!))}
+                onClick={() => downloadCsv(`metrics_${runId}.csv`, buildMetricsCsv(run.metrics ?? {} as BacktestMetrics))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-muted transition-colors"
                 title={i18n.t("runDetail.downloadMetricsCsv")}
               >
@@ -603,7 +603,7 @@ function ChartTab({
       {hasEquity && (
         <div>
           <h3 className="text-sm font-medium mb-1">{i18n.t("runDetail.equityDrawdown")}</h3>
-          <EquityChart data={run.equity_curve!} height={280} />
+          <EquityChart data={run.equity_curve ?? []} height={280} />
         </div>
       )}
     </div>

@@ -12,6 +12,7 @@ File-system-based persistence for SwarmRun. Directory structure:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -505,7 +506,7 @@ class SwarmStore:
                 task_store.save_task(task)
             self.update_run(run)
         except Exception:  # pragma: no cover — best-effort sweep
-            logger = __import__("logging").getLogger(__name__)
+            logger = logging.getLogger(__name__)
             logger.warning("Failed to persist reconciliation for run %s", run.id, exc_info=True)
             return
 

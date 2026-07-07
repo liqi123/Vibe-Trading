@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { RefreshCw, TrendingUp, Wallet, BookOpen, BarChart3, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
+import { api } from "@/lib/api";
 
 function localDate(date?: Date): string {
   const d = date || new Date();
@@ -103,8 +104,7 @@ export function DailyReview() {
   useEffect(() => {
     const today = localDate();
     const ctrl = new AbortController();
-    fetch(`/tools/review-report?date=${today}`, { signal: ctrl.signal })
-      .then(r => r.ok ? r.json() : null)
+    api.tools.get<any>(`/review-report?date=${today}`, ctrl.signal)
       .then(d => { if (d?.content) setReport(d.content); })
       .catch(() => {
         if (!ctrl.signal.aborted) {
@@ -119,22 +119,19 @@ export function DailyReview() {
     setLoading(true);
     try {
       const [rM, r1, r5, rJ, t1, t5] = await Promise.all([
-        fetch("/tools/market/realtime"),
-        fetch("/tools/portfolio"),
-        fetch("/tools/portfolio/v5"),
-        fetch("/tools/journal?days=1"),
-        fetch("/tools/trades"),
-        fetch("/tools/trades/v5"),
+        api.tools.get<any>("/market/realtime"),
+        api.tools.get<any>("/portfolio"),
+        api.tools.get<any>("/portfolio/v5"),
+        api.tools.get<any>("/journal?days=1"),
+        api.tools.get<any>("/trades"),
+        api.tools.get<any>("/trades/v5"),
       ]);
-      if (rM.ok) setMarket(await rM.json());
-      if (r1.ok) setV1(await r1.json());
-      if (r5.ok) setV5(await r5.json());
-      if (rJ.ok) {
-        const d = await rJ.json();
-        setJournal(d.trades || []);
-      }
-      const d1 = t1.ok ? await t1.json() : { history: [] };
-      const d5 = t5.ok ? await t5.json() : { history: [] };
+      setMarket(rM);
+      setV1(r1);
+      setV5(r5);
+      setJournal(rJ.trades || []);
+      const d1 = t1 || { history: [] };
+      const d5 = t5 || { history: [] };
       setTrades([
         ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
         ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
@@ -153,24 +150,12 @@ export function DailyReview() {
     setGenerating(true);
     setReport(null);
     try {
-      const resp = await fetch("/tools/run-script", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script: "review_v5" }),
-      });
-      if (!resp.ok) {
-        await loadExistingReport();
-        setGenerating(false);
-        return;
-      }
-      const { task_id } = await resp.json();
+      const { task_id } = await api.tools.post<any>("/run-script", { script: "review_v5" });
 
       let output = "";
       for (let i = 0; i < 120; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const outResp = await fetch(`/tools/run-script/${task_id}`);
-        if (!outResp.ok) continue;
-        const data = await outResp.json();
+        const data = await api.tools.get<any>(`/run-script/${task_id}`);
         output = data.output || "";
         if (output.includes("执行完成") || output.includes("错误") || output.includes("超时")) break;
       }
@@ -196,14 +181,11 @@ export function DailyReview() {
   const loadExistingReport = async () => {
     try {
       const today = localDate();
-      const r = await fetch(`/tools/review-report?date=${today}`);
-      if (r.ok) {
-        const d = await r.json();
-        if (d?.content) {
-          setReport(d.content);
-          localStorage.setItem(`review_report_${today}`, d.content);
-          return;
-        }
+      const d = await api.tools.get<any>(`/review-report?date=${today}`);
+      if (d?.content) {
+        setReport(d.content);
+        localStorage.setItem(`review_report_${today}`, d.content);
+        return;
       }
       const cached = localStorage.getItem(`review_report_${today}`);
       if (cached) { setReport(cached); return; }

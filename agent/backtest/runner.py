@@ -23,7 +23,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass
+    pass  # python-dotenv not installed
 
 from backtest.loaders.registry import (
     FALLBACK_CHAINS,

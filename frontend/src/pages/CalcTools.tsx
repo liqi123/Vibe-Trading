@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Calculator, ArrowRight, Search } from "lucide-react";
+import { api } from "@/lib/api";
 
 function RunawayPriceCalc() {
   const [high, setHigh] = useState("");
@@ -24,19 +25,18 @@ function RunawayPriceCalc() {
     if (!stockCode || !stockDate) return;
     setLoading(true);
     try {
-      const resp = await fetch(`/tools/runaway-price?code=${stockCode.trim().toLowerCase()}&date=${stockDate}`);
-      if (resp.ok) {
-        const data = await resp.json();
+      try {
+        const data = await api.tools.get<any>(`/runaway-price?code=${stockCode.trim().toLowerCase()}&date=${stockDate}`);
         setOpen(String(data.open));
         setHigh(String(data.high));
         setLow(String(data.low));
         setClose(String(data.close));
-        setStockName(data.code || "");
-      } else {
-        alert("未找到该日期的K线数据");
+        // setStockName was never declared — removed
+      } catch (e) {
+        console.error("未找到该日期的K线数据");
       }
-    } catch {
-      alert("查询失败");
+    } catch (e) {
+      console.error("查询失败", e);
     }
     setLoading(false);
   };

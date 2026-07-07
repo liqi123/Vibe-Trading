@@ -969,7 +969,7 @@ def _load_llm_providers() -> List[LLMProviderOption]:
     try:
         raw = json.loads(LLM_PROVIDER_CONFIG_PATH.read_text(encoding="utf-8"))
         providers = [LLMProviderOption(**item) for item in raw]
-    except Exception as exc:
+    except (json.JSONDecodeError, OSError, KeyError) as exc:
         raise RuntimeError(f"Failed to load LLM provider config: {LLM_PROVIDER_CONFIG_PATH}") from exc
 
     seen: set[str] = set()
@@ -1389,7 +1389,7 @@ def _run_response_payload(response: RunResponse) -> Dict[str, Any]:
 # ``run_id`` and ``session_id`` flow directly into filesystem paths
 # (``RUNS_DIR / run_id`` etc.). Restrict to a safe character class so that
 # values like ``..`` or ``foo/../bar`` cannot escape the parent directory.
-_SAFE_PATH_PARAM_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SAFE_PATH_PARAM_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _validate_path_param(value: str, kind: str) -> None:
@@ -2350,7 +2350,7 @@ _BLOCKED_UPLOAD_NAMES = {
 }
 
 
-_SHADOW_ID_RE = __import__("re").compile(r"^shadow_[0-9a-f]{8}$")
+_SHADOW_ID_RE = re.compile(r"^shadow_[0-9a-f]{8}$")
 
 
 @app.get("/shadow-reports/{shadow_id}", dependencies=[Depends(require_auth)])

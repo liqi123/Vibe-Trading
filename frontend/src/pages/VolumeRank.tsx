@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, TrendingUp, BarChart3, PieChart } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface VolumeStock {
   code: string; name: string; price: number; chg_pct: number;
@@ -27,15 +28,12 @@ export function VolumeRank() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/tools/market/volume-rank?limit=50");
-      if (res.ok) {
-        const data = await res.json();
-        setStocks(data.stocks || []);
-        setByIndustry(data.by_industry || {});
-        setIndustryRanking(data.industry_ranking || []);
-        setStats(data.stats || null);
-      }
-    } catch { /* ignore */ }
+      const data = await api.tools.get<any>("/market/volume-rank?limit=50");
+      setStocks(data.stocks || []);
+      setByIndustry(data.by_industry || {});
+      setIndustryRanking(data.industry_ranking || []);
+      setStats(data.stats || null);
+    } catch (e) { console.error('Failed to fetch volume rank:', e); }
     finally { setLoading(false); }
   };
 

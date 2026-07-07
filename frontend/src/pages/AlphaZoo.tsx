@@ -717,8 +717,8 @@ function BenchView() {
       try {
         const data = JSON.parse((e as MessageEvent).data) as BenchProgress;
         setProgress(data);
-      } catch {
-        /* ignore */
+      } catch (parseErr) {
+        console.error('Bench progress parse error:', parseErr);
       }
     });
 
@@ -726,8 +726,8 @@ function BenchView() {
       try {
         const data = JSON.parse((e as MessageEvent).data) as AlphaBenchResult;
         setResult(data);
-      } catch {
-        /* ignore */
+      } catch (parseErr) {
+        console.error('Bench result parse error:', parseErr);
       }
     });
 
@@ -752,8 +752,8 @@ function BenchView() {
       try {
         const data = JSON.parse((e as MessageEvent).data || "{}");
         if (typeof data.message === "string") msg = data.message;
-      } catch {
-        /* network-level error, no payload */
+      } catch (parseErr) {
+        console.error('Bench error parse:', parseErr);
       }
       toast.error(msg);
       setStatus("error");
@@ -1157,15 +1157,15 @@ function CompareView() {
     source.addEventListener("progress", (e) => {
       try {
         setProgress(JSON.parse((e as MessageEvent).data) as BenchProgress);
-      } catch {
-        /* ignore */
+      } catch (parseErr) {
+        console.error('Compare progress parse error:', parseErr);
       }
     });
     source.addEventListener("result", (e) => {
       try {
         setResult(JSON.parse((e as MessageEvent).data) as AlphaCompareResult);
-      } catch {
-        /* ignore */
+      } catch (parseErr) {
+        console.error('Compare result parse error:', parseErr);
       }
     });
     source.addEventListener("done", () => {
@@ -1186,8 +1186,8 @@ function CompareView() {
       try {
         const data = JSON.parse((e as MessageEvent).data || "{}");
         if (typeof data.message === "string") msg = data.message;
-      } catch {
-        /* network-level error, no payload */
+      } catch (parseErr) {
+        console.error('Compare error parse:', parseErr);
       }
       toast.error(msg);
       setStatus("error");

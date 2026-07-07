@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, TrendingUp, Layers, Grid3X3 } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface LadderStock {
   code: string; name: string; price: number; chg_pct: number;
@@ -23,16 +24,13 @@ export function MarketLadder() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/tools/market/ladder");
-      if (res.ok) {
-        const data = await res.json();
-        setLadder(data.ladder || []);
-        setByBoard(data.by_board || {});
-        setByConcept(data.by_concept || {});
-        setStats(data.stats || null);
-        setSummary(data.summary || "");
-      }
-    } catch { /* ignore */ }
+      const data = await api.tools.get<any>("/market/ladder");
+      setLadder(data.ladder || []);
+      setByBoard(data.by_board || {});
+      setByConcept(data.by_concept || {});
+      setStats(data.stats || null);
+      setSummary(data.summary || "");
+    } catch (e) { console.error('Failed to fetch ladder:', e); }
     finally { setLoading(false); }
   };
 

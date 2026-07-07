@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Plus, RefreshCw, Trash2, Edit2, Check, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useModalStore } from "../stores/modal";
+import { api } from "@/lib/api";
 
 interface WatchlistItem {
   code: string;
@@ -12,19 +14,23 @@ interface WatchlistItem {
   runaway_price: number;
 }
 
-  const PHI = (1 + Math.sqrt(5)) / 2;
-  const fibonacciPrice = (H: number, L: number, n = 5) => {
-    const factor = 1 / PHI + Math.exp((-2 * Math.log(PHI)) / Math.PI * n);
-    return H - factor * (H - L);
+
+
+  const getSuggestionKey = (price: number, e: number, x: number, run: number): { textKey: string; color: string } => {
+    if (!price || !e) return { textKey: "suggestionNone", color: "text-muted-foreground" };
+    if (price < e) return { textKey: "suggestionBuy", color: "text-green-600 font-bold" };
+    if (x && price >= x && (!run || price < run)) return { textKey: "suggestionConsiderSell", color: "text-orange-600 font-bold" };
+    if (run && price >= run) return { textKey: "suggestionSell", color: "text-red-600 font-bold" };
+    return { textKey: "suggestionHold", color: "text-blue-600" };
   };
 
-  const getSuggestion = (price: number, e: number, x: number, run: number): { text: string; color: string } => {
-    if (!price || !e) return { text: "-", color: "text-muted-foreground" };
-    if (price < e) return { text: "买入", color: "text-green-600 font-bold" };
-    if (x && price >= x && (!run || price < run)) return { text: "考虑卖出", color: "text-orange-600 font-bold" };
-    if (run && price >= run) return { text: "建议卖出", color: "text-red-600 font-bold" };
-    return { text: "持有", color: "text-blue-600" };
-  };
+interface PositionData {
+  code: string;
+  name?: string;
+  e_price?: number;
+  x_price?: number;
+  runaway_price?: number;
+}
 
 export function Watchlist() {
   const [items, setItems] = useState<WatchlistItem[]>([]);
@@ -35,51 +41,36 @@ export function Watchlist() {
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const [editValues, setEditValues] = useState({ e_price: "", x_price: "", runaway_price: "" });
   const openStock = useModalStore((s) => s.open);
+  const { t } = useTranslation();
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/tools/expectations");
-      if (res.ok) {
-        const data = await res.json();
-        const positions = data.positions || [];
-        if (positions.length > 0) {
-          const codes = positions.map((p: any) => p.code).join(",");
-          const priceRes = await fetch(`/tools/prices?codes=${codes}`);
-          if (priceRes.ok) {
-            const priceData = await priceRes.json();
-            const enriched = positions.map((p: any) => {
-              const priceInfo = priceData.prices?.[p.code]
-                || priceData.prices?.[p.code.startsWith("6") ? "sh" + p.code : "sz" + p.code]
-                || {};
-              return {
-                code: p.code,
-                name: p.name || priceInfo.name || "",
-                price: priceInfo.price || 0,
-                change_pct: priceInfo.change_pct || 0,
-                e_price: p.e_price || 0,
-                x_price: p.x_price || 0,
-                runaway_price: p.runaway_price || 0,
-              };
-            });
-            setItems(enriched);
-          } else {
-            setItems(positions.map((p: any) => ({
-              code: p.code,
-              name: p.name || "",
-              price: 0,
-              change_pct: 0,
-              e_price: p.e_price || 0,
-              x_price: p.x_price || 0,
-              runaway_price: p.runaway_price || 0,
-            })));
-          }
-        } else {
-          setItems([]);
-        }
+      const data = await api.tools.get<any>("/expectations");
+      const positions = data.positions || [];
+      if (positions.length > 0) {
+        const codes = positions.map((p: PositionData) => p.code).join(",");
+        const priceData = await api.tools.get<any>(`/prices?codes=${codes}`);
+        const enriched = positions.map((p: PositionData) => {
+          const priceInfo = priceData.prices?.[p.code]
+            || priceData.prices?.[p.code.startsWith("6") ? "sh" + p.code : "sz" + p.code]
+            || {};
+          return {
+            code: p.code,
+            name: p.name || priceInfo.name || "",
+            price: priceInfo.price || 0,
+            change_pct: priceInfo.change_pct || 0,
+            e_price: p.e_price || 0,
+            x_price: p.x_price || 0,
+            runaway_price: p.runaway_price || 0,
+          };
+        });
+        setItems(enriched);
+      } else {
+        setItems([]);
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Failed to fetch watchlist:', e);
     } finally {
       setLoading(false);
     }
@@ -88,42 +79,31 @@ export function Watchlist() {
   const searchStock = async (q: string) => {
     if (!q.trim()) { setSearchResults([]); return; }
     try {
-      const res = await fetch(`/tools/expectations/search?q=${encodeURIComponent(q.trim())}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSearchResults(data.results || []);
-      }
-    } catch { /* ignore */ }
+      const data = await api.tools.get<any>(`/expectations/search?q=${encodeURIComponent(q.trim())}`);
+      setSearchResults(data.results || []);
+    } catch (e) { console.error('Failed to search stock:', e); }
   };
 
   const addStock = async (code?: string) => {
     const input = code || newCode.trim();
     if (!input) return;
     try {
-      await fetch("/tools/expectations/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: input }),
-      });
+      await api.tools.post<any>("/expectations/add", { code: input });
       setNewCode("");
       setSearchResults([]);
       setShowAddModal(false);
       fetchData();
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Failed to add stock:', e);
     }
   };
 
   const removeStock = async (code: string) => {
     try {
-      await fetch("/tools/expectations/remove", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
+      await api.tools.post<any>("/expectations/remove", { code });
       fetchData();
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Failed to remove stock:', e);
     }
   };
 
@@ -143,20 +123,16 @@ export function Watchlist() {
 
   const saveEdit = async (code: string) => {
     try {
-      await fetch("/tools/expectations/update-prices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          code,
-          e_price: parseFloat(editValues.e_price) || 0,
-          x_price: parseFloat(editValues.x_price) || 0,
-          runaway_price: parseFloat(editValues.runaway_price) || 0,
-        }),
+      await api.tools.post<any>("/expectations/update-prices", {
+        code,
+        e_price: parseFloat(editValues.e_price) || 0,
+        x_price: parseFloat(editValues.x_price) || 0,
+        runaway_price: parseFloat(editValues.runaway_price) || 0,
       });
       setEditingCode(null);
       fetchData();
-    } catch {
-      // ignore
+    } catch (e) {
+      console.error('Failed to save edit:', e);
     }
   };
 
@@ -170,8 +146,8 @@ export function Watchlist() {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">自选股</h1>
-          <p className="text-sm text-muted-foreground mt-1">实时行情监控</p>
+          <h1 className="text-2xl font-bold">{t("watchlist.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("watchlist.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -179,7 +155,7 @@ export function Watchlist() {
             className="flex items-center gap-2 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors"
           >
             <Plus className="h-4 w-4" />
-            添加
+            {t("watchlist.add")}
           </button>
           <button
             onClick={fetchData}
@@ -187,7 +163,7 @@ export function Watchlist() {
             className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            刷新
+            {t("watchlist.refresh")}
           </button>
         </div>
       </div>
@@ -195,27 +171,28 @@ export function Watchlist() {
       <div className="border rounded-lg bg-card overflow-hidden">
         {items.length === 0 ? (
           <div className="p-8 text-center text-muted-foreground">
-            暂无自选股，点击"添加"开始
+            {t("watchlist.emptyHint")}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-muted/40 text-xs text-muted-foreground">
                 <tr>
-                  <th className="px-4 py-3 text-left font-medium">代码</th>
-                  <th className="px-4 py-3 text-left font-medium">名称</th>
-                  <th className="px-4 py-3 text-right font-medium">现价</th>
-                  <th className="px-4 py-3 text-right font-medium">涨跌幅</th>
-                  <th className="px-4 py-3 text-right font-medium">E价</th>
-                  <th className="px-4 py-3 text-right font-medium">X价</th>
-                  <th className="px-4 py-3 text-right font-medium">跑路价</th>
-                  <th className="px-4 py-3 text-center font-medium">建议</th>
-                  <th className="px-4 py-3 text-center font-medium">操作</th>
+                  <th className="px-4 py-3 text-left font-medium">{t("watchlist.thCode")}</th>
+                  <th className="px-4 py-3 text-left font-medium">{t("watchlist.thName")}</th>
+                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
+                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
+                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thEPrice")}</th>
+                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thXPrice")}</th>
+                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thRunawayPrice")}</th>
+                  <th className="px-4 py-3 text-center font-medium">{t("watchlist.thSuggestion")}</th>
+                  <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((item) => {
                   const isEditing = editingCode === item.code;
+                  const sug = getSuggestionKey(item.price, item.e_price, item.x_price, item.runaway_price);
                   return (
                     <tr key={item.code} className="border-t hover:bg-muted/30 transition-colors">
                       <td className="px-4 py-3 font-mono cursor-pointer hover:text-primary" onClick={() => openStock(item.code)}>{item.code}</td>
@@ -266,8 +243,12 @@ export function Watchlist() {
                         )}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <span className={`text-xs ${getSuggestion(item.price, item.e_price, item.x_price, item.runaway_price).color}`}>
-                          {getSuggestion(item.price, item.e_price, item.x_price, item.runaway_price).text}
+                        <span className={`text-xs ${sug.color}`}>
+                          {sug.textKey === "suggestionNone" ? t("watchlist.suggestionNone") :
+                           sug.textKey === "suggestionBuy" ? t("watchlist.suggestionBuy") :
+                           sug.textKey === "suggestionConsiderSell" ? t("watchlist.suggestionConsiderSell") :
+                           sug.textKey === "suggestionSell" ? t("watchlist.suggestionSell") :
+                           t("watchlist.suggestionHold")}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-center">
@@ -276,14 +257,14 @@ export function Watchlist() {
                             <button
                               onClick={() => saveEdit(item.code)}
                               className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
-                              title="保存"
+                              title={t("watchlist.save")}
                             >
                               <Check className="h-4 w-4" />
                             </button>
                             <button
                               onClick={cancelEdit}
                               className="p-1 text-muted-foreground hover:bg-muted rounded transition-colors"
-                              title="取消"
+                              title={t("watchlist.cancel")}
                             >
                               <X className="h-4 w-4" />
                             </button>
@@ -293,14 +274,14 @@ export function Watchlist() {
                             <button
                               onClick={() => startEdit(item)}
                               className="p-1 text-muted-foreground hover:text-blue-600 rounded transition-colors"
-                              title="编辑"
+                              title={t("watchlist.edit")}
                             >
                               <Edit2 className="h-4 w-4" />
                             </button>
                             <button
                               onClick={() => removeStock(item.code)}
                               className="p-1 text-muted-foreground hover:text-red-600 rounded transition-colors"
-                              title="删除"
+                              title={t("watchlist.delete")}
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -320,13 +301,13 @@ export function Watchlist() {
       {showAddModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddModal(false)}>
           <div className="bg-card rounded-lg p-6 w-96 shadow-lg" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-4">添加自选股</h3>
+            <h3 className="text-lg font-semibold mb-4">{t("watchlist.addStockTitle")}</h3>
             <input
               autoFocus
               value={newCode}
               onChange={(e) => { setNewCode(e.target.value); searchStock(e.target.value); }}
               onKeyDown={(e) => { if (e.key === "Enter") addStock(); if (e.key === "Escape") setShowAddModal(false); }}
-              placeholder="输入代码或名称，如 000725 / 京东方"
+              placeholder={t("watchlist.searchPlaceholder")}
               className="w-full border rounded-md px-3 py-2 text-sm"
             />
             {searchResults.length > 0 && (
@@ -348,13 +329,13 @@ export function Watchlist() {
                 onClick={() => setShowAddModal(false)}
                 className="px-4 py-2 text-sm border rounded-md hover:bg-muted"
               >
-                取消
+                {t("watchlist.cancel")}
               </button>
               <button
                 onClick={() => addStock()}
                 className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90"
               >
-                添加
+                {t("watchlist.add")}
               </button>
             </div>
           </div>

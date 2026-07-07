@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Search, RefreshCw, TrendingUp, TrendingDown, Target, BarChart3, AlertTriangle } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Indicator {
   ma5: number; ma10: number; ma20: number; ma60: number;
@@ -45,12 +46,7 @@ export function StockAnalysis() {
     setError(null);
     setResult(null);
     try {
-      const res = await fetch(`/tools/stock-analysis/${encodeURIComponent(q)}`);
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail || "请求失败");
-      }
-      const data = await res.json();
+      const data = await api.tools.get<any>(`/stock-analysis/${encodeURIComponent(q)}`);
       if (data.error) {
         setError(data.error);
       } else {
