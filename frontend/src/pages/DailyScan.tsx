@@ -16,15 +16,83 @@ interface Candidate {
   code: string;
   name: string;
   price: number;
-  E: number;
   score: number;
-  deviation: number;
-  H: number;
-  L: number;
-  H_date: string;
-  L_date: string;
-  swing: number;
-  stop: number;
+  E?: number;
+  deviation?: number;
+  H?: number;
+  L?: number;
+  H_date?: string;
+  L_date?: string;
+  swing?: number;
+  stop?: number;
+}
+
+interface Column {
+  key: string;
+  label: string;
+  align?: "left" | "right" | "center";
+  render: (c: Candidate) => React.ReactNode;
+}
+
+function StrategyTable({ candidates, columns, klineData, expandedKline, onKline, onBuy, emptyText }: {
+  candidates: Candidate[];
+  columns: Column[];
+  klineData: Record<string, PriceBar[]>;
+  expandedKline: string | null;
+  onKline: (code: string) => void;
+  onBuy: (c: Candidate) => void;
+  emptyText: string;
+}) {
+  if (candidates.length === 0) {
+    return (
+      <div className="p-6 text-center text-muted-foreground">
+        <p className="mb-3">{emptyText}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/40 text-xs text-muted-foreground">
+          <tr>
+            <th className="px-3 py-2 text-left font-medium">排名</th>
+            {columns.map(col => (
+              <th key={col.key} className={`px-3 py-2 text-${col.align === "right" ? "right" : col.align === "center" ? "center" : "left"} font-medium`}>{col.label}</th>
+            ))}
+            <th className="px-3 py-2 text-center font-medium">K线</th>
+            <th className="px-3 py-2 text-center font-medium">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {candidates.map((c, i) => (
+            <>
+              <tr key={c.code} className="border-t">
+                <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
+                {columns.map(col => (
+                  <td key={col.key} className={`px-3 py-2 text-${col.align === "right" ? "right" : col.align === "center" ? "center" : "left"}`}>{col.render(c)}</td>
+                ))}
+                <td className="px-3 py-2 text-center">
+                  <button onClick={() => onKline(c.code)} className="p-1 text-muted-foreground hover:text-primary rounded" title="查看K线">
+                    <CandleIcon className="h-4 w-4" />
+                  </button>
+                </td>
+                <td className="px-3 py-2 text-center">
+                  <button onClick={() => onBuy(c)} className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">买入</button>
+                </td>
+              </tr>
+              {expandedKline === c.code && klineData[c.code] && (
+                <tr key={`${c.code}-kline`}>
+                  <td colSpan={columns.length + 3} className="px-4 py-3 bg-muted/10">
+                    <CandlestickChart data={klineData[c.code]} height={360} />
+                  </td>
+                </tr>
+              )}
+            </>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 export function DailyScan() {
@@ -46,13 +114,10 @@ export function DailyScan() {
         fetch("/tools/scan-results?strategy=fibonacci"),
         fetch("/tools/scan-results?strategy=v5"),
       ]);
-      console.log("fibRes status:", fibRes.status);
       const fibData = fibRes.ok ? await fibRes.json() : null;
       const v5Data = v5Res.ok ? await v5Res.json() : null;
-      console.log("fibData:", fibData);
       const fib = fibData?.candidates || [];
       const v5 = v5Data?.candidates || [];
-      console.log("fib candidates:", fib.length);
       setFibCandidates(fib);
       setV5Candidates(v5);
       setNoCache(fib.length === 0 && v5.length === 0);
@@ -318,80 +383,26 @@ export function DailyScan() {
             重新选股
           </button>
         </div>
-        {fibCandidates.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">排名</th>
-                  <th className="px-3 py-2 text-left font-medium">代码</th>
-                  <th className="px-3 py-2 text-left font-medium">名称</th>
-                  <th className="px-3 py-2 text-right font-medium">现价</th>
-                  <th className="px-3 py-2 text-right font-medium">E价</th>
-                  <th className="px-3 py-2 text-right font-medium">偏差%</th>
-                  <th className="px-3 py-2 text-right font-medium">评分</th>
-                  <th className="px-3 py-2 text-right font-medium">摆动%</th>
-                  <th className="px-3 py-2 text-right font-medium">止损</th>
-                  <th className="px-3 py-2 text-center font-medium">H日期</th>
-                  <th className="px-3 py-2 text-center font-medium">L日期</th>
-                  <th className="px-3 py-2 text-center font-medium">K线</th>
-                  <th className="px-3 py-2 text-center font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {fibCandidates.map((c, i) => (
-                  <>
-                    <tr key={c.code} className="border-t">
-                      <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
-                      <td className="px-3 py-2 font-mono">{c.code}</td>
-                      <td className="px-3 py-2">{c.name}</td>
-                      <td className="px-3 py-2 text-right">{c.price.toFixed(2)}</td>
-                      <td className="px-3 py-2 text-right">{c.E.toFixed(2)}</td>
-                      <td className={`px-3 py-2 text-right ${c.deviation >= 0 ? "text-red-600" : "text-green-600"}`}>
-                        {c.deviation.toFixed(2)}%
-                      </td>
-                      <td className="px-3 py-2 text-right font-medium">{c.score.toFixed(1)}</td>
-                      <td className="px-3 py-2 text-right">{c.swing.toFixed(1)}%</td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">{c.stop.toFixed(2)}</td>
-                      <td className="px-3 py-2 text-center text-xs">{c.H_date}</td>
-                      <td className="px-3 py-2 text-center text-xs">{c.L_date}</td>
-                      <td className="px-3 py-2 text-center">
-                        <button
-                          onClick={() => fetchKline(c.code)}
-                          className="p-1 text-muted-foreground hover:text-primary rounded"
-                          title="查看K线"
-                        >
-                          <CandleIcon className="h-4 w-4" />
-                        </button>
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <button
-                          onClick={() => handleBuy(c.code, c.name, "fibonacci", {
-                            price: c.price, E: c.E, stop: c.stop, score: c.score,
-                          })}
-                          className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                        >
-                          买入
-                        </button>
-                      </td>
-                    </tr>
-                    {expandedKline === c.code && klineData[c.code] && (
-                      <tr key={`${c.code}-kline`}>
-                        <td colSpan={13} className="px-4 py-3 bg-muted/10">
-                          <CandlestickChart data={klineData[c.code]} height={360} />
-                        </td>
-                      </tr>
-                    )}
-                  </>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="p-6 text-center text-muted-foreground">
-            <p className="mb-3">暂无斐波那契选股结果</p>
-          </div>
-        )}
+        <StrategyTable
+          candidates={fibCandidates}
+          columns={[
+            { key: "code", label: "代码", render: c => <span className="font-mono">{c.code}</span> },
+            { key: "name", label: "名称", render: c => c.name },
+            { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+            { key: "E", label: "E价", align: "right", render: c => c.E?.toFixed(2) ?? "-" },
+            { key: "deviation", label: "偏差%", align: "right", render: c => <span className={(c.deviation ?? 0) >= 0 ? "text-red-600" : "text-green-600"}>{c.deviation?.toFixed(2) ?? "-"}%</span> },
+            { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
+            { key: "swing", label: "摆动%", align: "right", render: c => `${c.swing?.toFixed(1) ?? "-"}%` },
+            { key: "stop", label: "止损", align: "right", render: c => <span className="text-muted-foreground">{c.stop?.toFixed(2) ?? "-"}</span> },
+            { key: "H_date", label: "H日期", align: "center", render: c => <span className="text-xs">{c.H_date}</span> },
+            { key: "L_date", label: "L日期", align: "center", render: c => <span className="text-xs">{c.L_date}</span> },
+          ]}
+          klineData={klineData}
+          expandedKline={expandedKline}
+          onKline={fetchKline}
+          onBuy={c => handleBuy(c.code, c.name, "fibonacci", { price: c.price, E: c.E, stop: c.stop, score: c.score })}
+          emptyText="暂无斐波那契选股结果"
+        />
       </div>
 
       {/* V5 选股结果 */}
@@ -407,55 +418,20 @@ export function DailyScan() {
             重新选股
           </button>
         </div>
-        {v5Candidates.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">排名</th>
-                  <th className="px-3 py-2 text-left font-medium">代码</th>
-                  <th className="px-3 py-2 text-left font-medium">名称</th>
-                  <th className="px-3 py-2 text-right font-medium">现价</th>
-                  <th className="px-3 py-2 text-right font-medium">评分</th>
-                  <th className="px-3 py-2 text-center font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {v5Candidates.map((c, i) => (
-                  <tr key={c.code} className="border-t">
-                    <td className="px-3 py-2 text-center text-muted-foreground">{i + 1}</td>
-                    <td className="px-3 py-2 font-mono">{c.code}</td>
-                    <td className="px-3 py-2">{c.name}</td>
-                    <td className="px-3 py-2 text-right">{c.price.toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right font-medium">{c.score.toFixed(1)}</td>
-                    <td className="px-3 py-2 text-center">
-                      <button
-                        onClick={() => handleBuy(c.code, c.name, "v5", {
-                          price: c.price, score: c.score,
-                        })}
-                        className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                      >
-                        买入
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="p-6 text-center text-muted-foreground">
-            <p className="mb-3">暂无V5趋势选股结果</p>
-            {!running && (
-              <button
-                onClick={() => handleRunScan("v5")}
-                className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:opacity-90"
-              >
-                开始V5选股
-              </button>
-            )}
-          </div>
-        )}
+        <StrategyTable
+          candidates={v5Candidates}
+          columns={[
+            { key: "code", label: "代码", render: c => <span className="font-mono">{c.code}</span> },
+            { key: "name", label: "名称", render: c => c.name },
+            { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+            { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
+          ]}
+          klineData={klineData}
+          expandedKline={expandedKline}
+          onKline={fetchKline}
+          onBuy={c => handleBuy(c.code, c.name, "v5", { price: c.price, score: c.score })}
+          emptyText="暂无V5趋势选股结果"
+        />
       </div>
     </div>
   );

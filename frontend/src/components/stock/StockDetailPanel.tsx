@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { useModalStore } from "../../stores/modal";
+import { IntradaySparkline } from "@/components/charts/IntradaySparkline";
 
 interface KlineBar {
   date: string;
@@ -55,7 +56,7 @@ export function StockDetailPanel() {
 
   if (!stockCode) return null;
 
-  const latest = kline[0];
+  const latest = kline?.[0];
 
   return (
     <>
@@ -91,6 +92,14 @@ export function StockDetailPanel() {
           <div className="p-8 text-center text-muted-foreground">加载中...</div>
         ) : (
           <div className="p-5 space-y-5">
+            {/* 分时图 */}
+            <div className="border rounded-lg p-3 bg-muted/10">
+              <h4 className="text-sm font-medium mb-2">今日分时</h4>
+              <div className="flex justify-center">
+                <IntradaySparkline code={stockCode} width={360} height={160} />
+              </div>
+            </div>
+
             {/* K-line summary */}
             {latest && (
               <div className="border rounded-lg p-4 bg-muted/30">

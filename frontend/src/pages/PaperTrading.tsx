@@ -97,6 +97,10 @@ export function PaperTrading() {
         fetch("/tools/trades"),
         fetch("/tools/trades/v5"),
       ]);
+      if (!r1.ok) throw new Error(`Portfolio fetch failed: ${r1.status}`);
+      if (!r5.ok) throw new Error(`V5 portfolio fetch failed: ${r5.status}`);
+      if (!t1.ok) throw new Error(`Trades fetch failed: ${t1.status}`);
+      if (!t5.ok) throw new Error(`V5 trades fetch failed: ${t5.status}`);
       setV1(await r1.json());
       setV5(await r5.json());
       const d1 = await t1.json();
@@ -222,7 +226,7 @@ export function PaperTrading() {
       </div>
 
       {/* Summary */}
-      {activeTab !== "history" && <div className="grid gap-4 md:grid-cols-5">
+      {activeTab !== "history" && activeTab !== "shadow" && <div className="grid gap-4 md:grid-cols-5">
         <div className="border rounded-lg p-4 bg-card">
           <div className="flex items-center gap-2 text-sm text-muted-foreground mb-1">
             <Wallet className="h-4 w-4" />
@@ -269,7 +273,7 @@ export function PaperTrading() {
       )}
 
       {/* Positions */}
-      {activeTab !== "history" && <div className="border rounded-lg bg-card overflow-hidden">
+      {activeTab !== "history" && activeTab !== "shadow" && <div className="border rounded-lg bg-card overflow-hidden">
         <div className="px-4 py-3 border-b">
           <h2 className="font-semibold">当前持仓</h2>
         </div>

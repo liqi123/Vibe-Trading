@@ -16,6 +16,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -23,7 +24,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 _log = logging.getLogger("trading_tools")
 
@@ -48,13 +49,36 @@ def _read_json(path: Path) -> dict | list:
         return {}
 
 
-def _stock_table() -> str:
-    """Auto-detect stocks / stock_names table (delegates to utils.db)."""
+def _atomic_write_json(path: Path, data: dict | list) -> None:
+    """原子写入 JSON，防止并发读取到半写状态。"""
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    tmp.replace(path)
+
+
+_STOCK_TABLE_CACHE: str | None = None
+
+def _stock_table(db: sqlite3.Connection | None = None) -> str:
+    """Auto-detect stocks / stock_names table (result cached)."""
+    global _STOCK_TABLE_CACHE
+    if _STOCK_TABLE_CACHE is not None:
+        return _STOCK_TABLE_CACHE
+    own_db = db is None
+    if own_db:
+        db = _get_db()
+        if db is None:
+            _STOCK_TABLE_CACHE = 'stock_names'
+            return _STOCK_TABLE_CACHE
     try:
-        from utils.db import stock_name_table
-        return stock_name_table()
+        tables = {r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        _STOCK_TABLE_CACHE = 'stock_names' if 'stock_names' in tables else 'stocks'
     except Exception:
-        return 'stocks'
+        _STOCK_TABLE_CACHE = 'stock_names'
+    finally:
+        if own_db and db is not None:
+            db.close()
+    return _STOCK_TABLE_CACHE
 
 
 def _get_db() -> sqlite3.Connection | None:
@@ -89,26 +113,6 @@ def _ma(arr: list[float], period: int) -> float:
         return 0
     n = min(len(arr), period)
     return round(sum(arr[-n:]) / n, 2)
-def _local_extrema(high_arr, low_arr, date_arr, lookback=5):
-    """Find local highs and lows.
-    
-    Returns list of tuples: (index, value, date_string)
-    """
-    n = len(high_arr)
-    high_extrema = []
-    low_extrema = []
-    
-    for i in range(1, n - 1):
-        start = max(0, i - lookback)
-        end = min(n, i + lookback + 1)
-        if all(high_arr[i] >= h for h in high_arr[start:end] if h != high_arr[i]):
-            high_extrema.append((i, high_arr[i], str(date_arr[i])))
-        if all(low_arr[i] <= l for l in low_arr[start:end] if l != low_arr[i]):
-            low_extrema.append((i, low_arr[i], str(date_arr[i])))
-    
-    return high_extrema, low_extrema
-
-
 def _load_industry_map() -> dict:
     """Load industry mapping, returns {} on failure."""
     try:
@@ -235,7 +239,7 @@ def add_expectation(data: dict):
             name = q.get("name", "")
             prev_close = q.get("prev_close", 0)
         except Exception:
-            _log.warning("add_expectation: Tencent fallback failed for %s", code)
+            _log.warning("add_expectation: Tencent fallback failed for %s", code, exc_info=True)
 
     positions.append({
         "code": code,
@@ -245,9 +249,7 @@ def add_expectation(data: dict):
     })
     state["positions"] = positions
 
-    (_PAPER_DIR / "expectation_state.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
     return {"ok": True}
 
 
@@ -269,9 +271,7 @@ def update_expectation_prices(data: dict):
             break
 
     state["positions"] = positions
-    (_PAPER_DIR / "expectation_state.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
     return {"ok": True}
 
 
@@ -286,9 +286,7 @@ def remove_expectation(data: dict):
     positions = state.get("positions", [])
     state["positions"] = [p for p in positions if p.get("code") != code]
 
-    (_PAPER_DIR / "expectation_state.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
     return {"ok": True}
 
 
@@ -316,6 +314,10 @@ def collect_auction():
             if db:
                 cur = db.cursor()
                 today_str = date.today().isoformat()
+                prev_dates = [r[0] for r in cur.execute(
+                    "SELECT DISTINCT date FROM auction WHERE date<? ORDER BY date DESC LIMIT 1", (today_str,)
+                ).fetchall()]
+                prev_date = prev_dates[0] if prev_dates else None
                 results = []
                 for code in codes:
                     bare = code[2:] if code.startswith(("sh", "sz", "bj")) else code
@@ -327,12 +329,18 @@ def collect_auction():
                         auction_price = row[1] or 0
                         open_price = row[2] or 0
                         change_pct = round((auction_price - open_price) / open_price * 100, 2) if open_price else 0
+                        prev_row = None
+                        if prev_date:
+                            prev_row = cur.execute(
+                                "SELECT auction_vol FROM auction WHERE date=? AND (code=? OR code=?)",
+                                (prev_date, code, bare)
+                            ).fetchone()
                         results.append({
                             "code": code,
                             "auction_price": auction_price,
                             "auction_change_pct": change_pct,
                             "today_vol": row[0],
-                            "prev_vol": 0,
+                            "prev_vol": prev_row[0] if prev_row else 0,
                             "vol_ratio": 0,
                         })
                 db.close()
@@ -356,7 +364,6 @@ def collect_auction():
             "prev_vol": q["prev_volume"],
             "vol_ratio": round(vol_ratio, 2),
         })
-
     return {"stocks": results}
 
 
@@ -375,9 +382,7 @@ def save_auction(data: dict):
     }
     state["auction_data"] = auction_data
 
-    (_PAPER_DIR / "expectation_state.json").write_text(
-        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
     return {"ok": True}
 
 
@@ -417,22 +422,44 @@ def get_portfolio_v5() -> dict:
 
 @router.get("/scan-results")
 def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
-    """Return cached scan results for given strategy and date."""
+    """Return cached scan results for given strategy and date.
+    13:00之前默认取前一天（当日选股尚未生成），之后取当天。"""
     if not date:
-        from datetime import date as _date
-        date = _date.today().strftime("%Y-%m-%d")
+        from datetime import date as _date, datetime
+        today = _date.today()
+        date = today.strftime("%Y-%m-%d")
+        if datetime.now().hour < 13:
+            from datetime import timedelta
+            date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     prefix = "v1" if strategy == "fibonacci" else "v5"
-    path = _PAPER_DIR / f"{prefix}_screening_cache_{date}.json"
-    try:
-        raw = _read_json(path)
+
+    def _load(cache_date: str) -> dict | None:
+        p = _PAPER_DIR / f"{prefix}_screening_cache_{cache_date}.json"
+        raw = _read_json(p)
         if not raw:
-            return {"date": date, "candidates": [], "message": "no cache found"}
-        # Normalize: V5 cache uses "results", unify to "candidates"
+            return None
         if "candidates" not in raw and "results" in raw:
             raw["candidates"] = raw.pop("results")
+        raw["date"] = cache_date
         return raw
+
+    result = _load(date)
+    if result is not None:
+        return result
+
+    # Fallback: find latest cache file for this strategy
+    try:
+        files = sorted(_PAPER_DIR.glob(f"{prefix}_screening_cache_*.json"), reverse=True)
+        for f in files:
+            d = f.stem.replace(f"{prefix}_screening_cache_", "")
+            result = _load(d)
+            if result is not None:
+                result["message"] = f"no cache for {date}, using {d}"
+                return result
     except Exception:
-        return {"date": date, "candidates": [], "message": "no cache found"}
+        pass
+
+    return {"date": date, "candidates": [], "message": "no cache found"}
 
 
 @router.get("/runaway-price")
@@ -509,7 +536,7 @@ def update_position_field(data: dict):
         raise HTTPException(status_code=404, detail=f"No position for {code}")
 
     state["positions"] = positions
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, state)
     return {"ok": True}
 
 
@@ -590,7 +617,7 @@ def sell_position(data: dict):
     # Update cash
     state["cash"] = state.get("cash", 0) + current_price * sell_shares
 
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, state)
     return {"ok": True, "pnl": round(pnl, 2), "price": current_price}
 
 
@@ -611,7 +638,7 @@ def get_stock_info(code: str) -> dict:
         # Get latest kline
         cur.execute(
             f"SELECT {date_col}, open, high, low, close, volume FROM daily_kline "
-            f"WHERE code = ? ORDER BY {date_col} DESC LIMIT 30",
+            f"WHERE code = ? ORDER BY {date_col} DESC LIMIT 500",
             (code,),
         )
         rows = cur.fetchall()
@@ -631,6 +658,36 @@ def get_stock_info(code: str) -> dict:
         }
     finally:
         db.close()
+
+
+@router.get("/stock/{code}/intraday")
+def get_stock_intraday(code: str) -> dict:
+    """Return today's 1-minute intraday kline via mootdx for mini 分时 sparkline."""
+    raw = code
+    for pfx in ("sh", "sz", "bj"):
+        if code.startswith(pfx):
+            raw = code[len(pfx):]
+            break
+    try:
+        from mootdx.quotes import Quotes
+        client = Quotes.factory(market='std')
+        bars = client.bars(symbol=raw, frequency=8, offset=240)
+        if bars is not None and len(bars) > 0:
+            from datetime import date
+            today = date.today().isoformat()
+            today_bars = bars[bars.index >= today] if hasattr(bars.index, 'date') else bars[bars['datetime'].str[:10] == today]
+            if len(today_bars) > 0:
+                result = []
+                for _, r in today_bars.iterrows():
+                    dt_str = str(r['datetime'] if hasattr(r, 'datetime') else r.name)
+                    t_part = dt_str.split(" ")[1][:5] if " " in dt_str else dt_str
+                    result.append({"t": t_part, "p": float(r['close'])})
+                return {"code": code, "bars": result}
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return {"code": code, "bars": []}
 
 
 @router.post("/stock/{code}/buy")
@@ -701,7 +758,7 @@ def buy_stock(code: str, data: dict):
     })
 
     try:
-        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(path, state)
         return {
             "success": True, "message": f"买入 {name} {code}: {shares}股 @{buy_price_adj:.2f}",
             "shares": shares, "price": buy_price_adj, "cost": total_cost,
@@ -1193,7 +1250,9 @@ def update_data():
             if result.returncode == 0 and "处理完成" in stdout:
                 return {"ok": True, "method": "tdx_zip", "message": stdout.strip().split("\n")[-1]}
             # Fallback to Tencent
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            e.process.kill()
+            e.process.wait()
             _log.warning("update_data: TDX zip timed out")
         except Exception:
             _log.warning("update_data: TDX zip failed", exc_info=True)
@@ -1307,17 +1366,19 @@ def get_script_output(task_id: str):
 
 
 @router.get("/trades")
-def get_trades() -> list:
-    """Return trade history from paper trading state."""
+def get_trades() -> dict:
+    """Return trade history from paper trading state (newest first)."""
     state = _read_json(_PAPER_DIR / "paper_trading_state.json")
-    return state.get("history", [])
+    history = sorted(state.get("history", []), key=lambda x: x.get("date", ""), reverse=True)
+    return {"history": history}
 
 
 @router.get("/trades/v5")
-def get_trades_v5() -> list:
-    """Return V5 trade history."""
+def get_trades_v5() -> dict:
+    """Return V5 trade history (newest first)."""
     state = _read_json(_PAPER_DIR / "paper_trading_state_v2.json")
-    return state.get("history", [])
+    history = sorted(state.get("history", []), key=lambda x: x.get("date", ""), reverse=True)
+    return {"history": history}
 
 
 @router.get("/watchlist-auction")
@@ -1349,10 +1410,10 @@ def get_watchlist_auction(codes: str = "") -> dict:
         auction_placeholders = ",".join("?" * len(search_codes))
 
         today_rows = db.execute(
-            f"SELECT code, auction_vol, auction_price, auction_ratio FROM auction WHERE date=? AND code IN ({auction_placeholders})",
+            f"SELECT code, auction_vol, auction_price FROM auction WHERE date=? AND code IN ({auction_placeholders})",
             [today_date] + search_codes,
         ).fetchall()
-        today_map = {r[0]: {"today_vol": r[1], "auction_price": r[2], "auction_ratio": r[3]} for r in today_rows}
+        today_map = {r[0]: {"today_vol": r[1], "auction_price": r[2]} for r in today_rows}
 
         prev_map = {}
         if prev_date:
@@ -1385,7 +1446,6 @@ def get_watchlist_auction(codes: str = "") -> dict:
                 "today_vol": t.get("today_vol", 0),
                 "prev_vol": prev_map.get(bare) or prev_map.get(code) or 0,
                 "auction_price": t.get("auction_price", 0),
-                "auction_ratio": t.get("auction_ratio", 0),
                 "prev_volume": prev_vol_map.get(code, 0),
             }
 
@@ -1703,8 +1763,8 @@ def collect_auction_data():
             try:
                 bare_code = code[2:] if code.startswith(("sh", "sz", "bj")) else code
                 cur.execute(
-                    "INSERT OR REPLACE INTO auction (date, code, name, auction_vol, auction_amount, total_vol, total_amount, auction_ratio, auction_price, open_price, collect_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (today_str, bare_code, name, vol, amount, vol, amount, ratio, price, open_px, datetime.now().strftime("%H:%M:%S"))
+                    "INSERT OR REPLACE INTO auction (date, code, name, auction_vol, auction_amount, auction_price, open_price, collect_time, prev_close) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (today_str, bare_code, name, vol, amount, price, open_px, datetime.now().strftime("%H:%M:%S"), prev_close)
                 )
                 collected += 1
             except Exception:
@@ -1726,8 +1786,8 @@ def get_auction_dates():
         return {"dates": []}
     try:
         cur = db.cursor()
-        cur.execute("SELECT date, COUNT(*), COALESCE(SUM(auction_vol), 0), COALESCE(AVG(auction_ratio), 0) FROM auction GROUP BY date ORDER BY date DESC")
-        dates = [{"date": r[0], "count": r[1], "total_vol": r[2], "avg_ratio": round(r[3], 2)} for r in cur.fetchall()]
+        cur.execute("SELECT date, COUNT(*), COALESCE(SUM(auction_vol), 0) FROM auction GROUP BY date ORDER BY date DESC")
+        dates = [{"date": r[0], "count": r[1], "total_vol": r[2]} for r in cur.fetchall()]
         return {"dates": dates}
     except Exception as e:
         _log.warning("auction dates failed", exc_info=True)
@@ -1746,24 +1806,22 @@ def get_auction_latest(date: str = "", limit: int = 100):
         return {"stocks": [], "leaders": [], "stats": None}
     try:
         cur = db.cursor()
-        cur.execute("SELECT code, name, auction_vol, auction_amount, auction_ratio, auction_price, open_price, total_vol, total_amount FROM auction WHERE date=? ORDER BY auction_vol DESC LIMIT ?", (date, limit))
+        cur.execute("SELECT code, name, auction_vol, auction_amount, auction_price, open_price FROM auction WHERE date=? ORDER BY auction_vol DESC LIMIT ?", (date, limit))
         rows = cur.fetchall()
         stocks = []
         for r in rows:
             stocks.append({
                 "code": r[0], "name": r[1], "auction_vol": r[2], "auction_amount": r[3],
-                "auction_ratio": r[4], "auction_price": r[5], "open_price": r[6],
-                "total_vol": r[7], "total_amount": r[8],
+                "auction_price": r[4], "open_price": r[5],
             })
         count = len(stocks)
         total_vol = sum(s["auction_vol"] for s in stocks)
         total_amount = sum(s["auction_amount"] for s in stocks)
-        avg_ratio = round(sum(s["auction_ratio"] for s in stocks) / count, 2) if count else 0
         leaders = sorted(stocks, key=lambda s: s["auction_vol"], reverse=True)[:5]
         return {
             "stocks": stocks,
             "leaders": leaders,
-            "stats": {"count": count, "total_vol": total_vol, "total_amount": total_amount, "avg_ratio": avg_ratio},
+            "stats": {"count": count, "total_vol": total_vol, "total_amount": total_amount},
         }
     except Exception as e:
         _log.warning("auction latest failed", exc_info=True)
@@ -1782,12 +1840,17 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
     try:
         cur = db.cursor()
-        cur.execute("SELECT code, name, auction_vol, auction_price, auction_ratio FROM auction WHERE date=?", (date1,))
-        d1_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "ratio": r[4]} for r in cur.fetchall()}
-        cur.execute("SELECT code, name, auction_vol, auction_price, auction_ratio FROM auction WHERE date=?", (date2,))
-        d2_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "ratio": r[4]} for r in cur.fetchall()}
+        cur.execute("SELECT code, name, auction_vol, auction_price, prev_close FROM auction WHERE date=?", (date1,))
+        d1_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "prev_close": r[4] or 0} for r in cur.fetchall()}
+        cur.execute("SELECT code, name, auction_vol, auction_price, prev_close FROM auction WHERE date=?", (date2,))
+        d2_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "prev_close": r[4] or 0} for r in cur.fetchall()}
 
         all_codes = set(d1_map) | set(d2_map)
+        if not all_codes:
+            return {"date1": date1, "date2": date2, "gainers": [], "losers": [],
+                    "increase": 0, "decrease": 0, "total": 0}
+
+        # Compute diff list first (no DB needed)
         diff = []
         for code in all_codes:
             v1 = d1_map.get(code, {}).get("vol", 0) or 0
@@ -1795,12 +1858,12 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
             name = d1_map.get(code, d2_map.get(code, {})).get("name", "")
             chg = v2 - v1
             pct = round((v2 - v1) / v1 * 100, 2) if v1 else 0
+            info = d1_map.get(code) or d2_map.get(code) or {}
             diff.append({
                 "code": code, "name": name,
                 "vol_today": v2, "vol_prev": v1,
                 "vol_chg": chg, "vol_pct": pct,
-                "price_today": d2_map.get(code, {}).get("price", 0),
-                "ratio_today": d2_map.get(code, {}).get("ratio", 0),
+                "price_today": info.get("price", 0) or 0,
             })
 
         diff.sort(key=lambda x: x["vol_chg"], reverse=True)
@@ -1808,6 +1871,14 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         losers = [d for d in diff if d["vol_chg"] < 0][:top]
         increase = sum(1 for d in diff if d["vol_chg"] > 0)
         decrease = sum(1 for d in diff if d["vol_chg"] < 0)
+
+        # 竞价涨幅 = (竞价价 - 昨收) / 昨收，优先用 date1 数据
+        for d in gainers + losers:
+            code = d["code"]
+            info = d1_map.get(code) or d2_map.get(code) or {}
+            auction_price = info.get("price", 0) or 0
+            pc = info.get("prev_close", 0) or 0
+            d["auction_chg_today"] = round((auction_price - pc) / pc * 100, 2) if pc and auction_price else None
         return {
             "date1": date1, "date2": date2,
             "gainers": gainers, "losers": losers,
@@ -2200,11 +2271,10 @@ def shadow_analyze():
     import sys as _sys
 
     # Step 1: Convert paper trading history to CSV
-    convert_script = str(_PROJECT_ROOT / "utils" / "paper_to_shadow.py")
     csv_path = str(_PAPER_DIR / "shadow_account_input.csv")
     try:
         result = subprocess.run(
-            [_sys.executable, convert_script],
+            [_sys.executable, "-m", "utils.paper_to_shadow"],
             capture_output=True, text=True, timeout=30,
             cwd=str(_PROJECT_ROOT),
         )
@@ -2286,7 +2356,9 @@ print(json.dumps(summary, ensure_ascii=False))
             return {"ok": False, "detail": f"分析失败: {result.stderr[:500]}"}
         summary = json.loads(result.stdout.strip().split("\n")[-1])
         return {"ok": True, **summary}
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        e.process.kill()
+        e.process.wait()
         return {"ok": False, "detail": "分析超时（>120s）"}
     except Exception as e:
         return {"ok": False, "detail": f"分析异常: {e}"}

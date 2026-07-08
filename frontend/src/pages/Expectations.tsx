@@ -31,7 +31,7 @@ export function Expectations() {
   const [newCode, setNewCode] = useState("");
   const [collecting, setCollecting] = useState(false);
   const [editingVol, setEditingVol] = useState<Record<string, { today: number; prev: number }>>({});
-  const [auctionMap, setAuctionMap] = useState<Record<string, { today_vol: number; prev_vol: number; prev_volume: number; auction_ratio: number; auction_price?: number }>>({});
+  const [auctionMap, setAuctionMap] = useState<Record<string, { today_vol: number; prev_vol: number; prev_volume: number; auction_price?: number }>>({});
 
   const fetchData = async () => {
     setLoading(true);
@@ -47,7 +47,16 @@ export function Expectations() {
           const aRes = await fetch(`/tools/watchlist-auction?codes=${codes}`);
           if (aRes.ok) {
             const aData = await aRes.json();
-            setAuctionMap(aData.auction || {});
+            const merged = { ...(aData.auction || {}) };
+            // Merge manually saved auction_data so user edits override DB data
+            const saved = data.auction_data || {};
+            for (const [code, v] of Object.entries(saved)) {
+              if (!merged[code]) merged[code] = {};
+              merged[code].today_vol = (v as any).today_vol ?? merged[code].today_vol;
+              merged[code].prev_vol = (v as any).prev_vol ?? merged[code].prev_vol;
+              merged[code].auction_price = (v as any).auction_price ?? merged[code].auction_price;
+            }
+            setAuctionMap(merged);
           }
         }
       }
@@ -114,7 +123,7 @@ export function Expectations() {
       await fetch("/tools/expectations/save-auction", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, today_vol: Math.round(vol.today * 100), prev_vol: Math.round(vol.prev * 100) }),
+        body: JSON.stringify({ code, today_vol: Math.round(vol.today), prev_vol: Math.round(vol.prev) }),
       });
       fetchData();
     } catch {
@@ -205,7 +214,7 @@ export function Expectations() {
               </thead>
               <tbody>
                 {auctionData.map((item) => {
-                  const vol = editingVol[item.code] || { today: Math.round(item.today_vol / 100), prev: Math.round(item.prev_vol / 100) };
+                  const vol = editingVol[item.code] || { today: Math.round(item.today_vol), prev: Math.round(item.prev_vol) };
                   const ratio = vol.prev > 0 ? vol.today / vol.prev : 0;
                   const expectation = calcExpectation(item.auction_change_pct, ratio);
                   const suggestion = calcSuggestion(expectation.type);
@@ -285,8 +294,8 @@ export function Expectations() {
               <tbody>
                 {stocks.map((stock) => {
                   const a = auctionMap[stock.code] || {};
-                  const todayVol = Math.round((a.today_vol || 0) / 100);
-                  const prevVol = Math.round((a.prev_vol || 0) / 100);
+                  const todayVol = Math.round(a.today_vol || 0);
+                  const prevVol = Math.round(a.prev_vol || 0);
                   const volRatio = prevVol > 0 ? todayVol / prevVol : 0;
                   const prevVolume = a.prev_volume || 0;
                   const auctionChg = stock.prev_close > 0 && (a.auction_price ?? 0) > 0

@@ -3,22 +3,22 @@ import { toast } from "sonner";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar } from "lucide-react";
 
 interface AuctionStat {
-  count: number; total_vol: number; total_amount: number; avg_ratio: number;
+  count: number; total_vol: number; total_amount: number; avg_ratio?: number;
 }
 
 interface AuctionStock {
   code: string; name: string; auction_vol: number; auction_amount: number;
-  auction_ratio: number; auction_price: number; open_price: number;
-  total_vol: number; total_amount: number;
+  auction_price: number; open_price: number;
 }
 
 interface DateInfo {
-  date: string; count: number; total_vol: number; avg_ratio: number;
+  date: string; count: number; total_vol: number;
 }
 
 interface CompareStock {
   code: string; name: string; vol_today: number; vol_prev: number;
-  vol_chg: number; vol_pct: number; price_today: number; ratio_today: number;
+  vol_chg: number; vol_pct: number; price_today: number;
+  auction_chg_today: number | null;
 }
 
 function volClass(v: number) {
@@ -33,15 +33,20 @@ function formatVol(v: number) {
   return String(v);
 }
 
+function auctionChgCell(v: number | null) {
+  if (v == null) return <td className="px-3 py-2 text-right text-muted-foreground">-</td>;
+  const cls = v >= 0 ? "text-red-600" : "text-green-600";
+  return <td className={`px-3 py-2 text-right font-medium ${cls}`}>{v >= 0 ? "+" : ""}{v.toFixed(2)}%</td>;
+}
+
 export function AuctionBoard() {
   const [dates, setDates] = useState<DateInfo[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
   const [stocks, setStocks] = useState<AuctionStock[]>([]);
-  const [leaders, setLeaders] = useState<AuctionStock[]>([]);
   const [stats, setStats] = useState<AuctionStat | null>(null);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
-  const [tab, setTab] = useState<"volume" | "ratio" | "compare">("volume");
+  const [tab, setTab] = useState<"volume" | "compare">("volume");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
 
   const fetchDates = async () => {
@@ -64,7 +69,6 @@ export function AuctionBoard() {
       if (res.ok) {
         const data = await res.json();
         setStocks(data.stocks || []);
-        setLeaders(data.leaders || []);
         setStats(data.stats || null);
       }
     } catch (e) { console.error("fetch date data", e); }
@@ -113,8 +117,6 @@ export function AuctionBoard() {
       else fetchDateData(selectedDate);
     }
   }, [selectedDate, tab]);
-
-  const sortedByRatio = [...stocks].sort((a, b) => (b.auction_ratio || 0) - (a.auction_ratio || 0));
 
   return (
     <div className="p-6 space-y-6">
@@ -188,7 +190,6 @@ export function AuctionBoard() {
       <div className="flex items-center gap-1 border-b">
         {[
           { key: "volume" as const, label: "竞价量排行", icon: BarChart3 },
-          { key: "ratio" as const, label: "竞价占比排行", icon: TrendingUp },
           { key: "compare" as const, label: "竞价对比", icon: TrendingDown },
         ].map(({ key, label, icon: Icon }) => (
           <button
@@ -249,6 +250,7 @@ export function AuctionBoard() {
                     <th className="px-3 py-2 text-right font-medium">变化量</th>
                     <th className="px-3 py-2 text-right font-medium">变化%</th>
                     <th className="px-3 py-2 text-right font-medium">竞价价</th>
+                    <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -266,6 +268,7 @@ export function AuctionBoard() {
                         {s.vol_pct >= 999 ? "NEW" : `${s.vol_pct >= 0 ? "+" : ""}${s.vol_pct.toFixed(1)}%`}
                       </td>
                       <td className="px-3 py-2 text-right">{s.price_today?.toFixed(2)}</td>
+                      {auctionChgCell(s.auction_chg_today)}
                     </tr>
                   ))}
                 </tbody>
@@ -291,6 +294,7 @@ export function AuctionBoard() {
                     <th className="px-3 py-2 text-right font-medium">变化量</th>
                     <th className="px-3 py-2 text-right font-medium">变化%</th>
                     <th className="px-3 py-2 text-right font-medium">竞价价</th>
+                    <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -308,6 +312,7 @@ export function AuctionBoard() {
                         {s.vol_pct >= 999 ? "NEW" : `${s.vol_pct >= 0 ? "+" : ""}${s.vol_pct.toFixed(1)}%`}
                       </td>
                       <td className="px-3 py-2 text-right">{s.price_today?.toFixed(2)}</td>
+                      {auctionChgCell(s.auction_chg_today)}
                     </tr>
                   ))}
                 </tbody>
@@ -316,12 +321,10 @@ export function AuctionBoard() {
           </div>
         </div>
       ) : (
-        /* Volume / Ratio tab */
+        /* Volume tab */
         <div className="border rounded-lg bg-card overflow-hidden">
           <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-            <h2 className="font-semibold">
-              {tab === "volume" ? "竞价量排行（全部）" : "竞价占比排行（全部）"}
-            </h2>
+            <h2 className="font-semibold">竞价量排行</h2>
             <span className="text-xs text-muted-foreground">{stocks.length} 只</span>
           </div>
           <div className="overflow-x-auto">
@@ -333,73 +336,25 @@ export function AuctionBoard() {
                   <th className="px-3 py-2 text-left font-medium">名称</th>
                   <th className="px-3 py-2 text-right font-medium">竞价量（手）</th>
                   <th className="px-3 py-2 text-right font-medium">竞价额</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价占比</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价价</th>
-                  <th className="px-3 py-2 text-right font-medium">开盘价</th>
-                  <th className="px-3 py-2 text-right font-medium">总量</th>
+                  <th className="px-3 py-2 text-right font-medium">价格</th>
                 </tr>
               </thead>
               <tbody>
-                {(tab === "volume" ? stocks : sortedByRatio).map((s, i) => (
+                {stocks.map((s, i) => (
                   <tr key={s.code} className="border-t hover:bg-muted/30 transition-colors">
                     <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                     <td className="px-3 py-2 font-mono">{s.code}</td>
                     <td className="px-3 py-2">{s.name}</td>
                     <td className="px-3 py-2 text-right font-medium">{Math.round(s.auction_vol / 100).toLocaleString()}</td>
                     <td className="px-3 py-2 text-right">{s.auction_amount ? (s.auction_amount / 10000).toFixed(0) + "万" : "-"}</td>
-                    <td className={`px-3 py-2 text-right font-medium ${(s.auction_ratio || 0) > 15 ? "text-red-600" : ""}`}>
-                      {s.auction_ratio ? s.auction_ratio.toFixed(1) + "%" : "-"}
-                    </td>
                     <td className="px-3 py-2 text-right">{s.auction_price?.toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right">{s.open_price?.toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right">{s.total_vol?.toLocaleString()}</td>
                   </tr>
                 ))}
                 {stocks.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                    <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
                   </tr>
                 )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* High Ratio Leaders */}
-      {leaders.length > 0 && tab !== "compare" && (
-        <div className="border rounded-lg bg-card overflow-hidden">
-          <div className="px-4 py-3 border-b bg-muted/30">
-            <h2 className="font-semibold flex items-center gap-2">
-              <TrendingUp className="h-4 w-4 text-orange-500" />
-              竞价占比 &gt; 15% 的活跃股
-            </h2>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">排名</th>
-                  <th className="px-3 py-2 text-left font-medium">代码</th>
-                  <th className="px-3 py-2 text-left font-medium">名称</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价占比</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价量（手）</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价价</th>
-                  <th className="px-3 py-2 text-right font-medium">开盘价</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leaders.map((s, i) => (
-                  <tr key={s.code} className="border-t hover:bg-muted/30">
-                    <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
-                    <td className="px-3 py-2 font-mono">{s.code}</td>
-                    <td className="px-3 py-2">{s.name}</td>
-                    <td className="px-3 py-2 text-right font-medium text-red-600">{s.auction_ratio?.toFixed(1)}%</td>
-                    <td className="px-3 py-2 text-right">{Math.round(s.auction_vol / 100).toLocaleString()}</td>
-                    <td className="px-3 py-2 text-right">{s.auction_price?.toFixed(2)}</td>
-                    <td className="px-3 py-2 text-right">{s.open_price?.toFixed(2)}</td>
-                  </tr>
-                ))}
               </tbody>
             </table>
           </div>

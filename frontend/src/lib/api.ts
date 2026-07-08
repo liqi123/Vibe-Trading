@@ -47,7 +47,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw await errorFromResponse(res);
   }
   const text = await res.text();
-  if (!text) return {} as T;
+  if (!text) return (undefined as unknown) as T;
 
   const contentType = res.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
