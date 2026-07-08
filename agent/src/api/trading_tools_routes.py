@@ -1840,10 +1840,10 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
     try:
         cur = db.cursor()
-        cur.execute("SELECT code, name, auction_vol, auction_price, prev_close FROM auction WHERE date=?", (date1,))
-        d1_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "prev_close": r[4] or 0} for r in cur.fetchall()}
-        cur.execute("SELECT code, name, auction_vol, auction_price, prev_close FROM auction WHERE date=?", (date2,))
-        d2_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "prev_close": r[4] or 0} for r in cur.fetchall()}
+        cur.execute("SELECT code, name, auction_vol, auction_price, open_price, prev_close FROM auction WHERE date=?", (date1,))
+        d1_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "open_price": r[4], "prev_close": r[5] or 0} for r in cur.fetchall()}
+        cur.execute("SELECT code, name, auction_vol, auction_price, open_price, prev_close FROM auction WHERE date=?", (date2,))
+        d2_map = {r[0]: {"name": r[1], "vol": r[2], "price": r[3], "open_price": r[4], "prev_close": r[5] or 0} for r in cur.fetchall()}
 
         all_codes = set(d1_map) | set(d2_map)
         if not all_codes:
