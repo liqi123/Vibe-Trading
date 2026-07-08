@@ -92,7 +92,7 @@ export function Overview() {
 
       if (!mountedRef.current) return;
       setLastUpdate(new Date().toLocaleTimeString("zh-CN"));
-    } catch (e) { console.error('Failed to fetch overview:', e); }
+    } catch (e) { /* ignore */ }
     finally { if (mountedRef.current) setLoading(false); }
   };
 

@@ -98,7 +98,7 @@ def _channel_class_from_module(module: ModuleType, module_name: str) -> type[Bas
 def _missing_optional_dependency(name: str, module: ModuleType) -> str:
     """Return a dependency status error for lazily imported adapter SDKs."""
     for flag in _AVAILABILITY_FLAGS.get(name, ()):
-        if getattr(module, flag, True) is False:
+        if not getattr(module, flag, True):
             return f"missing optional dependency for {name}"
     missing_packages = [
         package

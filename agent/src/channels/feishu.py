@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import re
 import threading
 import time
 import uuid
+
+_log = logging.getLogger(__name__)
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
@@ -651,7 +654,7 @@ class FeishuChannel(BaseChannel):
             # Credentials stored in-memory on self.config; persist via VT config
             # when channel config persistence is wired up.
         except Exception:
-            pass
+            _log.warning("feishu: credential persistence not available, credentials kept in memory only")
 
         _LOGIN_CONSOLE.print("\n[green]Feishu/Lark login complete.[/green]")
         _LOGIN_CONSOLE.print(f"App ID: {escape(result['app_id'])}")

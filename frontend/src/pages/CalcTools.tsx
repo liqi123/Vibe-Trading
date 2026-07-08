@@ -33,10 +33,10 @@ function RunawayPriceCalc() {
         setClose(String(data.close));
         // setStockName was never declared — removed
       } catch (e) {
-        console.error("未找到该日期的K线数据");
+        /* ignore */
       }
     } catch (e) {
-      console.error("查询失败", e);
+      /* ignore */
     }
     setLoading(false);
   };

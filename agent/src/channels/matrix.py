@@ -744,7 +744,7 @@ class MatrixChannel(BaseChannel):
         user_ids = mentions.get("user_ids")
         if isinstance(user_ids, list) and self.config.user_id in user_ids:
             return True
-        return bool(self.config.allow_room_mentions and mentions.get("room") is True)
+        return bool(self.config.allow_room_mentions and mentions.get("room"))
 
     def _is_pre_startup_event(self, event: RoomMessage) -> bool:
         """Skip events that landed in the timeline before this process started.

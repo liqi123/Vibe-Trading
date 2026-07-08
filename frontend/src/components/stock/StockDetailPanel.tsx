@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
+import { api } from "@/lib/api";
 import { useModalStore } from "../../stores/modal";
 import { IntradaySparkline } from "@/components/charts/IntradaySparkline";
 
@@ -38,9 +39,9 @@ export function StockDetailPanel() {
     setIndicators(null);
 
     Promise.all([
-      fetch(`/tools/stock/${stockCode}`).then((r) => r.json()),
-      fetch(`/tools/stock/${stockCode}/indicators`).then((r) => r.json()),
-      fetch(`/tools/prices?codes=${stockCode}`).then((r) => r.json()),
+      api.tools.get<any>(`/stock/${stockCode}`),
+      api.tools.get<any>(`/stock/${stockCode}/indicators`),
+      api.tools.get<any>(`/prices?codes=${stockCode}`),
     ])
       .then(([klineData, indData, priceData]) => {
         setKline(klineData.kline || []);

@@ -24,7 +24,7 @@ export function ScheduledTasks() {
     try {
       const data = await api.tools.get<any>("/scheduled-runs");
       setJobs(data.jobs || []);
-    } catch (e) { console.error('Failed to fetch jobs:', e); }
+    } catch (e) { /* ignore */ }
     setLoading(false);
   };
 
@@ -39,7 +39,7 @@ export function ScheduledTasks() {
       setNewSchedule("");
       setShowAdd(false);
       fetchJobs();
-    } catch (e) { console.error('Failed to create job:', e); }
+    } catch (e) { /* ignore */ }
     setCreating(false);
   };
 
@@ -47,7 +47,7 @@ export function ScheduledTasks() {
     try {
       await api.tools.del<any>(`/scheduled-runs/${id}`);
       fetchJobs();
-    } catch (e) { console.error('Failed to delete job:', e); }
+    } catch (e) { /* ignore */ }
   };
 
   return (

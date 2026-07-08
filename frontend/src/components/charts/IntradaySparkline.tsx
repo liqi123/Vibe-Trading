@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "@/lib/api";
 
 interface IntradayBar {
   t: string;
@@ -18,8 +19,7 @@ export function IntradaySparkline({ code, width = 80, height = 28 }: Props) {
 
   useEffect(() => {
     mountedRef.current = true;
-    fetch(`/tools/stock/${code}/intraday`)
-      .then(r => { if (!r.ok) throw new Error(`Intraday fetch failed: ${r.status}`); return r.json(); })
+    api.tools.get<any>(`/stock/${code}/intraday`)
       .then(data => {
         if (!mountedRef.current) return;
         setBars(data.bars || []);

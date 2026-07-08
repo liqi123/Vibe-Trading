@@ -158,7 +158,7 @@ def resolve_was_mentioned(payload: dict[str, Any], agent_user_id: str) -> bool:
     """Resolve mention state from payload metadata and text fallback."""
     meta = payload.get("meta")
     if isinstance(meta, dict):
-        if meta.get("mentioned") is True or meta.get("wasMentioned") is True:
+        if meta.get("mentioned") or meta.get("wasMentioned"):
             return True
         for f in ("mentions", "mentionIds", "mentionedUserIds", "mentionedUsers"):
             if agent_user_id and agent_user_id in extract_mention_ids(meta.get(f)):

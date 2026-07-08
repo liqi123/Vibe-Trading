@@ -70,7 +70,6 @@ export function Watchlist() {
         setItems([]);
       }
     } catch (e) {
-      console.error('Failed to fetch watchlist:', e);
     } finally {
       setLoading(false);
     }
@@ -81,7 +80,7 @@ export function Watchlist() {
     try {
       const data = await api.tools.get<any>(`/expectations/search?q=${encodeURIComponent(q.trim())}`);
       setSearchResults(data.results || []);
-    } catch (e) { console.error('Failed to search stock:', e); }
+    } catch (e) { /* ignore */ }
   };
 
   const addStock = async (code?: string) => {
@@ -93,18 +92,14 @@ export function Watchlist() {
       setSearchResults([]);
       setShowAddModal(false);
       fetchData();
-    } catch (e) {
-      console.error('Failed to add stock:', e);
-    }
+    } catch (e) { /* ignore */ }
   };
 
   const removeStock = async (code: string) => {
     try {
       await api.tools.post<any>("/expectations/remove", { code });
       fetchData();
-    } catch (e) {
-      console.error('Failed to remove stock:', e);
-    }
+    } catch (e) { /* ignore */ }
   };
 
   const startEdit = (item: WatchlistItem) => {
@@ -131,9 +126,7 @@ export function Watchlist() {
       });
       setEditingCode(null);
       fetchData();
-    } catch (e) {
-      console.error('Failed to save edit:', e);
-    }
+    } catch (e) { /* ignore */ }
   };
 
   useEffect(() => {

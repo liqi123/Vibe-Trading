@@ -1327,7 +1327,7 @@ class SignalChannel(BaseChannel):
         action = "stop" if stop else "start"
         if (
             not self._is_group_chat_id(chat_id)
-            and chat_id.startswith("+") is False
+            and not chat_id.startswith("+")
             and chat_id not in self._typing_uuid_warnings
         ):
             self._typing_uuid_warnings.add(chat_id)

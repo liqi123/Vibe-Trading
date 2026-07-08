@@ -276,7 +276,8 @@ class WeixinChannel(BaseChannel):
         auth: bool = True,
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("_client is None — call connect() first")
         url = f"{self.config.base_url}/{endpoint}"
         hdrs = self._make_headers(auth=auth)
         if extra_headers:
@@ -295,7 +296,8 @@ class WeixinChannel(BaseChannel):
         extra_headers: dict[str, str] | None = None,
     ) -> dict:
         """GET helper that allows overriding base_url for QR redirect polling."""
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("_client is None — call connect() first")
         url = f"{base_url.rstrip('/')}/{endpoint}"
         hdrs = self._make_headers(auth=auth)
         if extra_headers:
@@ -311,7 +313,8 @@ class WeixinChannel(BaseChannel):
         *,
         auth: bool = True,
     ) -> dict:
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("_client is None — call connect() first")
         url = f"{self.config.base_url}/{endpoint}"
         payload = body or {}
         if "base_info" not in payload:
@@ -434,7 +437,7 @@ class WeixinChannel(BaseChannel):
             qr.make(fit=True)
             qr.print_ascii(invert=True)
         except ImportError:
-            print(f"\nLogin URL: {url}\n")
+            logger.info("Login URL: %s", url)
 
     # ------------------------------------------------------------------
     # Channel lifecycle
@@ -547,7 +550,8 @@ class WeixinChannel(BaseChannel):
         }
 
         # Adjust httpx timeout to match the current poll timeout
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("_client is None — call connect() first")
         self._client.timeout = httpx.Timeout(self._next_poll_timeout_s + 10, connect=30)
 
         data = await self._api_post("ilink/bot/getupdates", body)
@@ -868,7 +872,8 @@ class WeixinChannel(BaseChannel):
             if media_type != "image" and not aes_key_b64:
                 return None
 
-            assert self._client is not None
+            if self._client is None:
+                raise RuntimeError("_client is None — call connect() first")
             fallback_url = ""
             if encrypt_query_param:
                 fallback_url = (
@@ -1385,7 +1390,8 @@ class WeixinChannel(BaseChannel):
             "aeskey": aes_key_hex,
         }
 
-        assert self._client is not None
+        if self._client is None:
+            raise RuntimeError("_client is None — call connect() first")
         upload_resp = await self._api_post("ilink/bot/getuploadurl", upload_body)
 
         upload_full_url = str(upload_resp.get("upload_full_url", "") or "").strip()

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from typing import Any
 
 from src.agent.tools import BaseTool
+
+_log = logging.getLogger(__name__)
 
 _OUTPUT_LIMIT = 50_000
 _DEFAULT_TIMEOUT = 120
@@ -37,6 +40,11 @@ class BashTool(BaseTool):
             JSON string with stdout, stderr, and exit_code.
         """
         command = kwargs["command"]
+        if not isinstance(command, str) or not command.strip():
+            return json.dumps({"status": "error", "error": "command must be a non-empty string"})
+        if "\0" in command:
+            return json.dumps({"status": "error", "error": "command contains null byte"})
+        _log.warning("bash execute: %s", command[:200])
         cwd = kwargs.get("run_dir")
 
         try:

@@ -717,18 +717,14 @@ function BenchView() {
       try {
         const data = JSON.parse((e as MessageEvent).data) as BenchProgress;
         setProgress(data);
-      } catch (parseErr) {
-        console.error('Bench progress parse error:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
     });
 
     source.addEventListener("result", (e) => {
       try {
         const data = JSON.parse((e as MessageEvent).data) as AlphaBenchResult;
         setResult(data);
-      } catch (parseErr) {
-        console.error('Bench result parse error:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
     });
 
     source.addEventListener("done", () => {
@@ -752,9 +748,7 @@ function BenchView() {
       try {
         const data = JSON.parse((e as MessageEvent).data || "{}");
         if (typeof data.message === "string") msg = data.message;
-      } catch (parseErr) {
-        console.error('Bench error parse:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
       toast.error(msg);
       setStatus("error");
       source.close();
@@ -1157,16 +1151,12 @@ function CompareView() {
     source.addEventListener("progress", (e) => {
       try {
         setProgress(JSON.parse((e as MessageEvent).data) as BenchProgress);
-      } catch (parseErr) {
-        console.error('Compare progress parse error:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
     });
     source.addEventListener("result", (e) => {
       try {
         setResult(JSON.parse((e as MessageEvent).data) as AlphaCompareResult);
-      } catch (parseErr) {
-        console.error('Compare result parse error:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
     });
     source.addEventListener("done", () => {
       doneRef.current = true;
@@ -1186,9 +1176,7 @@ function CompareView() {
       try {
         const data = JSON.parse((e as MessageEvent).data || "{}");
         if (typeof data.message === "string") msg = data.message;
-      } catch (parseErr) {
-        console.error('Compare error parse:', parseErr);
-      }
+      } catch (parseErr) { /* ignore */ }
       toast.error(msg);
       setStatus("error");
       source.close();

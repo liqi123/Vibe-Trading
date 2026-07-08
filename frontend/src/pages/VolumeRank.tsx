@@ -33,7 +33,7 @@ export function VolumeRank() {
       setByIndustry(data.by_industry || {});
       setIndustryRanking(data.industry_ranking || []);
       setStats(data.stats || null);
-    } catch (e) { console.error('Failed to fetch volume rank:', e); }
+    } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
 

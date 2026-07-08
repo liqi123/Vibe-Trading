@@ -68,7 +68,7 @@ def batch_fetch_daily(codes, limit=250, sleep_sec=0.3):
         try:
             df = fetch_daily(code, limit=limit)
             if len(df) > 0: results[code] = df
-        except: results[code] = pd.DataFrame()
+        except Exception: results[code] = pd.DataFrame()
         if i < len(codes) - 1: time.sleep(sleep_sec)
     return results
 

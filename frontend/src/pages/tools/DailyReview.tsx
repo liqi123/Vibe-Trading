@@ -136,7 +136,7 @@ export function DailyReview() {
         ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
         ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
       ]);
-    } catch (e) { console.error("DailyReview fetchAll", e); }
+    } catch (e) { /* ignore */ }
     setLoading(false);
   };
 
@@ -150,7 +150,7 @@ export function DailyReview() {
     setGenerating(true);
     setReport(null);
     try {
-      const { task_id } = await api.tools.post<any>("/run-script", { script: "review_v5" });
+      const { task_id } = await api.tools.post<any>("/run-script", { script: "review_v5", args: localDate() });
 
       let output = "";
       for (let i = 0; i < 120; i++) {
@@ -163,12 +163,12 @@ export function DailyReview() {
       const body = output.replace(/^\[.*?\] 执行完成 \(exit=\d+\)\s*\n\n?/, "").trim();
       const result = body || output;
 
-      if (!result || result.includes("401") || result.includes("Unauthorized") || result.includes("查询失败")) {
-        await loadExistingReport();
-      } else {
+      if (result && !result.includes("Traceback")) {
         setReport(result);
         const today = localDate();
         localStorage.setItem(`review_report_${today}`, result);
+      } else {
+        await loadExistingReport();
       }
     } catch (e) {
       await loadExistingReport();

@@ -196,7 +196,8 @@ class SwarmStore:
                 last = exc
                 if attempt < len(_REPLACE_BACKOFF):
                     time.sleep(_REPLACE_BACKOFF[attempt])
-        assert last is not None  # loop body sets `last` or returns
+        if last is None:
+            raise RuntimeError("_replace_run: exhausted retries without a last exception")
         raise type(last)(redact_internal_paths(str(last))) from None
 
     def update_run(self, run: SwarmRun) -> None:

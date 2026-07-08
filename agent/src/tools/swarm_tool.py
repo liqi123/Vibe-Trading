@@ -701,7 +701,8 @@ class SwarmTool(BaseTool):
                 {"status": "error", "error": preset_error},
                 ensure_ascii=False,
             )
-        assert preset is not None
+        if preset is None:
+            raise RuntimeError("preset resolved to None — check preset_name")
         variables = _build_variables(preset, prompt)
 
         logger.info(

@@ -6,11 +6,14 @@ over a configurable lookback window. Used by the /correlation API endpoint.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, Literal
 
 import pandas as pd
 import numpy as np
 from scipy.stats import spearmanr
+
+_log = logging.getLogger(__name__)
 
 
 def infer_market(code: str) -> str:
@@ -149,14 +152,16 @@ def compute_correlation_matrix(
         try:
             loader = resolve_loader(market)
         except Exception:
-            # Fall back to yfinance for us_equity / hk_equity
+            _log.warning("resolve_loader failed for %s, trying yfinance fallback", market)
             try:
                 from backtest.loaders.registry import LOADER_REGISTRY
                 if "yfinance" in LOADER_REGISTRY:
                     loader = LOADER_REGISTRY["yfinance"]()
                 else:
+                    _log.warning("yfinance loader not registered, skipping %s", code)
                     continue
             except Exception:
+                _log.warning("yfinance fallback also failed for %s", code, exc_info=True)
                 continue
 
         try:

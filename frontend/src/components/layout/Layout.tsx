@@ -391,7 +391,7 @@ function LanguageSwitcher() {
                 <button
                   type="button"
                   onClick={() => {
-                    i18n.changeLanguage(lang.code).catch(console.error);
+                    i18n.changeLanguage(lang.code).catch(() => { /* ignore */ });
                     setOpen(false);
                   }}
                   aria-current={active || undefined}

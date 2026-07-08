@@ -121,7 +121,7 @@ export function RunDetail() {
     if (!runId) return;
     Promise.all([
       api.getRun(runId, { chart_payload: "summary" }).catch(() => null),
-      api.getRunCode(runId).catch((e) => { console.error("getRunCode", e); return {}; }),
+      api.getRunCode(runId).catch(() => { /* ignore */ return {}; }),
     ]).then(([r, c]) => {
       setRun(r);
       setCode(c || {});
@@ -351,7 +351,7 @@ function RunCardTab({ card }: { card: RunCard }) {
             {i18n.t("runDetail.warnings")}
           </div>
           <ul className="space-y-1 text-xs text-muted-foreground">
-            {warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+            {warnings.map((warning) => <li key={warning}>{warning}</li>)}
           </ul>
         </section>
       )}

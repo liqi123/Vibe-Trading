@@ -80,7 +80,7 @@ def classify_tool(
     # Tier 1: explicit annotation. Absent (None) hint falls through.
     if annotations is not None:
         hint = getattr(annotations, "readOnlyHint", None)
-        if hint is True:
+        if hint:
             return ToolClass.READ
         if hint is False:
             return ToolClass.WRITE

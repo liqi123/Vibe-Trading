@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Wallet, History, RefreshCw, Clock, TrendingDown, Save, Brain, Loader2, AlertCircle } from "lucide-react";
+import { api } from "@/lib/api";
 import { useModalStore } from "../stores/modal";
 
 interface V1Position {
@@ -92,22 +93,16 @@ export function PaperTrading() {
     setLoading(true);
     try {
       const [r1, r5, t1, t5] = await Promise.all([
-        fetch("/tools/portfolio"),
-        fetch("/tools/portfolio/v5"),
-        fetch("/tools/trades"),
-        fetch("/tools/trades/v5"),
+        api.tools.get<any>("/portfolio"),
+        api.tools.get<any>("/portfolio/v5"),
+        api.tools.get<any>("/trades"),
+        api.tools.get<any>("/trades/v5"),
       ]);
-      if (!r1.ok) throw new Error(`Portfolio fetch failed: ${r1.status}`);
-      if (!r5.ok) throw new Error(`V5 portfolio fetch failed: ${r5.status}`);
-      if (!t1.ok) throw new Error(`Trades fetch failed: ${t1.status}`);
-      if (!t5.ok) throw new Error(`V5 trades fetch failed: ${t5.status}`);
-      setV1(await r1.json());
-      setV5(await r5.json());
-      const d1 = await t1.json();
-      const d5 = await t5.json();
+      setV1(r1);
+      setV5(r5);
       setTrades([
-        ...(d1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
-        ...(d5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
+        ...(t1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
+        ...(t5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
       ]);
     } catch { /* ignore */ }
     setLoading(false);
@@ -120,11 +115,7 @@ export function PaperTrading() {
     if (isNaN(val)) return;
     setSavingE(code);
     try {
-      await fetch("/tools/portfolio/update-field", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, portfolio, field: "E", value: val }),
-      });
+      await api.tools.post<any>("/portfolio/update-field", { code, portfolio, field: "E", value: val });
       fetchData();
     } catch { /* ignore */ }
     setSavingE(null);
@@ -135,12 +126,7 @@ export function PaperTrading() {
     if (!confirm(`确认卖出 ${code}？`)) return;
     setSellingCode(code);
     try {
-      const resp = await fetch("/tools/portfolio/sell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, portfolio, reason: "手动卖出" }),
-      });
-      const result = await resp.json();
+      const result = await api.tools.post<any>("/portfolio/sell", { code, portfolio, reason: "手动卖出" });
       if (result.ok) {
         alert(`卖出成功，盈亏: ${formatMoney(result.pnl)}`);
         fetchData();
@@ -159,13 +145,10 @@ export function PaperTrading() {
     setShadowResult(null);
     setShadowReportHtml(null);
     try {
-      const resp = await fetch("/tools/shadow/analyze", { method: "POST" });
-      const data = await resp.json();
+      const data = await api.tools.post<any>("/shadow/analyze");
       if (data.ok) {
         setShadowResult(data);
-        // Load the HTML report
-        const reportResp = await fetch(`/tools/shadow/report/${data.shadow_id}`);
-        const reportData = await reportResp.json();
+        const reportData = await api.tools.get<any>(`/shadow/report/${data.shadow_id}`);
         if (reportData.ok) {
           setShadowReportHtml(reportData.html);
         }
@@ -362,7 +345,7 @@ export function PaperTrading() {
                               pos.score >= 60 ? "bg-yellow-100 text-yellow-700" :
                               "bg-red-100 text-red-700"
                             }`}>
-                              {pos.score}
+                              {pos.score.toFixed(1)}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-right text-xs text-muted-foreground">

@@ -30,7 +30,7 @@ export function MarketLadder() {
       setByConcept(data.by_concept || {});
       setStats(data.stats || null);
       setSummary(data.summary || "");
-    } catch (e) { console.error('Failed to fetch ladder:', e); }
+    } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
 

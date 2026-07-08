@@ -833,7 +833,7 @@ export function Agent() {
   useEffect(() => {
     api.getLLMSettings().then((s) => {
       sseTimeoutMsRef.current = s.sse_timeout_seconds * 1000;
-    }).catch((e) => console.error("getLLMSettings", e));
+    }).catch(() => { /* ignore */ });
   }, []);
 
   /* Safety timeout: if streaming but no SSE event for sseTimeoutMsRef.current ms, reset to idle */

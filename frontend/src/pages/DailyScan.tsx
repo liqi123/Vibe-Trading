@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Search, RefreshCw, TrendingUp, Download, CandlestickChart as CandleIcon } from "lucide-react";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
+import { api } from "@/lib/api";
 import type { PriceBar } from "@/lib/api";
 
 interface MarketStats {
@@ -110,19 +111,16 @@ export function DailyScan() {
 
   const fetchScanResults = async () => {
     try {
-      const [fibRes, v5Res] = await Promise.all([
-        fetch("/tools/scan-results?strategy=fibonacci"),
-        fetch("/tools/scan-results?strategy=v5"),
+      const [fibData, v5Data] = await Promise.all([
+        api.tools.get<any>("/scan-results?strategy=fibonacci"),
+        api.tools.get<any>("/scan-results?strategy=v5"),
       ]);
-      const fibData = fibRes.ok ? await fibRes.json() : null;
-      const v5Data = v5Res.ok ? await v5Res.json() : null;
       const fib = fibData?.candidates || [];
       const v5 = v5Data?.candidates || [];
       setFibCandidates(fib);
       setV5Candidates(v5);
       setNoCache(fib.length === 0 && v5.length === 0);
     } catch (e) {
-      console.error("fetchScanResults error:", e);
       setNoCache(true);
     }
   };
@@ -131,11 +129,8 @@ export function DailyScan() {
     setLoading(true);
     setError(null);
     try {
-      const [mktRes] = await Promise.all([
-        fetch("/tools/market/realtime"),
-      ]);
-      if (!mktRes.ok) throw new Error("Failed to load market data");
-      setMarket(await mktRes.json());
+      const market = await api.tools.get<any>("/market/realtime");
+      setMarket(market);
       await fetchScanResults();
     } catch (e: any) {
       setError(e.message);
@@ -147,8 +142,7 @@ export function DailyScan() {
   const handleUpdateData = async () => {
     setUpdating(true);
     try {
-      const res = await fetch("/tools/update-data", { method: "POST" });
-      const json = await res.json();
+      const json = await api.tools.post<any>("/update-data");
       if (json.ok) {
         alert(`数据更新完成: ${json.message}`);
       } else {
@@ -163,12 +157,7 @@ export function DailyScan() {
 
   const handleBuy = async (code: string, name: string, strategy: string, extra: Record<string, any>) => {
     try {
-      const res = await fetch(`/tools/stock/${code}/buy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy, name, ...extra }),
-      });
-      const data = await res.json();
+      const data = await api.tools.post<any>(`/stock/${code}/buy`, { strategy, name, ...extra });
       alert(data.message);
     } catch (e: any) {
       alert(`买入失败: ${e.message}`);
@@ -181,15 +170,12 @@ export function DailyScan() {
       return;
     }
     try {
-      const res = await fetch(`/tools/stock/${code}`);
-      if (res.ok) {
-        const data = await res.json();
-        const bars: PriceBar[] = (data.kline || []).reverse().map((r: any) => ({
-          time: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume,
-        }));
-        setKlineData((prev) => ({ ...prev, [code]: bars }));
-        setExpandedKline(code);
-      }
+      const data = await api.tools.get<any>(`/stock/${code}`);
+      const bars: PriceBar[] = (data.kline || []).reverse().map((r: any) => ({
+        time: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume,
+      }));
+      setKlineData((prev) => ({ ...prev, [code]: bars }));
+      setExpandedKline(code);
     } catch {}
   };
 
@@ -197,12 +183,7 @@ export function DailyScan() {
     setRunning(script);
     setScriptOutput("执行中...");
     try {
-      const res = await fetch("/tools/run-script", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script }),
-      });
-      const data = await res.json();
+      const data = await api.tools.post<any>("/run-script", { script });
       const taskId = data.task_id;
       if (!taskId) {
         setScriptOutput("启动失败");
@@ -210,8 +191,7 @@ export function DailyScan() {
         return;
       }
       const poll = async () => {
-        const r = await fetch(`/tools/run-script/${taskId}`);
-        const d = await r.json();
+        const d = await api.tools.get<any>(`/run-script/${taskId}`);
         setScriptOutput(d.output || "");
         if (d.output && d.output.includes("执行中")) {
           setTimeout(poll, 3000);

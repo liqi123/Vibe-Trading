@@ -515,7 +515,8 @@ class WebSocketChannel(BaseChannel):
                     logger=ws_logger,
                 )
             try:
-                assert self._stop_event is not None
+                if self._stop_event is None:
+                    raise RuntimeError("_stop_event is None — call start() first")
                 await self._stop_event.wait()
             finally:
                 server.close()
@@ -779,7 +780,7 @@ class WebSocketChannel(BaseChannel):
             self._attach(connection, cid)
             await self._hydrate_after_subscribe(cid)
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
-            if envelope.get("webui") is True:
+            if envelope.get("webui"):
                 metadata["webui"] = True
                 metadata.update(self._transcripts.client_turn_metadata(envelope.get("turn_id")))
             cli_apps = normalize_cli_app_mentions(envelope.get("cli_apps"))
@@ -791,13 +792,13 @@ class WebSocketChannel(BaseChannel):
             metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
             self._workspaces.persist_scope(cid, scope)
             image_generation = envelope.get("image_generation")
-            if isinstance(image_generation, dict) and image_generation.get("enabled") is True:
+            if isinstance(image_generation, dict) and image_generation.get("enabled"):
                 aspect_ratio = image_generation.get("aspect_ratio")
                 metadata["image_generation"] = {
                     "enabled": True,
                     "aspect_ratio": aspect_ratio if isinstance(aspect_ratio, str) else None,
                 }
-            if metadata.get("webui") is True and self.is_allowed(client_id):
+            if metadata.get("webui") and self.is_allowed(client_id):
                 self._transcripts.append_user_message(
                     cid,
                     content,

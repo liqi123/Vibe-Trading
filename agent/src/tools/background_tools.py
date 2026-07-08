@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import threading
 import uuid
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.agent.tools import BaseTool
+
+_log = logging.getLogger(__name__)
 
 WORKDIR = Path(__file__).resolve().parents[2]
 
@@ -31,6 +34,11 @@ class BackgroundManager:
         Returns:
             JSON string containing status and task_id.
         """
+        if not isinstance(command, str) or not command.strip():
+            return json.dumps({"status": "error", "error": "command must be a non-empty string"})
+        if "\0" in command:
+            return json.dumps({"status": "error", "error": "command contains null byte"})
+        _log.warning("background_run: %s", command[:200])
         task_id = uuid.uuid4().hex[:8]
         self.tasks[task_id] = {"status": "running", "result": None, "command": command}
         threading.Thread(target=self._execute, args=(task_id, command), daemon=True).start()

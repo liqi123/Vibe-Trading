@@ -54,7 +54,7 @@ export function Runtime() {
     } catch (err) {
       if (controller.signal.aborted) return;
       if (!mountedRef.current || !isCurrentStatusRequest(activeRequestRef.current, requestId, controller)) return;
-      console.warn("Failed to load runtime status", err);
+      /* ignore */
       setStatus(null);
       setError(err instanceof Error ? err.message : tRef.current("runtime.statusUnavailable"));
     } finally {

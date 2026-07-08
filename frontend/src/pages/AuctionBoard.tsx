@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface AuctionStat {
   count: number; total_vol: number; total_amount: number; avg_ratio?: number;
@@ -51,27 +52,21 @@ export function AuctionBoard() {
 
   const fetchDates = async () => {
     try {
-      const res = await fetch("/tools/auction/dates");
-      if (res.ok) {
-        const data = await res.json();
-        setDates(data.dates || []);
-        if (data.dates?.length > 0 && !selectedDate) {
-          setSelectedDate(data.dates[0].date);
-        }
+      const data = await api.tools.get<any>("/auction/dates");
+      setDates(data.dates || []);
+      if (data.dates?.length > 0 && !selectedDate) {
+        setSelectedDate(data.dates[0].date);
       }
-    } catch (e) { console.error("fetch dates", e); }
+    } catch (e) { /* ignore */ }
   };
 
   const fetchDateData = async (date: string) => {
     setLoading(true);
     try {
-      const res = await fetch(`/tools/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
-      if (res.ok) {
-        const data = await res.json();
-        setStocks(data.stocks || []);
-        setStats(data.stats || null);
-      }
-    } catch (e) { console.error("fetch date data", e); }
+      const data = await api.tools.get<any>(`/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
+      setStocks(data.stocks || []);
+      setStats(data.stats || null);
+    } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
 
@@ -82,20 +77,16 @@ export function AuctionBoard() {
     if (!d2) return;
     setLoading(true);
     try {
-      const res = await fetch(`/tools/auction/compare?date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}&top=30`);
-      if (res.ok) {
-        setCompareData(await res.json());
-      }
-    } catch (e) { console.error("fetch compare", e); }
+      const data = await api.tools.get<any>(`/auction/compare?date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}&top=30`);
+      setCompareData(data);
+    } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
 
   const handleCollect = async () => {
     setCollecting(true);
     try {
-      const res = await fetch("/tools/auction/collect", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
+      const data = await api.tools.post<any>("/auction/collect");
         if (data.status === "exists") {
           toast.info("已使用今日已有竞价数据");
         } else if (data.status === "no_data") {
@@ -104,8 +95,7 @@ export function AuctionBoard() {
           toast.success(`已采集 ${data.count} 只股票竞价数据`);
         }
         fetchDateData(selectedDate || "");
-      }
-    } catch (e) { console.error("handle collect", e); }
+    } catch (e) { /* ignore */ }
     finally { setCollecting(false); }
   };
 

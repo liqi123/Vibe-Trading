@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, RefreshCw, Zap, Trash2, Save } from "lucide-react";
+import { api } from "@/lib/api";
 
 interface Stock {
   code: string;
@@ -36,29 +37,21 @@ export function Expectations() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/tools/expectations");
-      if (res.ok) {
-        const data = await res.json();
-        const pos = data.positions || [];
-        setStocks(pos);
-        // Fetch auction data for these stocks
-        if (pos.length > 0) {
-          const codes = pos.map((s: Stock) => s.code).join(",");
-          const aRes = await fetch(`/tools/watchlist-auction?codes=${codes}`);
-          if (aRes.ok) {
-            const aData = await aRes.json();
-            const merged = { ...(aData.auction || {}) };
-            // Merge manually saved auction_data so user edits override DB data
-            const saved = data.auction_data || {};
-            for (const [code, v] of Object.entries(saved)) {
-              if (!merged[code]) merged[code] = {};
-              merged[code].today_vol = (v as any).today_vol ?? merged[code].today_vol;
-              merged[code].prev_vol = (v as any).prev_vol ?? merged[code].prev_vol;
-              merged[code].auction_price = (v as any).auction_price ?? merged[code].auction_price;
-            }
-            setAuctionMap(merged);
-          }
+      const data = await api.tools.get<any>("/expectations");
+      const pos = data.positions || [];
+      setStocks(pos);
+      if (pos.length > 0) {
+        const codes = pos.map((s: Stock) => s.code).join(",");
+        const aData = await api.tools.get<any>(`/watchlist-auction?codes=${codes}`);
+        const merged = { ...(aData.auction || {}) };
+        const saved = data.auction_data || {};
+        for (const [code, v] of Object.entries(saved)) {
+          if (!merged[code]) merged[code] = {};
+          merged[code].today_vol = (v as any).today_vol ?? merged[code].today_vol;
+          merged[code].prev_vol = (v as any).prev_vol ?? merged[code].prev_vol;
+          merged[code].auction_price = (v as any).auction_price ?? merged[code].auction_price;
         }
+        setAuctionMap(merged);
       }
     } catch {
       // ignore
@@ -70,16 +63,13 @@ export function Expectations() {
   const fetchAuction = async () => {
     setCollecting(true);
     try {
-      const res = await fetch("/tools/expectations/collect-auction", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === "no_data") {
-          toast.error("今日尚无竞价数据（09:30后无法采集）");
-        } else if (data.status === "exists") {
-          toast.info("已使用今日已有竞价数据");
-        }
-        setAuctionData(data.stocks || []);
+      const data = await api.tools.post<any>("/expectations/collect-auction");
+      if (data.status === "no_data") {
+        toast.error("今日尚无竞价数据（09:30后无法采集）");
+      } else if (data.status === "exists") {
+        toast.info("已使用今日已有竞价数据");
       }
+      setAuctionData(data.stocks || []);
     } catch {
       // ignore
     } finally {
@@ -90,11 +80,7 @@ export function Expectations() {
   const addStock = async () => {
     if (!newCode.trim()) return;
     try {
-      await fetch("/tools/expectations/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: newCode.trim() }),
-      });
+      await api.tools.post<any>("/expectations/add", { code: newCode.trim() });
       setNewCode("");
       setShowAddModal(false);
       fetchData();
@@ -105,11 +91,7 @@ export function Expectations() {
 
   const removeStock = async (code: string) => {
     try {
-      await fetch("/tools/expectations/remove", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
-      });
+      await api.tools.post<any>("/expectations/remove", { code });
       fetchData();
     } catch {
       // ignore
@@ -120,10 +102,8 @@ export function Expectations() {
     const vol = editingVol[code];
     if (!vol) return;
     try {
-      await fetch("/tools/expectations/save-auction", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, today_vol: Math.round(vol.today), prev_vol: Math.round(vol.prev) }),
+      await api.tools.post<any>("/expectations/save-auction", {
+        code, today_vol: Math.round(vol.today), prev_vol: Math.round(vol.prev),
       });
       fetchData();
     } catch {

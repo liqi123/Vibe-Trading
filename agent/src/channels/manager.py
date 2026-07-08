@@ -67,7 +67,7 @@ class ChannelManager:
         enabled_names = {
             name
             for name, status in self._status.items()
-            if status.get("enabled") is True
+            if status.get("enabled")
         }
         plugin_classes = discover_plugins(enabled_names)
         builtins = set(discover_channel_names())
