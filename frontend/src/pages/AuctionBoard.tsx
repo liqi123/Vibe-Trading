@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar } from "lucide-react";
+import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Layers } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface AuctionStat {
@@ -14,6 +14,10 @@ interface AuctionStock {
 
 interface DateInfo {
   date: string; count: number; total_vol: number;
+}
+
+interface SectorInfo {
+  name: string; momentum: number;
 }
 
 interface CompareStock {
@@ -47,8 +51,9 @@ export function AuctionBoard() {
   const [stats, setStats] = useState<AuctionStat | null>(null);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
-  const [tab, setTab] = useState<"volume" | "compare">("volume");
+  const [tab, setTab] = useState<"volume" | "compare" | "sectors">("volume");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
+  const [sectorData, setSectorData] = useState<SectorInfo[]>([]);
 
   const fetchDates = async () => {
     try {
@@ -66,6 +71,15 @@ export function AuctionBoard() {
       const data = await api.tools.get<any>(`/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
       setStocks(data.stocks || []);
       setStats(data.stats || null);
+    } catch (e) { /* ignore */ }
+    finally { setLoading(false); }
+  };
+
+  const fetchSectors = async () => {
+    setLoading(true);
+    try {
+      const data = await api.tools.get<any>("/auction/sectors");
+      setSectorData(data.sectors || []);
     } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
@@ -93,9 +107,12 @@ export function AuctionBoard() {
           toast.error(data.error || "今日尚无竞价数据（09:30后无法采集）");
         } else if (data.status === "collected") {
           toast.success(`已采集 ${data.count} 只股票竞价数据`);
+          if (data.sectors) setSectorData(data.sectors);
         }
         fetchDateData(selectedDate || "");
-    } catch (e) { /* ignore */ }
+    } catch (e: any) {
+      toast.error("采集失败：" + (e?.message || "未知错误"));
+    }
     finally { setCollecting(false); }
   };
 
@@ -104,6 +121,7 @@ export function AuctionBoard() {
   useEffect(() => {
     if (selectedDate) {
       if (tab === "compare") fetchCompare();
+      else if (tab === "sectors") fetchSectors();
       else fetchDateData(selectedDate);
     }
   }, [selectedDate, tab]);
@@ -180,6 +198,7 @@ export function AuctionBoard() {
       <div className="flex items-center gap-1 border-b">
         {[
           { key: "volume" as const, label: "竞价量排行", icon: BarChart3 },
+          { key: "sectors" as const, label: "板块", icon: Layers },
           { key: "compare" as const, label: "竞价对比", icon: TrendingDown },
         ].map(({ key, label, icon: Icon }) => (
           <button
@@ -197,7 +216,42 @@ export function AuctionBoard() {
         ))}
       </div>
 
-      {tab === "compare" && compareData ? (
+      {tab === "sectors" ? (
+        /* Sectors tab */
+        <div className="border rounded-lg bg-card overflow-hidden">
+          <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
+            <h2 className="font-semibold">板块强度 <span className="text-[10px] opacity-60">· 腾讯实时</span></h2>
+            <span className="text-xs text-muted-foreground">{sectorData.length} 个行业</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">排名</th>
+                  <th className="px-3 py-2 text-left font-medium">行业</th>
+                  <th className="px-3 py-2 text-right font-medium">涨跌幅</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sectorData.map((s, i) => (
+                  <tr key={s.name} className="border-t hover:bg-muted/30 transition-colors">
+                    <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
+                    <td className="px-3 py-2 font-medium">{s.name}</td>
+                    <td className={`px-3 py-2 text-right font-medium ${s.momentum >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {s.momentum >= 0 ? "+" : ""}{s.momentum.toFixed(2)}%
+                    </td>
+                  </tr>
+                ))}
+                {sectorData.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : tab === "compare" && compareData ? (
         <div className="space-y-6">
           <div className="grid gap-4 grid-cols-4">
             <div className="border rounded-lg p-4 bg-card">

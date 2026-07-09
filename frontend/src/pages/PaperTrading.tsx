@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Wallet, History, RefreshCw, Clock, TrendingDown, Save, Brain, Loader2, AlertCircle } from "lucide-react";
+import { Wallet, History, RefreshCw, Clock, TrendingDown, Save, Brain, Loader2, AlertCircle, Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import { useModalStore } from "../stores/modal";
 
@@ -77,13 +77,18 @@ function isV1(p: any): p is V1Position {
 export function PaperTrading() {
   const [v1, setV1] = useState<PaperState | null>(null);
   const [v5, setV5] = useState<PaperState | null>(null);
+  const [st, setSt] = useState<PaperState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "history" | "shadow">("v1");
+  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "st" | "history" | "shadow">("v1");
   const [shadowLoading, setShadowLoading] = useState(false);
   const [shadowResult, setShadowResult] = useState<any>(null);
   const [shadowError, setShadowError] = useState<string | null>(null);
   const [shadowReportHtml, setShadowReportHtml] = useState<string | null>(null);
   const [sellingCode, setSellingCode] = useState<string | null>(null);
+  const [buyOpen, setBuyOpen] = useState(false);
+  const [buyCode, setBuyCode] = useState("");
+  const [buyPrice, setBuyPrice] = useState("");
+  const [buying, setBuying] = useState(false);
   const [editingE, setEditingE] = useState<Record<string, string>>({});
   const [savingE, setSavingE] = useState<string | null>(null);
   const openStock = useModalStore((s) => s.open);
@@ -92,17 +97,21 @@ export function PaperTrading() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [r1, r5, t1, t5] = await Promise.all([
+      const [r1, r5, rSt, t1, t5, tSt] = await Promise.all([
         api.tools.get<any>("/portfolio"),
         api.tools.get<any>("/portfolio/v5"),
+        api.tools.get<any>("/portfolio/shortterm"),
         api.tools.get<any>("/trades"),
         api.tools.get<any>("/trades/v5"),
+        api.tools.get<any>("/trades/shortterm"),
       ]);
       setV1(r1);
       setV5(r5);
+      setSt(rSt);
       setTrades([
         ...(t1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
         ...(t5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
+        ...(tSt.history || []).map((t: any) => ({ ...t, strategy: "超短" })),
       ]);
     } catch { /* ignore */ }
     setLoading(false);
@@ -110,9 +119,10 @@ export function PaperTrading() {
 
   useEffect(() => { fetchData(); }, []);
 
-  const handleSaveE = async (code: string, portfolio: string) => {
+  const handleSaveE = async (code: string, tab: string) => {
     const val = parseFloat(editingE[code]);
     if (isNaN(val)) return;
+    const portfolio = tab === "st" ? "shortterm" : tab;
     setSavingE(code);
     try {
       await api.tools.post<any>("/portfolio/update-field", { code, portfolio, field: "E", value: val });
@@ -122,9 +132,10 @@ export function PaperTrading() {
     setEditingE(prev => { const n = { ...prev }; delete n[code]; return n; });
   };
 
-  const handleSell = async (code: string, portfolio: string) => {
+  const handleSell = async (code: string, tab: string) => {
     if (!confirm(`确认卖出 ${code}？`)) return;
     setSellingCode(code);
+    const portfolio = tab === "st" ? "shortterm" : tab;
     try {
       const result = await api.tools.post<any>("/portfolio/sell", { code, portfolio, reason: "手动卖出" });
       if (result.ok) {
@@ -137,6 +148,29 @@ export function PaperTrading() {
       alert("卖出请求失败");
     }
     setSellingCode(null);
+  };
+
+  const handleBuy = async () => {
+    const code = buyCode.trim().toLowerCase();
+    const price = parseFloat(buyPrice);
+    if (!code || isNaN(price) || price <= 0) return;
+    setBuying(true);
+    const portfolio = activeTab === "st" ? "shortterm" : activeTab;
+    try {
+      const result = await api.tools.post<any>(`/stock/${code}/buy`, { strategy: portfolio, name: "", price });
+      if (result.ok) {
+        alert(`买入成功: ${result.message}`);
+        setBuyOpen(false);
+        setBuyCode("");
+        setBuyPrice("");
+        fetchData();
+      } else {
+        alert(`买入失败: ${result.detail || "未知错误"}`);
+      }
+    } catch (e: any) {
+      alert("买入请求失败: " + (e?.message || ""));
+    }
+    setBuying(false);
   };
 
   const handleShadowAnalyze = async () => {
@@ -161,7 +195,7 @@ export function PaperTrading() {
     setShadowLoading(false);
   };
 
-  const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : null;
+  const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : activeTab === "st" ? st : null;
   const positions = state?.positions || [];
   const cash = state?.cash || 0;
   const initial = state?.initial_capital || 200000;
@@ -171,6 +205,7 @@ export function PaperTrading() {
   const totalPnl = marketValue - totalCost;
   const totalValue = cash + marketValue;
   const totalReturn = (totalValue - initial) / initial;
+const maxPositions = activeTab === "st" ? 3 : activeTab === "v5" ? 5 : 5;
 
   return (
     <div className="p-6 space-y-6">
@@ -178,7 +213,7 @@ export function PaperTrading() {
         <div>
           <h1 className="text-2xl font-bold">模拟盘</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : "趋势策略")}
+            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : activeTab === "v5" ? "趋势策略" : "超短策略")}
           </p>
         </div>
         <button
@@ -193,7 +228,7 @@ export function PaperTrading() {
 
       {/* Tabs */}
       <div className="flex gap-2 border-b">
-        {(["v1", "v5", "history", "shadow"] as const).map(tab => (
+        {(["v1", "v5", "st", "history", "shadow"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -203,7 +238,7 @@ export function PaperTrading() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : tab === "shadow" ? "影子账户" : "交易历史"}
+            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : tab === "st" ? "超短" : tab === "shadow" ? "影子账户" : "交易历史"}
           </button>
         ))}
       </div>
@@ -234,7 +269,7 @@ export function PaperTrading() {
         </div>
         <div className="border rounded-lg p-4 bg-card">
           <div className="text-sm text-muted-foreground mb-1">持仓数量</div>
-          <p className="text-xl font-bold">{positions.length} / 5</p>
+          <p className="text-xl font-bold">{positions.length} / {maxPositions}</p>
         </div>
       </div>}
 
@@ -257,9 +292,20 @@ export function PaperTrading() {
 
       {/* Positions */}
       {activeTab !== "history" && activeTab !== "shadow" && <div className="border rounded-lg bg-card overflow-hidden">
-        <div className="px-4 py-3 border-b">
+        <div className="px-4 py-3 border-b flex items-center justify-between">
           <h2 className="font-semibold">当前持仓</h2>
+          <button onClick={() => setBuyOpen(true)} className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-green-600 border border-green-200 rounded hover:bg-green-50 transition-colors">
+            <Plus className="h-3 w-3" /> 买入
+          </button>
         </div>
+        {buyOpen && (
+          <div className="px-4 py-3 border-b bg-muted/20 flex items-center gap-3">
+            <input type="text" placeholder="代码" value={buyCode} onChange={e => setBuyCode(e.target.value)} className="w-24 px-2 py-1 text-xs border rounded font-mono" />
+            <input type="number" step="0.01" placeholder="价格" value={buyPrice} onChange={e => setBuyPrice(e.target.value)} className="w-24 px-2 py-1 text-xs border rounded font-mono" />
+            <button onClick={handleBuy} disabled={buying} className="px-3 py-1 text-xs font-medium text-white bg-green-600 rounded hover:bg-green-700 disabled:opacity-50">{buying ? "买入中..." : "确认买入"}</button>
+            <button onClick={() => { setBuyOpen(false); setBuyCode(""); setBuyPrice(""); }} className="px-3 py-1 text-xs border rounded hover:bg-muted">取消</button>
+          </div>
+        )}
         {loading ? (
           <div className="p-8 text-center text-muted-foreground">加载中...</div>
         ) : positions.length === 0 ? (
@@ -403,7 +449,7 @@ export function PaperTrading() {
                     <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
                       <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
                       <td className="px-4 py-2.5">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${t.strategy === "V1" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${t.strategy === "V1" ? "bg-blue-100 text-blue-700" : t.strategy === "V5" ? "bg-purple-100 text-purple-700" : "bg-orange-100 text-orange-700"}`}>
                           {t.strategy}
                         </span>
                       </td>

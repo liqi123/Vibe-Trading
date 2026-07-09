@@ -107,12 +107,20 @@ def _get_db() -> sqlite3.Connection | None:
 
 
 def _latest_trade_date(db: sqlite3.Connection) -> str | None:
-    """Get the latest trading date from daily_kline."""
+    """Get the latest trading date from daily_kline (uses config's date column detection)."""
+    try:
+        from utils.config import get_date_col
+        col, is_int = get_date_col()
+    except Exception:
+        col, is_int = "date", False
     try:
         cur = db.cursor()
-        cur.execute("SELECT DISTINCT date FROM daily_kline ORDER BY date DESC LIMIT 1")
+        cur.execute(f"SELECT DISTINCT {col} FROM daily_kline ORDER BY {col} DESC LIMIT 1")
         row = cur.fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        val = row[0]
+        return str(val) if is_int else val
     except Exception:
         return None
 
@@ -430,6 +438,20 @@ def get_portfolio_v5() -> dict:
     return state
 
 
+@router.get("/portfolio/shortterm")
+def get_portfolio_shortterm() -> dict:
+    """Return short-term strategy paper trading state with live prices."""
+    path = _PAPER_DIR / "paper_trading_state_shortterm.json"
+    try:
+        from utils.paper_trading import load_state
+        state = load_state(path)
+    except Exception:
+        state = _read_json(path)
+    if "history" in state:
+        state["history"] = sorted(state["history"], key=lambda x: x.get("date", ""), reverse=True)
+    return state
+
+
 @router.get("/scan-results")
 def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
     """Return cached scan results for given strategy and date.
@@ -533,7 +555,7 @@ def update_position_field(data: dict):
     if not code or not field:
         raise HTTPException(status_code=400, detail="Code and field required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json"
+    state_file = {"v1": "paper_trading_state.json", "v5": "paper_trading_state_v2.json", "shortterm": "paper_trading_state_shortterm.json"}.get(portfolio, "paper_trading_state_v2.json")
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -554,7 +576,7 @@ def update_position_field(data: dict):
 def sell_position(data: dict):
     """Sell a position from paper trading.
 
-    Expects: {code, portfolio: "v1"|"v5", shares?, reason?}
+    Expects: {code, portfolio: "v1"|"v5"|"shortterm", shares?, reason?}
     """
     code = data.get("code", "").strip().lower()
     portfolio = data.get("portfolio", "v5")
@@ -564,7 +586,7 @@ def sell_position(data: dict):
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json"
+    state_file = {"v1": "paper_trading_state.json", "v5": "paper_trading_state_v2.json", "shortterm": "paper_trading_state_shortterm.json"}.get(portfolio, "paper_trading_state_v2.json")
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -704,10 +726,10 @@ def get_stock_intraday(code: str) -> dict:
 def buy_stock(code: str, data: dict):
     """Buy a stock into paper trading portfolio.
 
-    Expects: {strategy: "fibonacci"|"v5", name, price, score?, E?, stop?, ...}
+    Expects: {strategy: "fibonacci"|"v5"|"shortterm", name, price, score?, E?, stop?, ...}
     """
     strategy = data.get("strategy", "fibonacci")
-    state_file = "paper_trading_state.json" if strategy == "fibonacci" else "paper_trading_state_v2.json"
+    state_file = {"fibonacci": "paper_trading_state.json", "v5": "paper_trading_state_v2.json", "shortterm": "paper_trading_state_shortterm.json"}.get(strategy, "paper_trading_state.json")
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     if not state:
@@ -717,9 +739,9 @@ def buy_stock(code: str, data: dict):
     if any(p.get("code") == code for p in state.get("positions", [])):
         return _err("已持仓")
 
-    # Check max positions (5)
-    if len(state.get("positions", [])) >= 5:
-        return _err("持仓已达上限(5只)")
+    max_pos = 3 if strategy == "shortterm" else 5
+    if len(state.get("positions", [])) >= max_pos:
+        return _err(f"持仓已达上限({max_pos}只)")
 
     from utils.config import INITIAL_CAPITAL, COMMISSION, SLIPPAGE
 
@@ -749,6 +771,12 @@ def buy_stock(code: str, data: dict):
             "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
             "current_price": buy_price_adj,
             "E": data.get("E", 0), "stop": data.get("stop", 0),
+        }
+    elif strategy == "shortterm":
+        pos = {
+            "code": code, "name": name,
+            "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
+            "current_price": buy_price_adj,
         }
     else:  # v5
         score = data.get("score", 0)
@@ -1396,6 +1424,14 @@ def get_trades_v5() -> dict:
     return {"history": history}
 
 
+@router.get("/trades/shortterm")
+def get_trades_shortterm() -> dict:
+    """Return short-term trade history (newest first)."""
+    state = _read_json(_PAPER_DIR / "paper_trading_state_shortterm.json")
+    history = sorted(state.get("history", []), key=lambda x: x.get("date", ""), reverse=True)
+    return {"history": history}
+
+
 @router.get("/watchlist-auction")
 def get_watchlist_auction(codes: str = "") -> dict:
     """Return auction data + yesterday volume for watchlist stocks."""
@@ -1728,29 +1764,48 @@ def _check_auction_time() -> tuple[bool, dict | None]:
     if db is None:
         return True, _err("no database")
     try:
+        _ensure_auction_table(db)
         today_str = date.today().isoformat()
         cur = db.cursor()
         existing = cur.execute("SELECT COUNT(*) FROM auction WHERE date=?", (today_str,)).fetchone()[0]
         if existing > 0:
             return True, _ok(count=existing, status="exists")
         return True, _err("今日尚无竞价数据（09:30后无法采集）", status="no_data")
+    except Exception:
+        return True, _err("检查竞价数据失败")
     finally:
         db.close()
 
 
+def _ensure_auction_table(db: sqlite3.Connection):
+    db.execute("""CREATE TABLE IF NOT EXISTS auction (
+        date TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+        auction_vol INTEGER, auction_amount REAL, auction_price REAL,
+        open_price REAL, collect_time TEXT, prev_close REAL,
+        PRIMARY KEY (date, code)
+    )""")
+    db.commit()
+
+
 @router.post("/auction/collect")
-def collect_auction_data():
+def collect_auction_data(data: dict = {}):
     """Collect auction data from Tencent for all stocks and store in DB.
     
     Only collects before 09:30. After 09:30, returns existing data if available.
+    Pass {"force": true} to skip time check.
     """
-    blocked, resp = _check_auction_time()
-    if blocked:
-        return resp
+    sectors = _fetch_sector_momentum(_SECTOR_CODES_FULL)
+
+    if not data.get("force"):
+        blocked, resp = _check_auction_time()
+        if blocked:
+            resp["sectors"] = sectors
+            return resp
 
     db = _get_db()
     if db is None:
         return _err("no database")
+    _ensure_auction_table(db)
     today_str = date.today().isoformat()
     try:
         from utils.tencent_quotes import fetch_raw, _parse_basic, add_prefix
@@ -1759,6 +1814,7 @@ def collect_auction_data():
             return _err("no kline data")
         latest_date = row
 
+        cur = db.cursor()
         cur.execute(f"SELECT code FROM {_stock_table()} WHERE code LIKE 'sh%' OR code LIKE 'sz%' OR code LIKE 'bj%'")
         all_codes = [row[0] for row in cur.fetchall()]
         prefixed = [add_prefix(c) for c in all_codes]
@@ -1787,7 +1843,15 @@ def collect_auction_data():
             except Exception:
                 _log.warning("auction insert failed for %s", code, exc_info=True)
         db.commit()
-        return _ok(count=collected, status="collected")
+
+        # 导出Excel（与CLI run_collection 保持一致）
+        try:
+            from utils.auction_collector import export_excel
+            export_excel(today_str)
+        except Exception:
+            _log.warning("auction Excel export failed", exc_info=True)
+
+        return _ok(count=collected, status="collected", sectors=sectors)
     except Exception as e:
         _log.warning("auction collect failed", exc_info=True)
         return _err(str(e))
@@ -1802,6 +1866,7 @@ def get_auction_dates():
     if db is None:
         return {"dates": []}
     try:
+        _ensure_auction_table(db)
         cur = db.cursor()
         cur.execute("SELECT date, COUNT(*), COALESCE(SUM(auction_vol), 0) FROM auction GROUP BY date ORDER BY date DESC")
         dates = [{"date": r[0], "count": r[1], "total_vol": r[2]} for r in cur.fetchall()]
@@ -1907,6 +1972,17 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
     finally:
         db.close()
+
+
+@router.get("/auction/sectors")
+def get_auction_sectors():
+    """竞价板块强度 — 腾讯行业指数实时涨跌幅，与总览板块排名同源。"""
+    try:
+        sectors = _fetch_sector_momentum(_SECTOR_CODES_FULL)
+        return {"sectors": sectors}
+    except Exception as e:
+        _log.warning("auction sectors failed", exc_info=True)
+        return {"sectors": []}
 
 
 # ---------------------------------------------------------------------------
