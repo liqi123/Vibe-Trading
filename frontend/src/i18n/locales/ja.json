@@ -4,7 +4,12 @@
   },
   "layout": {
     "home": "ホーム",
+    "overview": "Overview",
     "agent": "エージェント",
+    "paperTrading": "Paper Trading",
+    "dailyScan": "Daily Scan",
+    "watchlist": "Watchlist",
+    "tools": "Tools",
     "runtime": "ランタイム",
     "reports": "レポート",
     "alphaZoo": "Alpha Zoo",

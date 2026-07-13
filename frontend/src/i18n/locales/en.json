@@ -9,7 +9,12 @@
   },
   "layout": {
     "home": "Home",
+    "overview": "Overview",
     "agent": "Agent",
+    "paperTrading": "Paper Trading",
+    "dailyScan": "Daily Scan",
+    "watchlist": "Watchlist",
+    "tools": "Tools",
     "runtime": "Runtime",
     "reports": "Reports",
     "alphaZoo": "Alpha Zoo",

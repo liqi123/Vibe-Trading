@@ -4,7 +4,12 @@
   },
   "layout": {
     "home": "홈",
+    "overview": "Overview",
     "agent": "에이전트",
+    "paperTrading": "Paper Trading",
+    "dailyScan": "Daily Scan",
+    "watchlist": "Watchlist",
+    "tools": "Tools",
     "runtime": "런타임",
     "reports": "리포트",
     "alphaZoo": "Alpha Zoo",

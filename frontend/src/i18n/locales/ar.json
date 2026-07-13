@@ -4,7 +4,12 @@
   },
   "layout": {
     "home": "الرئيسية",
+    "overview": "Overview",
     "agent": "الوكيل",
+    "paperTrading": "Paper Trading",
+    "dailyScan": "Daily Scan",
+    "watchlist": "Watchlist",
+    "tools": "Tools",
     "runtime": "وقت التشغيل",
     "reports": "التقارير",
     "alphaZoo": "Alpha Zoo",

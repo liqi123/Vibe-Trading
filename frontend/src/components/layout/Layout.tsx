@@ -17,7 +17,9 @@ export function Layout() {
 
   const NAV = [
     { to: "/", icon: BarChart3, label: t('layout.home') },
+    { to: "/overview", icon: BarChart3, label: t('layout.overview') },
     { to: "/agent", icon: Bot, label: t('layout.agent') },
+    { to: "/tools", icon: Activity, label: t('layout.tools') },
     { to: "/runtime", icon: Activity, label: t('layout.runtime') },
     { to: "/reports", icon: FileText, label: t('layout.reports') },
     { to: "/alpha-zoo", icon: Layers, label: t('layout.alphaZoo') },
