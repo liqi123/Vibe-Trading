@@ -1,0 +1,1 @@
+@echo offcd /d C:\Users\Lychee\trading\Vibe-Trading\agentset PYTHONPATH=C:\Users\Lychee\trading\Vibe-Trading\agentpython -m cli serve --host 127.0.0.1 --port 8899

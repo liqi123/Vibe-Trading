@@ -224,6 +224,32 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ broker }),
     }),
+
+  // Custom trading tools API (proxy to /tools/* router)
+  tools: {
+    get: <T = unknown>(path: string, signal?: AbortSignal) =>
+      request<T>(`/tools${path}`, signal ? { signal } : undefined),
+    post: <T = unknown>(path: string, body?: unknown, signal?: AbortSignal) =>
+      request<T>(`/tools${path}`, {
+        method: "POST",
+        body: body !== undefined ? JSON.stringify(body) : "{}",
+        ...(signal ? { signal } : {}),
+      }),
+    put: <T = unknown>(path: string, body?: unknown, signal?: AbortSignal) =>
+      request<T>(`/tools${path}`, {
+        method: "PUT",
+        body: body !== undefined ? JSON.stringify(body) : "{}",
+        ...(signal ? { signal } : {}),
+      }),
+    patch: <T = unknown>(path: string, body?: unknown, signal?: AbortSignal) =>
+      request<T>(`/tools${path}`, {
+        method: "PATCH",
+        body: body !== undefined ? JSON.stringify(body) : "{}",
+        ...(signal ? { signal } : {}),
+      }),
+    del: <T = unknown>(path: string, signal?: AbortSignal) =>
+      request<T>(`/tools${path}`, { method: "DELETE", ...(signal ? { signal } : {}) }),
+  },
 };
 
 // --- Swarm types ---
