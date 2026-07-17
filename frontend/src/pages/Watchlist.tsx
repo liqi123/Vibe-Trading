@@ -371,6 +371,15 @@ export function Watchlist() {
               </button>
             </div>
             <div className="p-4">
+              {/* 图例 */}
+              <div className="flex flex-wrap gap-3 mb-3 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1"><span className="inline-block w-0 h-0 border-l-4 border-r-4 border-b-6 border-l-transparent border-r-transparent border-b-green-500" />BOS多(结构突破)</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-0 h-0 border-l-4 border-r-4 border-t-6 border-l-transparent border-r-transparent border-t-red-500" />BOS空</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rotate-45 bg-blue-500" />流动性扫盘</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 bg-blue-500/20 border border-blue-500" />FVG(公允缺口)</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 bg-purple-500/20 border border-purple-500 border-dashed" />OB(订单块)</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 bg-amber-500/20 border border-amber-500 border-dotted" />OTE(最优入场区)</span>
+              </div>
               {smcLoading ? (
                 <div className="h-96 flex items-center justify-center text-muted-foreground">加载中...</div>
               ) : smcData?.klines ? (
@@ -381,10 +390,34 @@ export function Watchlist() {
                   fvg_zones={smcData.fvg_zones || []}
                   ob_zones={smcData.ob_zones || []}
                   ote_zones={smcData.ote_zones || []}
-                  height={450}
+                  height={400}
                 />
               ) : (
                 <div className="h-96 flex items-center justify-center text-muted-foreground">暂无图表数据</div>
+              )}
+              {/* 分析建议 */}
+              {smcData?.analysis && (
+                <div className="mt-3 p-3 bg-muted/30 rounded-lg text-sm">
+                  <div className="flex items-center gap-4 mb-2 text-xs text-muted-foreground flex-wrap">
+                    <span>日期: {smcData.analysis.date}</span>
+                    <span>价格: {smcData.analysis.price}</span>
+                    <span>趋势: {smcData.analysis.trend > 0 ? "上升" : smcData.analysis.trend < 0 ? "下降" : "震荡"}</span>
+                    <span>MA20: {smcData.analysis.ma20}</span>
+                    <span>MA60: {smcData.analysis.ma60}</span>
+                    <span>RSI: {smcData.analysis.rsi}</span>
+                  </div>
+                  <div className="space-y-1 mb-2">
+                    {smcData.analysis.points?.map((p: string, i: number) => (
+                      <div key={i} className="flex items-start gap-1.5">
+                        <span className="w-1 h-1 rounded-full bg-primary mt-1.5 shrink-0" />
+                        <span>{p}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="font-medium text-primary">
+                    建议: {smcData.analysis.suggestion}
+                  </div>
+                </div>
               )}
             </div>
           </div>

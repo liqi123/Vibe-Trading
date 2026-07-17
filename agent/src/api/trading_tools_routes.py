@@ -2905,6 +2905,76 @@ def get_smc_analysis(code: str):
                     "bottom": round(float(last_ote_low), 2),
                 })
 
+        # 生成当前分析建议
+        last_row = result.iloc[-1]
+        last_close = float(last_row["close"])
+        last_date = last_row["date"].strftime("%Y-%m-%d")
+        trend = int(last_row.get("trend", 0))
+        ma20 = float(last_row.get("ma20", 0)) if pd.notna(last_row.get("ma20")) else 0
+        ma60 = float(last_row.get("ma60", 0)) if pd.notna(last_row.get("ma60")) else 0
+        rsi = float(last_row.get("rsi", 0)) if pd.notna(last_row.get("rsi")) else 0
+        bos_last = int(last_row.get("bos", 0))
+        choch_last = int(last_row.get("choch", 0))
+
+        # 近期信号统计
+        recent_signals = signals[-5:] if len(signals) >= 5 else signals
+        recent_bull_bos = sum(1 for s in signals[-10:] if s["type"] == "BOS" and s["direction"] == "bullish")
+        recent_bear_bos = sum(1 for s in signals[-10:] if s["type"] == "BOS" and s["direction"] == "bearish")
+        recent_bull_choch = sum(1 for s in signals[-10:] if s["type"] == "ChoCH" and s["direction"] == "bullish")
+        recent_bear_choch = sum(1 for s in signals[-10:] if s["type"] == "ChoCH" and s["direction"] == "bearish")
+
+        # 分析建议
+        analysis_parts = []
+        if trend > 0:
+            analysis_parts.append("当前处于上升趋势（HH/HL结构）")
+        elif trend < 0:
+            analysis_parts.append("当前处于下降趋势（LH/LL结构）")
+        else:
+            analysis_parts.append("趋势不明朗，处于震荡区间")
+
+        if ma20 > 0 and ma60 > 0:
+            if ma20 > ma60:
+                analysis_parts.append(f"MA20({ma20:.2f}) > MA60({ma60:.2f})，均线多头排列")
+            else:
+                analysis_parts.append(f"MA20({ma20:.2f}) < MA60({ma60:.2f})，均线空头排列")
+
+        if rsi > 0:
+            if rsi > 70:
+                analysis_parts.append(f"RSI={rsi:.1f}，超买区域，注意回调风险")
+            elif rsi < 30:
+                analysis_parts.append(f"RSI={rsi:.1f}，超卖区域，可能存在反弹机会")
+            else:
+                analysis_parts.append(f"RSI={rsi:.1f}，处于正常区间")
+
+        if recent_bull_bos > recent_bear_bos:
+            analysis_parts.append(f"近期多头BOS({recent_bull_bos}次)多于空头BOS({recent_bear_bos}次)，结构偏多")
+        elif recent_bear_bos > recent_bull_bos:
+            analysis_parts.append(f"近期空头BOS({recent_bear_bos}次)多于多头BOS({recent_bull_bos}次)，结构偏空")
+
+        if fvg_zones:
+            last_fvg = fvg_zones[-1]
+            if last_fvg["type"] == "bullish" and last_close >= last_fvg["bottom"]:
+                analysis_parts.append(f"价格在看涨FVG区间内({last_fvg['bottom']:.2f}-{last_fvg['top']:.2f})，存在支撑")
+            elif last_fvg["type"] == "bearish" and last_close <= last_fvg["top"]:
+                analysis_parts.append(f"价格在看跌FVG区间内({last_fvg['bottom']:.2f}-{last_fvg['top']:.2f})，存在压力")
+
+        if ob_zones:
+            last_ob = ob_zones[-1]
+            if last_close >= last_ob["bottom"] and last_close <= last_ob["top"]:
+                analysis_parts.append(f"价格在订单块(OB)区间内({last_ob['bottom']:.2f}-{last_ob['top']:.2f})，机构关注区域")
+
+        # 综合建议
+        if trend > 0 and ma20 > ma60 and rsi < 55 and recent_bull_bos > 0:
+            suggestion = "结构偏多，可关注做多机会，注意FVG/OB支撑位入场"
+        elif trend < 0 or ma20 < ma60:
+            suggestion = "结构偏空，建议观望等待趋势反转信号"
+        elif rsi > 70:
+            suggestion = "RSI超买，短期注意回调风险"
+        elif rsi < 30:
+            suggestion = "RSI超卖，可能存在反弹机会，但需等待结构确认"
+        else:
+            suggestion = "趋势不明，建议观望等待方向明确"
+
         return _ok(
             klines=klines,
             signals=signals,
@@ -2912,6 +2982,18 @@ def get_smc_analysis(code: str):
             fvg_zones=fvg_zones,
             ob_zones=ob_zones,
             ote_zones=ote_zones,
+            analysis={
+                "date": last_date,
+                "price": last_close,
+                "trend": trend,
+                "ma20": round(ma20, 2),
+                "ma60": round(ma60, 2),
+                "rsi": round(rsi, 1),
+                "recent_bull_bos": recent_bull_bos,
+                "recent_bear_bos": recent_bear_bos,
+                "points": analysis_parts,
+                "suggestion": suggestion,
+            },
         )
     except Exception as exc:
         _log.error("get_smc_analysis failed: %s", exc, exc_info=True)
