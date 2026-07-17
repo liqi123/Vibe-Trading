@@ -25,6 +25,39 @@ interface V5Position {
   score: number;
 }
 
+interface CVPick {
+  rank: number;
+  code: string;
+  name: string;
+  score: number;
+  price: number;
+  prev_close: number;
+  change_pct: number;
+}
+
+interface CVPosition {
+  code: string;
+  name: string;
+  buy_price: number;
+  shares: number;
+  cost: number;
+  current_price: number;
+  score: number;
+}
+
+interface ICTPosition {
+  code: string;
+  name: string;
+  buy_price: number;
+  shares: number;
+  cost: number;
+  current_price: number;
+  highest: number;
+  score: number;
+  structure: number;
+  sweep_level: number | null;
+}
+
 interface PendingOrder {
   code: string;
   name?: string;
@@ -77,8 +110,12 @@ function isV1(p: any): p is V1Position {
 export function PaperTrading() {
   const [v1, setV1] = useState<PaperState | null>(null);
   const [v5, setV5] = useState<PaperState | null>(null);
+  const [cvSignal, setCvSignal] = useState<{picks: CVPick[]; count: number; threshold: number; median: number; date: string} | null>(null);
+  const [cvPortfolio, setCvPortfolio] = useState<PaperState & {positions: CVPosition[]} | null>(null);
+  const [ictPortfolio, setIctPortfolio] = useState<PaperState & {positions: ICTPosition[]} | null>(null);
+  const [buyingCode, setBuyingCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "history" | "shadow">("v1");
+  const [activeTab, setActiveTab] = useState<"v1" | "v5" | "cv" | "ict" | "history" | "shadow">("v1");
   const [shadowLoading, setShadowLoading] = useState(false);
   const [shadowResult, setShadowResult] = useState<any>(null);
   const [shadowError, setShadowError] = useState<string | null>(null);
@@ -91,21 +128,31 @@ export function PaperTrading() {
 
   const fetchData = async () => {
     setLoading(true);
-    try {
-      const [r1, r5, t1, t5] = await Promise.all([
-        api.tools.get<any>("/portfolio"),
-        api.tools.get<any>("/portfolio/v5"),
-        api.tools.get<any>("/trades"),
-        api.tools.get<any>("/trades/v5"),
-      ]);
-      setV1(r1);
-      setV5(r5);
-      setTrades([
-        ...(t1.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
-        ...(t5.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
-      ]);
-    } catch { /* ignore */ }
+    const results = await Promise.allSettled([
+      api.tools.get<any>("/portfolio"),
+      api.tools.get<any>("/portfolio/v5"),
+      api.tools.get<any>("/trades"),
+      api.tools.get<any>("/trades/v5"),
+      api.tools.get<any>("/composite-volume/portfolio"),
+      api.tools.get<any>("/portfolio/ict"),
+      api.tools.get<any>("/trades/ict"),
+    ]);
+    const ok = (i: number) => results[i].status === "fulfilled" ? (results[i] as PromiseFulfilledResult<any>).value : null;
+    const r1 = ok(0), r5 = ok(1), t1 = ok(2), t5 = ok(3),
+          cvPort = ok(4), ictPort = ok(5), tIct = ok(6);
+    if (r1) setV1(r1);
+    if (r5) setV5(r5);
+    if (cvPort) setCvPortfolio(cvPort);
+    if (ictPort) setIctPortfolio(ictPort);
+    setTrades([
+      ...(t1?.history || []).map((t: any) => ({ ...t, strategy: "V1" })),
+      ...(t5?.history || []).map((t: any) => ({ ...t, strategy: "V5" })),
+      ...(cvPort?.history || []).map((t: any) => ({ ...t, strategy: "CV" })),
+      ...(tIct?.history || []).map((t: any) => ({ ...t, strategy: "ICT" })),
+    ]);
     setLoading(false);
+    // signal 单独加载，不阻塞页面
+    api.tools.get<any>("/composite-volume/signal").then(r => { if (r?.ok) setCvSignal(r); }).catch(() => {});
   };
 
   useEffect(() => { fetchData(); }, []);
@@ -126,17 +173,39 @@ export function PaperTrading() {
     if (!confirm(`确认卖出 ${code}？`)) return;
     setSellingCode(code);
     try {
-      const result = await api.tools.post<any>("/portfolio/sell", { code, portfolio, reason: "手动卖出" });
+      const endpoint = portfolio === "cv" ? "/composite-volume/sell" : "/portfolio/sell";
+      const result = await api.tools.post<any>(endpoint, {
+        code, portfolio,
+        reason: "手动卖出",
+      });
       if (result.ok) {
         alert(`卖出成功，盈亏: ${formatMoney(result.pnl)}`);
         fetchData();
       } else {
         alert(`卖出失败: ${result.detail || "未知错误"}`);
       }
-    } catch (e) {
-      alert("卖出请求失败");
-    }
+    } catch { alert("卖出请求失败"); }
     setSellingCode(null);
+  };
+
+  const handleCvBuy = async (pick: CVPick) => {
+    if (!confirm(`确认买入 ${pick.name} (${pick.code}) ？`)) return;
+    setBuyingCode(pick.code);
+    try {
+      const result = await api.tools.post<any>("/composite-volume/buy", {
+        code: pick.code, name: pick.name,
+        price: pick.price, score: pick.score,
+      });
+      if (result.ok) {
+        alert(result.message);
+        fetchData();
+      } else {
+        alert(`买入失败: ${result.detail}`);
+      }
+    } catch (e) {
+      alert("买入请求失败");
+    }
+    setBuyingCode(null);
   };
 
   const handleShadowAnalyze = async () => {
@@ -161,13 +230,13 @@ export function PaperTrading() {
     setShadowLoading(false);
   };
 
-  const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : null;
+  const state = activeTab === "v1" ? v1 : activeTab === "v5" ? v5 : activeTab === "cv" ? cvPortfolio : activeTab === "ict" ? ictPortfolio : null;
   const positions = state?.positions || [];
   const cash = state?.cash || 0;
   const initial = state?.initial_capital || 200000;
 
-  const marketValue = positions.reduce((s, p) => s + (p.current_price || p.buy_price) * p.shares, 0);
-  const totalCost = positions.reduce((s, p) => s + p.cost, 0);
+  const marketValue = positions.reduce((s, p: any) => s + (p.current_price || p.buy_price) * p.shares, 0);
+  const totalCost = positions.reduce((s, p: any) => s + p.cost, 0);
   const totalPnl = marketValue - totalCost;
   const totalValue = cash + marketValue;
   const totalReturn = (totalValue - initial) / initial;
@@ -178,7 +247,7 @@ export function PaperTrading() {
         <div>
           <h1 className="text-2xl font-bold">模拟盘</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : "趋势策略")}
+            {activeTab === "history" ? "全部交易历史" : state?.name || (activeTab === "v1" ? "斐波那契策略" : activeTab === "cv" ? "复合量价策略" : activeTab === "ict" ? "ICT/SMC策略" : "趋势策略")}
           </p>
         </div>
         <button
@@ -193,7 +262,7 @@ export function PaperTrading() {
 
       {/* Tabs */}
       <div className="flex gap-2 border-b">
-        {(["v1", "v5", "history", "shadow"] as const).map(tab => (
+        {(["v1", "v5", "cv", "ict", "history", "shadow"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -203,7 +272,7 @@ export function PaperTrading() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : tab === "shadow" ? "影子账户" : "交易历史"}
+            {tab === "v1" ? "V1 斐波那契" : tab === "v5" ? "V5 趋势" : tab === "cv" ? "复合量价" : tab === "ict" ? "ICT/SMC" : tab === "shadow" ? "影子账户" : "交易历史"}
           </button>
         ))}
       </div>
@@ -255,6 +324,64 @@ export function PaperTrading() {
         </div>
       )}
 
+      {/* CV: Today's Picks */}
+      {activeTab === "cv" && cvSignal && (
+        <div className="border rounded-lg bg-card overflow-hidden">
+          <div className="px-4 py-3 border-b flex items-center justify-between">
+            <h2 className="font-semibold flex items-center gap-2">
+              今日精选 (Top 1%)
+              <span className="text-xs text-muted-foreground font-normal">{cvSignal.date} · 共{cvSignal.count}只 · 门槛分{cvSignal.threshold.toFixed(4)}</span>
+            </h2>
+          </div>
+          <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-muted/50">
+                <tr className="border-b">
+                  <th className="px-4 py-2 text-left font-medium w-8">#</th>
+                  <th className="px-4 py-2 text-left font-medium">代码</th>
+                  <th className="px-4 py-2 text-left font-medium">名称</th>
+                  <th className="px-4 py-2 text-right font-medium">价格</th>
+                  <th className="px-4 py-2 text-right font-medium">涨幅</th>
+                  <th className="px-4 py-2 text-right font-medium">因子分</th>
+                  <th className="px-4 py-2 text-center font-medium">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cvSignal.picks.map(pick => {
+                  const held = cvPortfolio?.positions?.some(p => p.code === pick.code);
+                  return (
+                    <tr key={pick.code} className="border-b last:border-0 hover:bg-muted/30">
+                      <td className="px-4 py-2 text-muted-foreground">{pick.rank}</td>
+                      <td className="px-4 py-2 font-mono text-xs cursor-pointer hover:text-primary"
+                          onClick={() => openStock(pick.code)}>{pick.code}</td>
+                      <td className="px-4 py-2 font-medium">{pick.name}</td>
+                      <td className="px-4 py-2 text-right font-mono">{pick.price.toFixed(2)}</td>
+                      <td className={`px-4 py-2 text-right font-mono ${pick.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                        {formatPct(pick.change_pct / 100)}
+                      </td>
+                      <td className="px-4 py-2 text-right font-mono">{pick.score.toFixed(4)}</td>
+                      <td className="px-4 py-2 text-center">
+                        <button
+                          onClick={() => handleCvBuy(pick)}
+                          disabled={buyingCode === pick.code || held}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded transition-colors disabled:opacity-50 ${
+                            held
+                              ? "bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed"
+                              : "text-red-600 border border-red-200 hover:bg-red-50"
+                          }`}
+                        >
+                          {held ? "已持仓" : buyingCode === pick.code ? "买入中..." : "买入"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Positions */}
       {activeTab !== "history" && activeTab !== "shadow" && <div className="border rounded-lg bg-card overflow-hidden">
         <div className="px-4 py-3 border-b">
@@ -280,6 +407,7 @@ export function PaperTrading() {
                   {activeTab === "v1" && <th className="px-4 py-2 text-right font-medium">跑路价</th>}
                   {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">评分</th>}
                   {activeTab === "v5" && <th className="px-4 py-2 text-right font-medium">最高</th>}
+                  {activeTab === "cv" && <th className="px-4 py-2 text-right font-medium">因子分</th>}
                   <th className="px-4 py-2 text-center font-medium">操作</th>
                 </tr>
               </thead>
@@ -353,6 +481,11 @@ export function PaperTrading() {
                           </td>
                         </>
                       )}
+                      {activeTab === "cv" && (
+                        <td className="px-4 py-3 text-right font-mono text-xs">
+                          {(pos as any).score?.toFixed(4) || "-"}
+                        </td>
+                      )}
                       <td className="px-4 py-3 text-center">
                         <button
                           onClick={() => handleSell(pos.code, activeTab)}
@@ -378,7 +511,7 @@ export function PaperTrading() {
           <div className="px-4 py-3 border-b flex items-center gap-2">
             <History className="h-4 w-4" />
             <h2 className="font-semibold">全部交易历史</h2>
-            <span className="text-xs text-muted-foreground">（V1 + V5 合计 {trades.length} 条）</span>
+            <span className="text-xs text-muted-foreground">（V1 + V5 + CV 合计 {trades.length} 条）</span>
           </div>
           <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
             <table className="w-full text-sm">
@@ -403,7 +536,11 @@ export function PaperTrading() {
                     <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
                       <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
                       <td className="px-4 py-2.5">
-                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${t.strategy === "V1" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"}`}>
+                        <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          t.strategy === "V1" ? "bg-blue-100 text-blue-700" :
+                          t.strategy === "CV" ? "bg-orange-100 text-orange-700" :
+                          "bg-purple-100 text-purple-700"
+                        }`}>
                           {t.strategy}
                         </span>
                       </td>

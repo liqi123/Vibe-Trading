@@ -1,0 +1,13 @@
+{
+  "total_return": "2.4%",
+  "annual_return": "6.0%",
+  "sharpe": 2.0,
+  "max_drawdown": "0.0%",
+  "win_rate": "25%",
+  "n_trades": 58,
+  "final_value": "1024483",
+  "train_period": "2024-01-01/2024-06-30",
+  "test_period": "2024-07-01/2024-12-31",
+  "n_factors_total": 191,
+  "n_factors_effective": 80
+}

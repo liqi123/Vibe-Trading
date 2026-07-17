@@ -1,0 +1,16 @@
+{
+  "alphas": [
+    "gtja191_168",
+    "gtja191_005",
+    "gtja191_048",
+    "gtja191_133",
+    "gtja191_041",
+    "gtja191_177",
+    "gtja191_163",
+    "gtja191_043"
+  ],
+  "period": "2024-01-01/2024-12-31",
+  "universe": "all-a-share",
+  "top_n": 20,
+  "rebalance": "M"
+}

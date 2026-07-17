@@ -1,0 +1,10 @@
+{
+  "total_return": "15.3%",
+  "annual_return": "16.8%",
+  "sharpe": "0.64",
+  "max_drawdown": "-27.8%",
+  "win_rate": "60%",
+  "n_trades": 407,
+  "n_periods": 11,
+  "final_value": "1153063"
+}

@@ -1,0 +1,12 @@
+{
+  "total_return": "-52.5%",
+  "annual_return": "-40.8%",
+  "sharpe": -1.05,
+  "max_drawdown": "-68.0%",
+  "win_rate": "38%",
+  "n_trades": 425,
+  "final_value": "475476",
+  "n_factors_total": 191,
+  "n_factors_alive": 50,
+  "n_themes": 6
+}

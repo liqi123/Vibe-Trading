@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ _UNIVERSE_TAG = {
     "csi300": "equity_cn",
     "sp500": "equity_us",
     "btc-usdt": "crypto",
+    "all-a-share": "equity_cn_local",
 }
 
 
@@ -126,6 +128,8 @@ def _load_universe_panel(
         panel = _load_sp500_panel(start, end)
     elif universe == "btc-usdt":
         panel = _load_btc_panel(start, end)
+    elif universe == "all-a-share":
+        panel = _load_all_a_share_panel(start, end)
     else:  # pragma: no cover — guarded above
         raise ValueError(f"unhandled universe {universe!r}")
 
@@ -375,6 +379,78 @@ def _load_csi300_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
         panel["vwap"] = safe_div(
             panel["amount"] * 1000.0, panel["volume"] * 100.0 + 1.0
         )
+    return panel
+
+
+def _load_all_a_share_panel(start: str, end: str) -> dict[str, pd.DataFrame]:
+    """All A-share stocks panel via local SQLite database.
+
+    Reads from the TDX daily database (default ``G:\\tdx_data\\tdx_daily.db``,
+    overridden by env var ``TDX_DB_PATH``). No Tushare token or network required.
+
+    Data format in DB:
+        - table ``daily_kline``: code (``sh600000``), market (``sh``),
+          trade_date (INT YYYYMMDD), open/high/low/close/amount/volume
+        - table ``stock_names``: code, name — used to filter out indexes
+
+    VWAP is computed from amount/volume in the same way as the Tushare loader
+    (amount in 千元, volume in 手 → factor 1000/100).
+    """
+    db_path = os.environ.get("TDX_DB_PATH", r"G:\tdx_data\tdx_daily.db")
+    sd = start.replace("-", "")
+    ed = end.replace("-", "")
+
+    conn = sqlite3.connect(db_path)
+
+    # Get valid stock codes from stock_names (filters out indexes)
+    cur = conn.execute("SELECT code FROM stock_names")
+    valid_codes = {r[0] for r in cur.fetchall()}
+
+    # Fetch all kline data for the period in one query
+    query = """
+        SELECT code, market, trade_date, open, high, low, close, amount, volume
+        FROM daily_kline
+        WHERE trade_date >= ? AND trade_date <= ?
+        ORDER BY code, trade_date
+    """
+    df = pd.read_sql_query(query, conn, params=(int(sd), int(ed)))
+    conn.close()
+
+    if df.empty:
+        return {}
+
+    # Filter to only stocks (not indexes)
+    df = df[df["code"].isin(valid_codes)]
+    if df.empty:
+        return {}
+
+    # Combine code + market into identifier (e.g. "000001.SZ")
+    df["identifier"] = df["code"].str[2:] + "." + df["market"].str.upper()
+
+    # Build per-stock DataFrames
+    fetched: dict[str, pd.DataFrame] = {}
+    for identifier, grp in df.groupby("identifier"):
+        grp = grp.sort_values("trade_date").copy()
+        grp["trade_date"] = pd.to_datetime(grp["trade_date"].astype(str), format="%Y%m%d")
+        grp = grp.set_index("trade_date")
+        keep = ["open", "high", "low", "close", "volume", "amount"]
+        frame = grp[keep].dropna(subset=["open", "high", "low", "close"])
+        if frame.empty:
+            continue
+        for col in keep:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        fetched[identifier] = frame
+
+    panel = _wide_from_fetched(fetched, include_amount=True)
+    if "amount" in panel and "volume" in panel:
+        from src.factors.base import safe_div
+        panel["vwap"] = safe_div(
+            panel["amount"] * 1000.0, panel["volume"] * 100.0 + 1.0
+        )
+    logger.info(
+        "all-a-share: %d stocks loaded from local DB (%s..%s)",
+        len(fetched), start, end,
+    )
     return panel
 
 

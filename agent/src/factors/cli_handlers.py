@@ -73,7 +73,7 @@ from src.factors.registry import Registry, RegistryError
 # We treat ``<repo>`` (and any subdirectory thereof) as the write-allow root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-_UNIVERSE_CHOICES = ["csi300", "sp500", "btc-usdt"]
+_UNIVERSE_CHOICES = ["csi300", "sp500", "btc-usdt", "all-a-share"]
 
 
 def _print(msg: str) -> None:

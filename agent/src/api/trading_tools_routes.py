@@ -24,6 +24,8 @@ import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 
 _log = logging.getLogger("trading_tools")
@@ -45,7 +47,7 @@ def _read_json(path: Path) -> dict | list:
     """Read a JSON file, return empty dict on error."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
 
 
@@ -110,7 +112,9 @@ def _latest_trade_date(db: sqlite3.Connection) -> str | None:
     """Get the latest trading date from daily_kline."""
     try:
         cur = db.cursor()
-        cur.execute("SELECT DISTINCT date FROM daily_kline ORDER BY date DESC LIMIT 1")
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        date_col = "trade_date" if "trade_date" in cols else "date"
+        cur.execute(f"SELECT DISTINCT {date_col} FROM daily_kline ORDER BY {date_col} DESC LIMIT 1")
         row = cur.fetchone()
         return row[0] if row else None
     except Exception:
@@ -152,12 +156,24 @@ def get_expectations() -> dict:
         from utils.config import get_date_col
         date_col, _ = get_date_col()
         for p in positions:
-            row = db.execute(
-                f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 1",
-                (p["code"],)
+            code = p["code"]
+            bare_code = code[2:] if code.startswith(("sh", "sz")) else code
+
+            # 优先从auction表获取prev_close（更及时）
+            auction_row = db.execute(
+                "SELECT prev_close FROM auction WHERE code=? ORDER BY date DESC LIMIT 1",
+                (bare_code,)
             ).fetchone()
-            if row and row[0]:
-                p["prev_close"] = row[0]
+            if auction_row and auction_row[0]:
+                p["prev_close"] = auction_row[0]
+            else:
+                # 回退到daily_kline表
+                row = db.execute(
+                    f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 1",
+                    (code,)
+                ).fetchone()
+                if row and row[0]:
+                    p["prev_close"] = row[0]
     finally:
         db.close()
     return state
@@ -430,6 +446,302 @@ def get_portfolio_v5() -> dict:
     return state
 
 
+@router.get("/portfolio/ict")
+def get_portfolio_ict() -> dict:
+    """Return ICT/SMC paper trading state with live prices."""
+    path = _PAPER_DIR / "paper_trading_state_ict.json"
+    try:
+        from trading.paper_trading import load_state
+        state = load_state(path)
+    except Exception:
+        state = _read_json(path)
+    if "history" in state:
+        state["history"] = sorted(state["history"], key=lambda x: x.get("date", ""), reverse=True)
+    return state
+
+
+@router.get("/trades/ict")
+def get_trades_ict() -> dict:
+    """Return ICT/SMC trade history."""
+    path = _PAPER_DIR / "paper_trading_state_ict.json"
+    state = _read_json(path)
+    history = state.get("history", [])
+    history = sorted(history, key=lambda x: x.get("date", ""), reverse=True)
+    return {"history": history}
+
+
+# ---------------------------------------------------------------------------
+# Composite Volume (复合量价策略) Paper Trading
+# ---------------------------------------------------------------------------
+
+@router.get("/composite-volume/signal")
+def get_cv_signal() -> dict:
+    """Run composite volume strategy live and return today's Top 1% picks."""
+    today = date.today().strftime("%Y-%m-%d")
+    try:
+        from data.tencent_quotes import fetch_detail, add_prefix
+    except Exception:
+        return _err("data.tencent_quotes 不可用")
+
+    try:
+        return _get_cv_signal_impl(today)
+    except Exception as exc:
+        _log.error("get_cv_signal failed: %s", exc, exc_info=True)
+        return _err(str(exc))
+
+def _get_cv_signal_impl(today: str) -> dict:
+    from data.tencent_quotes import fetch_detail, add_prefix
+    db = _get_db()
+    if db is None:
+        return _err("无法连接数据库")
+    st_numeric = {r[0][2:] for r in db.execute(
+        "SELECT code FROM stock_names WHERE name LIKE 'ST%' OR name LIKE '*ST%'"
+    ).fetchall()}
+
+    lookback = 200
+    end = datetime.strptime(today, "%Y-%m-%d")
+    start = (end - timedelta(days=lookback)).strftime("%Y%m%d")
+    ed = end.strftime("%Y%m%d")
+
+    valid = {r[0] for r in db.execute("SELECT code FROM stock_names").fetchall()}
+    raw = pd.read_sql_query(f"""
+        SELECT code, market, trade_date, open, high, low, close, amount, volume
+        FROM daily_kline
+        WHERE trade_date >= {start} AND trade_date <= {ed}
+        ORDER BY code, trade_date
+    """, db)
+    db.close()
+    raw = raw[raw["code"].isin(valid)]
+    raw["identifier"] = raw["code"].str[2:] + "." + raw["market"].str.upper()
+    raw["date"] = pd.to_datetime(raw["trade_date"].astype(str), format="%Y%m%d")
+
+    panel = {}
+    for col in ("open", "high", "low", "close", "volume"):
+        piv = raw.pivot_table(index="date", columns="identifier", values=col, aggfunc="first")
+        panel[col] = piv.astype(float)
+
+    identifiers = panel["close"].columns
+    tenc_map = {}
+    for sid in identifiers:
+        num, mkt = sid.split(".")
+        pre = "sh" if mkt == "SH" else "sz" if mkt == "SZ" else "bj"
+        tenc_map[pre + num] = sid
+
+    all_data = fetch_detail(list(tenc_map.keys()))
+    today_dt = pd.to_datetime(today)
+    rows_o, rows_h, rows_l, rows_c, rows_v = {}, {}, {}, {}, {}
+    for tenc, sid in tenc_map.items():
+        q = all_data.get(tenc, {})
+        p = q.get("price", 0)
+        if p > 0:
+            rows_o[sid] = q.get("open", 0)
+            rows_h[sid] = q.get("high", 0)
+            rows_l[sid] = q.get("low", 0)
+            rows_c[sid] = p
+            rows_v[sid] = q.get("volume", 0)
+
+    for col, rows in zip(
+        ("open", "high", "low", "close", "volume"),
+        (rows_o, rows_h, rows_l, rows_c, rows_v),
+    ):
+        new = pd.DataFrame(rows, index=[today_dt])
+        new = new.reindex(columns=panel[col].columns, fill_value=0.0)
+        panel[col] = pd.concat([panel[col], new])
+
+    c, v, h, l, o = panel["close"], panel["volume"], panel["high"], panel["low"], panel["open"]
+    c_r = c.rank(axis=1, pct=True)
+    v_r = v.rank(axis=1, pct=True)
+    f1 = (c / c.shift(10) - 1) - (v / v.shift(10) - 1)
+    f1 = f1.rank(axis=1, pct=True)
+    f2 = (-c_r.rolling(5, min_periods=5).corr(v_r)).rank(axis=1, pct=True)
+    f3 = (-h.rolling(5, min_periods=5).corr(v_r)).rank(axis=1, pct=True)
+    f4 = (-(v / v.rolling(20).mean())).rank(axis=1, pct=True)
+    f5 = (-(v.rolling(10, min_periods=10).std() * c.rolling(5, min_periods=5).corr(v))).rank(axis=1, pct=True)
+    f6 = ((o / c.shift(1) - 1)).rank(axis=1, pct=True)
+    upper_shadow = (h - np.maximum(c, o)) / c
+    f7 = (-upper_shadow.rolling(20, min_periods=10).std()).rank(axis=1, pct=True)
+    amihud = c.pct_change().abs() / (v * c)
+    f9 = amihud.rolling(20, min_periods=10).mean().rank(axis=1, pct=True)
+    # f10: APM — 上午比下午强
+    morning_ret = o / c.shift(1) - 1
+    afternoon_ret = c / o - 1
+    apm_raw = morning_ret.rank(axis=1, pct=True) - afternoon_ret.rank(axis=1, pct=True)
+    daily_range = (h - l) / c
+    vol_weight = 1.0 / (daily_range.rolling(5).mean() + 1e-8)
+    orr = abs(o - c.shift(1)) / c.shift(1)
+    full_range = (h - l) / c.shift(1)
+    range_ratio = orr / (full_range + 1e-8)
+    f10 = (apm_raw * vol_weight / vol_weight.mean()).rank(axis=1, pct=True) + range_ratio.rank(axis=1, pct=True)
+    f10 = f10.rank(axis=1, pct=True)
+    composite = (f1 + f2 + f3 + f4 + f5 + f6 + f7 + f9 + f10) / 9.0
+
+    scores = composite.loc[today_dt].dropna()
+    scores = scores[~scores.index.map(lambda x: x.split(".")[0]).isin(st_numeric)]
+    scores = scores.sort_values(ascending=False)
+    n_select = max(1, int(len(scores) * 0.01))
+    selected = scores.head(n_select)
+
+    codes_q = [add_prefix(c.split(".")[0]) for c in selected.index]
+    details = fetch_detail(codes_q)
+
+    picks = []
+    for i, (code, score) in enumerate(selected.items(), 1):
+        base = code.split(".")[0]
+        q = details.get("sh" + base) or details.get("sz" + base) or {}
+        price = q.get("price", 0)
+        prev_c = q.get("prev_close", 0)
+        chg = round((price / prev_c - 1) * 100, 2) if prev_c > 0 else 0
+        picks.append({
+            "rank": i,
+            "code": code,
+            "name": q.get("name", ""),
+            "score": round(score, 4),
+            "price": price,
+            "prev_close": prev_c,
+            "change_pct": chg,
+        })
+
+    return _ok(
+        picks=picks,
+        count=n_select,
+        threshold=round(float(scores.iloc[n_select - 1]), 4),
+        median=round(float(scores.median()), 4),
+        date=today,
+    )
+
+
+@router.get("/composite-volume/portfolio")
+def get_cv_portfolio() -> dict:
+    """Return composite volume paper trading state with live prices."""
+    path = _PAPER_DIR / "composite_volume_state.json"
+    state = _read_json(path)
+    if state and state.get("positions"):
+        try:
+            codes = ["sh" + p["code"].split(".")[0] if p["code"].split(".")[0].startswith(("6", "9"))
+                     else "sz" + p["code"].split(".")[0] for p in state["positions"]]
+            from data.tencent_quotes import get_prices
+            prices = get_prices(codes)
+            prefixes = {"sh", "sz", "bj"}
+            for p in state["positions"]:
+                num = p["code"].split(".")[0]
+                for pre in prefixes:
+                    if pre + num in prices:
+                        p["current_price"] = prices[pre + num]
+                        break
+        except Exception:
+            _log.warning("get_cv_portfolio: live prices failed")
+    if "history" in state:
+        state["history"] = sorted(state["history"], key=lambda x: x.get("date", ""), reverse=True)
+    return state if state else {
+        "name": "复合量价策略", "strategy": "composite_volume",
+        "initial_capital": 200000, "cash": 200000, "positions": [], "history": [],
+    }
+
+
+@router.post("/composite-volume/buy")
+def buy_cv_stock(data: dict) -> dict:
+    """Buy a stock into composite volume portfolio."""
+    code = data.get("code", "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code required")
+    path = _PAPER_DIR / "composite_volume_state.json"
+    state = _read_json(path)
+    if not state:
+        state = {"name": "复合量价策略", "strategy": "composite_volume",
+                 "initial_capital": 200000, "cash": 200000, "positions": [], "history": []}
+    if any(p.get("code") == code for p in state.get("positions", [])):
+        return _err("已持仓")
+    if len(state.get("positions", [])) >= 5:
+        return _err("持仓已达上限(5只)")
+
+    from utils.config import INITIAL_CAPITAL, COMMISSION, SLIPPAGE
+    layer = state.get("initial_capital", INITIAL_CAPITAL) / 6
+    buy_amount = min(layer, state["cash"] - layer)
+    if buy_amount <= 0:
+        return _err("现金不足")
+    price = data.get("price", 0)
+    if price <= 0:
+        return _err("无效价格")
+    shares = int(buy_amount / price / 100) * 100
+    if shares <= 0:
+        return _err("股数不足(最少100股)")
+    buy_price_adj = price * (1 + SLIPPAGE)
+    total_cost = shares * buy_price_adj * (1 + COMMISSION)
+    name = data.get("name", "")
+    score = data.get("score", 0)
+    state["cash"] -= total_cost
+    state.setdefault("positions", []).append({
+        "code": code, "name": name,
+        "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
+        "current_price": buy_price_adj, "score": score,
+    })
+    state.setdefault("history", []).append({
+        "date": date.today().strftime("%Y-%m-%d"), "action": "buy",
+        "code": code, "name": name,
+        "price": buy_price_adj, "shares": shares, "score": score,
+    })
+    try:
+        _atomic_write_json(path, state)
+        return _ok(message=f"买入 {name} {code}: {shares}股 @{buy_price_adj:.2f}",
+                   shares=shares, price=buy_price_adj, cost=total_cost)
+    except Exception as e:
+        return _err(f"保存失败: {e}")
+
+
+@router.post("/composite-volume/sell")
+def sell_cv_position(data: dict) -> dict:
+    """Sell a position from composite volume portfolio."""
+    code = data.get("code", "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code required")
+    path = _PAPER_DIR / "composite_volume_state.json"
+    state = _read_json(path)
+    positions = state.get("positions", [])
+    pos = next((p for p in positions if p.get("code", "").lower() == code.lower()), None)
+    if not pos:
+        raise HTTPException(status_code=404, detail=f"No position for {code}")
+
+    sell_shares = data.get("shares") or pos.get("shares", 0)
+    if sell_shares <= 0:
+        return _err("无效股数")
+    buy_price = pos.get("buy_price", 0)
+    current_price = pos.get("current_price", buy_price)
+    try:
+        from data.tencent_quotes import get_prices
+        num = code.split(".")[0]
+        pre = "sh" if num[0] in ("6", "9") else "sz"
+        prices = get_prices([pre + num])
+        if pre + num in prices:
+            current_price = prices[pre + num]
+    except Exception:
+        _log.warning("sell_cv: get_prices failed")
+
+    pnl = (current_price - buy_price) * sell_shares
+    pnl_pct = (current_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+    today = date.today().strftime("%Y-%m-%d")
+
+    state.setdefault("history", []).append({
+        "date": today, "action": "sell",
+        "code": code, "name": pos.get("name", ""),
+        "price": current_price, "shares": sell_shares,
+        "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
+        "note": data.get("reason", "手动卖出"),
+    })
+
+    remaining = pos.get("shares", 0) - sell_shares
+    if remaining <= 0:
+        state["positions"] = [p for p in positions if p.get("code") != code]
+    else:
+        for p in positions:
+            if p.get("code") == code:
+                p["shares"] = remaining
+                p["cost"] = buy_price * remaining
+                break
+    state["cash"] = state.get("cash", 0) + current_price * sell_shares
+    _atomic_write_json(path, state)
+    return _ok(pnl=round(pnl, 2), price=current_price)
+
+
 @router.get("/scan-results")
 def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
     """Return cached scan results for given strategy and date.
@@ -441,7 +753,7 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
         if datetime.now().hour < 13:
             from datetime import timedelta
             date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    prefix = "v1" if strategy == "fibonacci" else "v5"
+    prefix = "v1" if strategy == "fibonacci" else "v5" if strategy == "v5" else "ict"
 
     def _load(cache_date: str) -> dict | None:
         p = _PAPER_DIR / f"{prefix}_screening_cache_{cache_date}.json"
@@ -533,7 +845,7 @@ def update_position_field(data: dict):
     if not code or not field:
         raise HTTPException(status_code=400, detail="Code and field required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json"
+    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json" if portfolio == "v5" else "paper_trading_state_ict.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -554,7 +866,7 @@ def update_position_field(data: dict):
 def sell_position(data: dict):
     """Sell a position from paper trading.
 
-    Expects: {code, portfolio: "v1"|"v5", shares?, reason?}
+    Expects: {code, portfolio: "v1"|"v5"|"ict", shares?, reason?}
     """
     code = data.get("code", "").strip().lower()
     portfolio = data.get("portfolio", "v5")
@@ -564,7 +876,7 @@ def sell_position(data: dict):
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json"
+    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json" if portfolio == "v5" else "paper_trading_state_ict.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -704,10 +1016,15 @@ def get_stock_intraday(code: str) -> dict:
 def buy_stock(code: str, data: dict):
     """Buy a stock into paper trading portfolio.
 
-    Expects: {strategy: "fibonacci"|"v5", name, price, score?, E?, stop?, ...}
+    Expects: {strategy: "fibonacci"|"v5"|"ict", name, price, score?, E?, stop?, ...}
     """
     strategy = data.get("strategy", "fibonacci")
-    state_file = "paper_trading_state.json" if strategy == "fibonacci" else "paper_trading_state_v2.json"
+    if strategy == "fibonacci":
+        state_file = "paper_trading_state.json"
+    elif strategy == "ict":
+        state_file = "paper_trading_state_ict.json"
+    else:
+        state_file = "paper_trading_state_v2.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     if not state:
@@ -750,6 +1067,15 @@ def buy_stock(code: str, data: dict):
             "current_price": buy_price_adj,
             "E": data.get("E", 0), "stop": data.get("stop", 0),
         }
+    elif strategy == "ict":
+        pos = {
+            "code": code, "name": name,
+            "buy_price": buy_price_adj, "shares": shares, "cost": total_cost,
+            "current_price": buy_price_adj,
+            "highest": buy_price_adj, "score": data.get("score", 0),
+            "structure": data.get("structure", 0),
+            "sweep_level": data.get("sweep_level"),
+        }
     else:  # v5
         score = data.get("score", 0)
         pos = {
@@ -785,9 +1111,11 @@ def get_stock_indicators(code: str) -> dict:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         cur = db.cursor()
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        date_col = "trade_date" if "trade_date" in cols else "date"
         cur.execute(
-            "SELECT date, open, high, low, close, volume FROM daily_kline "
-            "WHERE code = ? ORDER BY date DESC LIMIT 120",
+            f"SELECT {date_col}, open, high, low, close, volume FROM daily_kline "
+            f"WHERE code = ? ORDER BY {date_col} DESC LIMIT 120",
             (code,),
         )
         rows = cur.fetchall()
@@ -1294,6 +1622,7 @@ def run_script(data: dict):
     scripts = {
         "fibonacci": "strategies/daily_check.py",
         "v5": "strategies/daily_check_v5.py",
+        "ict": "strategies/ict_scan_fast.py",
         "stops": "-m utils stops",
         "review": "analysis/generate_review.py",
         "review_v5": "analysis/generate_review.py",
@@ -1327,6 +1656,9 @@ def run_script(data: dict):
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    # 确保子进程能找到项目根目录的模块
+    existing_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(_PROJECT_ROOT) + (os.pathsep + existing_path if existing_path else "")
 
     # 初始内容：前端靠"执行中"判断任务是否活跃
     output_file.write_text(f"[{ts_start.strftime('%H:%M:%S')}] 执行中...\n", encoding="utf-8")
@@ -1715,11 +2047,50 @@ def get_review_report(date: str = "") -> dict:
 # Auction Board (集合竞价看板)
 # ---------------------------------------------------------------------------
 
+def _import_auction_excel(db, today_str: str) -> int:
+    """Try to import auction data from Excel file in project root.
+
+    Looks for 竞价数据_YYYY-MM-DD.xlsx, imports into auction table.
+    Returns number of rows imported, or 0 if no file / import failed.
+    """
+    xlsx = _PROJECT_ROOT / f'竞价数据_{today_str}.xlsx'
+    if not xlsx.exists():
+        return 0
+    try:
+        import pandas as pd
+        df = pd.read_excel(str(xlsx))
+        cur = db.cursor()
+        imported = 0
+        for _, row in df.iterrows():
+            code = str(row.get('代码', '')).strip()
+            if not code:
+                continue
+            name = str(row.get('名称', ''))
+            vol = int(row.get('竞价量(手)', 0)) * 100  # 手→股
+            amount = float(row.get('竞价额(万元)', 0)) * 10000  # 万元→元
+            open_px = float(row.get('开盘价', 0))
+            prev_close = float(row.get('昨收', 0))
+            collect_time = str(row.get('采集时间', ''))
+            # Excel没有竞价价列，用开盘价近似
+            price = open_px
+            cur.execute(
+                "INSERT OR REPLACE INTO auction (date, code, name, auction_vol, auction_amount, auction_price, open_price, collect_time, prev_close) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (today_str, code, name, vol, amount, price, open_px, collect_time, prev_close)
+            )
+            imported += 1
+        db.commit()
+        _log.info("imported %d auction rows from %s", imported, xlsx.name)
+        return imported
+    except Exception as ex:
+        _log.warning("auction Excel import failed: %s", ex)
+        return 0
+
+
 def _check_auction_time() -> tuple[bool, dict | None]:
     """Check if auction collection is allowed.
-    
+
     Returns (blocked, response). If blocked, response contains the payload to return.
-    After 09:30, collection is blocked and existing data is returned if available.
+    After 09:30, checks DB first; if empty, tries importing from Excel file.
     """
     now = datetime.now()
     after_cutoff = now.hour > 9 or (now.hour == 9 and now.minute >= 30)
@@ -1735,6 +2106,10 @@ def _check_auction_time() -> tuple[bool, dict | None]:
         existing = cur.execute("SELECT COUNT(*) FROM auction WHERE date=?", (today_str,)).fetchone()[0]
         if existing > 0:
             return True, _ok(count=existing, status="exists")
+        # DB没数据，尝试从Excel导入
+        imported = _import_auction_excel(db, today_str)
+        if imported > 0:
+            return True, _ok(count=imported, status="imported")
         return True, _err("今日尚无竞价数据（09:30后无法采集）", status="no_data")
     finally:
         db.close()
@@ -2178,7 +2553,9 @@ def get_stock_analysis(code: str):
 
         # Get kline data
         cur = db.cursor()
-        cur.execute("SELECT date, open, high, low, close, volume FROM daily_kline WHERE code=? ORDER BY date DESC LIMIT 120", (db_code,))
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        date_col = "trade_date" if "trade_date" in cols else "date"
+        cur.execute(f"SELECT {date_col}, open, high, low, close, volume FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 120", (db_code,))
         rows = cur.fetchall()
         if not rows:
             return {"data": {"error": "no kline data for " + code}}
@@ -2369,6 +2746,176 @@ def shadow_report(shadow_id: str):
         return _err("报告不存在，请先运行分析")
     html = report_path.read_text(encoding="utf-8")
     return _ok(html=html)
+
+
+@router.get("/smc/{code}")
+def get_smc_analysis(code: str):
+    """返回个股SMC分析数据（K线 + BOS/ChoCH/FVG/OB/Sweep标注）"""
+    import sys as _sys
+    _trading_root = str(_PROJECT_ROOT)
+    if _trading_root not in _sys.path:
+        _sys.path.insert(0, _trading_root)
+
+    try:
+        from strategies.ict_strategy import (
+            _fetch_kline, smc_pipeline, swing_points, calc_bos_choch,
+            calc_order_blocks, calc_fvg, calc_liquidity_sweep,
+            detect_3_1_structure, calc_ote, calc_trend_continuous
+        )
+    except ImportError as e:
+        return _err(f"ict_strategy不可用: {e}")
+
+    db = _get_db()
+    if db is None:
+        return _err("无法连接数据库")
+
+    try:
+        date_col = "trade_date"
+        cols = {r[1] for r in db.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        if "date" in cols and "trade_date" not in cols:
+            date_col = "date"
+
+        limit = 120
+        sql = f"""SELECT {date_col} as date, open, high, low, close, volume
+                  FROM daily_kline WHERE code = ? ORDER BY {date_col} DESC LIMIT ?"""
+        import pandas as pd
+        df = pd.read_sql(sql, db, params=[code, limit])
+        db.close()
+
+        if df.empty:
+            return _err(f"无数据: {code}")
+
+        is_int = date_col == "trade_date"
+        if is_int:
+            df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+        else:
+            df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+
+        # 运行完整SMC管线
+        result, major_ob, minor_ob, fvg_df = smc_pipeline(df)
+
+        # 提取K线数据
+        klines = []
+        for i in range(len(result)):
+            row = result.iloc[i]
+            klines.append({
+                "time": row["date"].strftime("%Y-%m-%d"),
+                "open": round(float(row["open"]), 2),
+                "high": round(float(row["high"]), 2),
+                "low": round(float(row["low"]), 2),
+                "close": round(float(row["close"]), 2),
+                "volume": int(row["volume"]),
+            })
+
+        # 提取BOS/ChoCH信号
+        signals = []
+        for i in range(len(result)):
+            row = result.iloc[i]
+            bos = row.get("bos", 0)
+            choch = row.get("choch", 0)
+            if bos != 0:
+                signals.append({
+                    "time": row["date"].strftime("%Y-%m-%d"),
+                    "type": "BOS",
+                    "direction": "bullish" if bos > 0 else "bearish",
+                    "price": round(float(row["high"] if bos > 0 else row["low"]), 2),
+                })
+            if choch != 0:
+                signals.append({
+                    "time": row["date"].strftime("%Y-%m-%d"),
+                    "type": "ChoCH",
+                    "direction": "bullish" if choch > 0 else "bearish",
+                    "price": round(float(row["high"] if choch > 0 else row["low"]), 2),
+                })
+
+        # 提取Sweep信号
+        sweeps = []
+        if "sweep" in result.columns:
+            for i in range(len(result)):
+                row = result.iloc[i]
+                sw = row.get("sweep", 0)
+                if sw != 0:
+                    sweeps.append({
+                        "time": row["date"].strftime("%Y-%m-%d"),
+                        "direction": "bullish" if sw > 0 else "bearish",
+                        "price": round(float(row["low"] if sw > 0 else row["high"]), 2),
+                    })
+
+        # 提取FVG区间
+        fvg_zones = []
+        if "fvg_type" in result.columns:
+            for i in range(len(result)):
+                row = result.iloc[i]
+                ft = row.get("fvg_type", 0)
+                if ft != 0:
+                    fvg_zones.append({
+                        "time": row["date"].strftime("%Y-%m-%d"),
+                        "type": "bullish" if ft > 0 else "bearish",
+                        "top": round(float(row.get("fvg_top", 0)), 2),
+                        "bottom": round(float(row.get("fvg_bottom", 0)), 2),
+                    })
+
+        # 提取OB区间
+        ob_zones = []
+        if major_ob is not None and not major_ob.empty:
+            for _, ob in major_ob.iterrows():
+                try:
+                    ob_date = result.loc[ob["ob_idx"], "date"].strftime("%Y-%m-%d")
+                    expiry_date = result.loc[min(ob["expiry_idx"], len(result)-1), "date"].strftime("%Y-%m-%d")
+                    ob_zones.append({
+                        "start": ob_date,
+                        "end": expiry_date,
+                        "top": round(float(ob["ob_top"]), 2),
+                        "bottom": round(float(ob["ob_bottom"]), 2),
+                        "type": "major",
+                    })
+                except Exception:
+                    pass
+
+        # 提取OTE区间
+        ote_zones = []
+        if "ote_high" in result.columns:
+            last_ote_high = None
+            last_ote_low = None
+            last_ote_start = None
+            for i in range(len(result)):
+                row = result.iloc[i]
+                oh = row.get("ote_high", None)
+                ol = row.get("ote_low", None)
+                if pd.notna(oh) and pd.notna(ol):
+                    if last_ote_high is None or oh != last_ote_high:
+                        if last_ote_high is not None:
+                            ote_zones.append({
+                                "start": last_ote_start,
+                                "end": result.iloc[i-1]["date"].strftime("%Y-%m-%d"),
+                                "top": round(float(last_ote_high), 2),
+                                "bottom": round(float(last_ote_low), 2),
+                            })
+                        last_ote_high = oh
+                        last_ote_low = ol
+                        last_ote_start = row["date"].strftime("%Y-%m-%d")
+            if last_ote_high is not None:
+                ote_zones.append({
+                    "start": last_ote_start,
+                    "end": result.iloc[-1]["date"].strftime("%Y-%m-%d"),
+                    "top": round(float(last_ote_high), 2),
+                    "bottom": round(float(last_ote_low), 2),
+                })
+
+        return _ok(
+            klines=klines,
+            signals=signals,
+            sweeps=sweeps,
+            fvg_zones=fvg_zones,
+            ob_zones=ob_zones,
+            ote_zones=ote_zones,
+        )
+    except Exception as exc:
+        _log.error("get_smc_analysis failed: %s", exc, exc_info=True)
+        return _err(str(exc))
 
 
 @router.get("/shadow/list")

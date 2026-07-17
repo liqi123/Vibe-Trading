@@ -64,11 +64,11 @@ export function AuctionBoard() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newCode, setNewCode] = useState("");
 
-  const fetchDates = async () => {
+  const fetchDates = async (selectLatest = false) => {
     try {
       const data = await api.tools.get<any>("/auction/dates");
       setDates(data.dates || []);
-      if (data.dates?.length > 0 && !selectedDate) {
+      if (data.dates?.length > 0 && (selectLatest || !selectedDate)) {
         setSelectedDate(data.dates[0].date);
       }
     } catch (e) { /* ignore */ }
@@ -108,7 +108,7 @@ export function AuctionBoard() {
         } else if (data.status === "collected") {
           toast.success(`已采集 ${data.count} 只股票竞价数据`);
         }
-        fetchDateData(selectedDate || "");
+        await fetchDates(true);
         fetchCompare();
         fetchExpectData();
     } catch (e) { /* ignore */ }

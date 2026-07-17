@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Plus, RefreshCw, Trash2, Edit2, Check, X } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Edit2, Check, X, CandlestickChart as CandleIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useModalStore } from "../stores/modal";
 import { api } from "@/lib/api";
+import { SMCChart } from "@/components/charts/SMCChart";
 
 interface WatchlistItem {
   code: string;
@@ -42,6 +43,20 @@ export function Watchlist() {
   const [editValues, setEditValues] = useState({ e_price: "", x_price: "", runaway_price: "" });
   const openStock = useModalStore((s) => s.open);
   const { t } = useTranslation();
+  const [smcStock, setSmcStock] = useState<{ code: string; name: string } | null>(null);
+  const [smcData, setSmcData] = useState<any>(null);
+  const [smcLoading, setSmcLoading] = useState(false);
+
+  const openSMC = async (code: string, name: string) => {
+    setSmcStock({ code, name });
+    setSmcData(null);
+    setSmcLoading(true);
+    try {
+      const r = await api.tools.get<any>(`/smc/${code}`);
+      if (r?.ok) setSmcData(r);
+    } catch {}
+    setSmcLoading(false);
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -265,6 +280,13 @@ export function Watchlist() {
                         ) : (
                           <div className="flex items-center justify-center gap-1">
                             <button
+                              onClick={() => openSMC(item.code, item.name)}
+                              className="p-1 text-muted-foreground hover:text-purple-600 rounded transition-colors"
+                              title="SMC结构图"
+                            >
+                              <CandleIcon className="h-4 w-4" />
+                            </button>
+                            <button
                               onClick={() => startEdit(item)}
                               className="p-1 text-muted-foreground hover:text-blue-600 rounded transition-colors"
                               title={t("watchlist.edit")}
@@ -330,6 +352,40 @@ export function Watchlist() {
               >
                 {t("watchlist.add")}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SMC结构图弹窗 */}
+      {smcStock && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-card rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden">
+            <div className="px-6 py-4 border-b flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold">{smcStock.name} ({smcStock.code})</h3>
+                <p className="text-sm text-muted-foreground">SMC结构图</p>
+              </div>
+              <button onClick={() => setSmcStock(null)} className="p-1 hover:bg-muted rounded">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-4">
+              {smcLoading ? (
+                <div className="h-96 flex items-center justify-center text-muted-foreground">加载中...</div>
+              ) : smcData?.klines ? (
+                <SMCChart
+                  klines={smcData.klines}
+                  signals={smcData.signals || []}
+                  sweeps={smcData.sweeps || []}
+                  fvg_zones={smcData.fvg_zones || []}
+                  ob_zones={smcData.ob_zones || []}
+                  ote_zones={smcData.ote_zones || []}
+                  height={450}
+                />
+              ) : (
+                <div className="h-96 flex items-center justify-center text-muted-foreground">暂无图表数据</div>
+              )}
             </div>
           </div>
         </div>

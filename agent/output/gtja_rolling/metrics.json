@@ -1,0 +1,11 @@
+{
+  "total_return": "-73.6%",
+  "annual_return": "-50.1%",
+  "sharpe": -1.32,
+  "max_drawdown": "-82.2%",
+  "win_rate": "41%",
+  "n_trades": 611,
+  "final_value": "263613",
+  "ic_window": 252,
+  "roll_step": 126
+}
