@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2 } from "lucide-react";
+import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface AuctionStat {
@@ -31,6 +31,19 @@ interface ExpectAuctionItem {
   today_vol: number; prev_vol: number; vol_ratio: number; expectation: string; suggestion: string;
 }
 
+interface ConceptStockBrief {
+  code: string; name: string; mcap_yi?: number; vol: number; chg_pct: number; limit_n?: number;
+  yest_vol?: number | null; vol_ratio?: number | null;
+}
+
+interface ConceptItem {
+  tag: string; n: number; red_ratio: number; hh_n: number; avg_chg: number;
+  score: number; max_limit: number; total_amount: number; signal: string;
+  limit_up_open_n?: number;
+  anchor: ConceptStockBrief | null; zhongjun: ConceptStockBrief | null;
+  tanxing: ConceptStockBrief[]; top_limit: ConceptStockBrief[];
+}
+
 function volClass(v: number) {
   if (v > 0) return "text-red-600";
   if (v < 0) return "text-green-600";
@@ -56,13 +69,17 @@ export function AuctionBoard() {
   const [stats, setStats] = useState<AuctionStat | null>(null);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
-  const [tab, setTab] = useState<"volume" | "compare" | "expectation">("volume");
+  const [tab, setTab] = useState<"volume" | "compare" | "expectation" | "concept">("volume");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
   const [expectStocks, setExpectStocks] = useState<ExpectStock[]>([]);
   const [expectItems, setExpectItems] = useState<ExpectAuctionItem[]>([]);
   const [expectLoading, setExpectLoading] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newCode, setNewCode] = useState("");
+  const [conceptData, setConceptData] = useState<ConceptItem[]>([]);
+  const [conceptLoading, setConceptLoading] = useState(false);
+  const [expandedConcept, setExpandedConcept] = useState<string | null>(null);
+  const [analysisSource, setAnalysisSource] = useState<"industry" | "concept">("industry");
 
   const fetchDates = async (selectLatest = false) => {
     try {
@@ -111,6 +128,7 @@ export function AuctionBoard() {
         await fetchDates(true);
         fetchCompare();
         fetchExpectData();
+        fetchConceptAnalysis();
     } catch (e) { /* ignore */ }
     finally { setCollecting(false); }
   };
@@ -158,6 +176,20 @@ export function AuctionBoard() {
     finally { setExpectLoading(false); }
   };
 
+  const fetchConceptAnalysis = async (d?: string, src?: "industry" | "concept") => {
+    setConceptLoading(true);
+    try {
+      const date = d || selectedDate || dates[0]?.date;
+      if (!date) { toast.warning("请先选择日期"); return; }
+      const s = src || analysisSource;
+      const data = await api.tools.get<any>(`/auction/concept-analysis?date=${encodeURIComponent(date)}&source=${s}`);
+      if (data.error) { toast.error(`分析失败: ${data.error}`); return; }
+      setConceptData(data.concepts || []);
+      if (!data.concepts?.length) toast.info("该日期无数据");
+    } catch (e: any) { toast.error(`请求失败: ${e.message || e}`); }
+    finally { setConceptLoading(false); }
+  };
+
   const handleAddStock = async () => {
     if (!newCode.trim()) return;
     try {
@@ -197,9 +229,10 @@ export function AuctionBoard() {
     if (selectedDate) {
       if (tab === "compare") fetchCompare();
       else if (tab === "expectation") fetchExpectData();
+      else if (tab === "concept") fetchConceptAnalysis(selectedDate);
       else fetchDateData(selectedDate);
     }
-  }, [selectedDate, tab]);
+  }, [selectedDate, tab, analysisSource]);
 
   return (
     <div className="p-6 space-y-6">
@@ -275,6 +308,7 @@ export function AuctionBoard() {
           { key: "volume" as const, label: "竞价量排行", icon: BarChart3 },
           { key: "compare" as const, label: "竞价对比", icon: TrendingDown },
           { key: "expectation" as const, label: "预期管理", icon: Eye },
+          { key: "concept" as const, label: "竞价分析", icon: Sparkles },
         ].map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -520,6 +554,294 @@ export function AuctionBoard() {
               </div>
             </div>
           )}
+        </div>
+      ) : tab === "concept" ? (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 justify-between">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { setAnalysisSource("industry"); }}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  analysisSource === "industry"
+                    ? "bg-primary text-primary-foreground"
+                    : "border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                行业板块
+              </button>
+              <button
+                onClick={() => { setAnalysisSource("concept"); }}
+                className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  analysisSource === "concept"
+                    ? "bg-primary text-primary-foreground"
+                    : "border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                概念板块
+              </button>
+            </div>
+            <button
+              onClick={() => fetchConceptAnalysis(selectedDate, analysisSource)}
+              disabled={conceptLoading}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${conceptLoading ? "animate-spin" : ""}`} />
+              刷新
+            </button>
+          </div>
+
+          {/* Summary Section */}
+          {conceptData.length > 0 && (
+            <div className="border rounded-lg bg-card p-4 space-y-3">
+              {(() => {
+                const top = conceptData[0];
+                const volBadge = (s: ConceptStockBrief) => {
+                  const vr = s.vol_ratio;
+                  if (vr == null) return null;
+                  return vr >= 1.2
+                    ? <span className="text-red-600 font-medium">量比{vr.toFixed(2)}</span>
+                    : vr >= 0.8
+                      ? <span className="text-muted-foreground">量比{vr.toFixed(2)}</span>
+                      : <span className="text-green-600 font-medium">量比{vr.toFixed(2)}</span>;
+                };
+                const cmpCol = (s: ConceptStockBrief) => s.chg_pct >= 0 ? "text-red-600" : "text-green-600";
+                return (
+                  <>
+                    <div>
+                      <span className="font-bold text-base">【最强板块】{top.tag}</span>
+                      <span className="ml-2 text-sm text-muted-foreground">评分 {top.score.toFixed(0)} · 红盘率 {(top.red_ratio * 100).toFixed(0)}% · 均涨幅 {top.avg_chg >= 0 ? "+" : ""}{top.avg_chg.toFixed(2)}%</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div>
+                        <span className="text-muted-foreground">锚点 </span>
+                        <span className="font-medium">{top.anchor?.name}({top.anchor?.code})</span>
+                        {top.anchor && (
+                          <>
+                            <span className={`ml-2 ${cmpCol(top.anchor)}`}>{top.anchor.chg_pct >= 0 ? "+" : ""}{top.anchor.chg_pct.toFixed(2)}%</span>
+                            <span className="ml-2 text-xs text-muted-foreground">昨{top.anchor.yest_vol ?? "?"}→{top.anchor.vol} </span>
+                            {volBadge(top.anchor)}
+                          </>
+                        )}
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">中军 </span>
+                        <span className="font-medium">{top.zhongjun?.name}({top.zhongjun?.code})</span>
+                        {top.zhongjun && (
+                          <>
+                            <span className={`ml-2 ${cmpCol(top.zhongjun)}`}>{top.zhongjun.chg_pct >= 0 ? "+" : ""}{top.zhongjun.chg_pct.toFixed(2)}%</span>
+                            <span className="ml-2 text-xs text-muted-foreground">昨{top.zhongjun.yest_vol ?? "?"}→{top.zhongjun.vol} </span>
+                            {volBadge(top.zhongjun)}
+                          </>
+                        )}
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">弹性 </span>
+                        {top.tanxing.slice(0, 2).map(t => (
+                          <span key={t.code} className="mr-3">
+                            <span className="font-medium">{t.name}</span>
+                            <span className={`ml-1 ${cmpCol(t)}`}>{t.chg_pct >= 0 ? "+" : ""}{t.chg_pct.toFixed(2)}%</span>
+                            <span className="ml-1 text-xs text-muted-foreground">量比{t.vol_ratio?.toFixed(2) ?? "N/A"}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    {top.max_limit > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        最高板: {top.top_limit.map(ls => `${ls.name}(${ls.limit_n}板)`).join(" | ")}
+                      </div>
+                    )}
+
+                    {/* 次强板块 */}
+                    {conceptData.length > 1 && (
+                      <div className="pt-2 border-t text-sm">
+                        <span className="font-semibold">【次强板块】</span>
+                        <span className="font-medium">{conceptData[1].tag}</span>
+                        <span className="ml-2 text-muted-foreground">评分 {conceptData[1].score.toFixed(0)} · 红盘率 {(conceptData[1].red_ratio * 100).toFixed(0)}% · 均涨幅 {conceptData[1].avg_chg >= 0 ? "+" : ""}{conceptData[1].avg_chg.toFixed(2)}%</span>
+                      </div>
+                    )}
+
+                    {/* 关注推荐 */}
+                    {(() => {
+                      const recs: { tag: string; role: string; s: ConceptStockBrief }[] = [];
+                      conceptData.slice(0, 5).forEach(c => {
+                        const check = (s: ConceptStockBrief | null, role: string) => {
+                          if (s && s.vol_ratio != null && s.vol_ratio >= 1.2 && s.chg_pct > 0)
+                            recs.push({ tag: c.tag, role, s });
+                        };
+                        check(c.anchor, "锚点");
+                        check(c.zhongjun, "中军");
+                        (c.tanxing || []).forEach(t => check(t, "弹性"));
+                      });
+                      if (recs.length === 0) return null;
+                      return (
+                        <div className="pt-2 border-t text-sm">
+                          <span className="font-semibold">【关注推荐】</span>
+                          {recs.slice(0, 6).map((r, i) => (
+                            <span key={i} className="mr-3">
+                              <span className="text-muted-foreground">{r.tag}</span>
+                              <span className="ml-1">{r.role} </span>
+                              <span className="font-medium">{r.s.name}</span>
+                              <span className={`ml-1 ${cmpCol(r.s)}`}>{r.s.chg_pct >= 0 ? "+" : ""}{r.s.chg_pct.toFixed(2)}%</span>
+                              <span className="ml-1 text-xs text-muted-foreground">量比{r.s.vol_ratio?.toFixed(2)}</span>
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          <div className="border rounded-lg bg-card overflow-hidden">
+            <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-purple-500" />
+              <h2 className="font-semibold">{analysisSource === "industry" ? "行业板块竞价分析" : "概念板块竞价分析"}</h2>
+              <span className="text-xs text-muted-foreground ml-auto">
+                红盘率×30 + 高开占比×20 + 均涨幅×15 + 个股数×10 + 连板加分×15 + 竞价涨停开×10
+              </span>
+            </div>
+            {conceptLoading ? (
+              <div className="p-8 text-center text-muted-foreground">加载中...</div>
+            ) : conceptData.length === 0 ? (
+              <div className="p-8 text-center text-muted-foreground">暂无数据，请先采集竞价</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">排名</th>
+                      <th className="px-3 py-2 text-left font-medium">{analysisSource === "industry" ? "行业" : "概念"}</th>
+                      <th className="px-3 py-2 text-right font-medium">个股</th>
+                      <th className="px-3 py-2 text-right font-medium">红盘率</th>
+                      <th className="px-3 py-2 text-right font-medium">高开&gt;2%</th>
+                      <th className="px-3 py-2 text-right font-medium">均涨幅</th>
+                      <th className="px-3 py-2 text-right font-medium">最高板</th>
+                      <th className="px-3 py-2 text-right font-medium">评分</th>
+                      <th className="px-3 py-2 text-left font-medium">锚点</th>
+                      <th className="px-3 py-2 text-left font-medium">中军</th>
+                      <th className="px-3 py-2 text-center font-medium">信号</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {conceptData.map((c, i) => {
+                      const isExpanded = expandedConcept === c.tag;
+                      return (
+                        <>
+                          <tr
+                            key={c.tag}
+                            className="border-t hover:bg-muted/30 cursor-pointer transition-colors"
+                            onClick={() => setExpandedConcept(isExpanded ? null : c.tag)}
+                          >
+                            <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
+                            <td className="px-3 py-2 font-medium">{c.tag}</td>
+                            <td className="px-3 py-2 text-right">{c.n}</td>
+                            <td className="px-3 py-2 text-right">{(c.red_ratio * 100).toFixed(0)}%</td>
+                            <td className="px-3 py-2 text-right font-medium text-red-600">{c.hh_n}</td>
+                            <td className={`px-3 py-2 text-right font-medium ${c.avg_chg >= 0 ? "text-red-600" : "text-green-600"}`}>
+                              {c.avg_chg >= 0 ? "+" : ""}{c.avg_chg.toFixed(2)}%
+                            </td>
+                            <td className="px-3 py-2 text-right font-medium">
+                              {c.max_limit > 0 ? (
+                                <span className="text-amber-600 font-bold">{c.max_limit}板</span>
+                              ) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right font-bold">{c.score.toFixed(0)}</td>
+                            <td className="px-3 py-2">
+                              <span className="text-xs">{c.anchor?.name || "—"}</span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className="text-xs">{c.zhongjun?.name || "—"}</span>
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {c.signal ? (
+                                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                                  c.signal.includes("超预期") ? "bg-red-100 text-red-700" :
+                                  c.signal.includes("不及预期") ? "bg-yellow-100 text-yellow-700" :
+                                  c.signal.includes("强势") ? "bg-blue-100 text-blue-700" :
+                                  c.signal.includes("弱") ? "bg-gray-100 text-gray-500" : ""
+                                }`}>
+                                  {c.signal}
+                                </span>
+                              ) : "—"}
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr key={`${c.tag}-detail`} className="bg-muted/20">
+                              <td colSpan={11} className="px-6 py-3">
+                                <div className="grid grid-cols-4 gap-4 text-xs">
+                                  <div>
+                                    <div className="text-muted-foreground mb-1">锚点</div>
+                                    <div className="font-medium">{c.anchor?.name}</div>
+                                    {c.anchor?.mcap_yi && <div className="text-muted-foreground">市值{c.anchor.mcap_yi.toFixed(0)}亿</div>}
+                                    <div className={c.anchor && (c.anchor.chg_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}>
+                                      开盘 {c.anchor ? `${c.anchor.chg_pct >= 0 ? "+" : ""}${c.anchor.chg_pct.toFixed(2)}%` : "—"}
+                                    </div>
+                                    <div className="text-muted-foreground">
+                                      竞价量 {c.anchor?.vol?.toLocaleString() ?? "—"}
+                                      {c.anchor?.yest_vol != null && (
+                                        <span className="ml-1">(昨{c.anchor.yest_vol.toLocaleString()} {c.anchor.vol_ratio != null ? <span className={c.anchor.vol_ratio >= 1.2 ? "text-red-500" : c.anchor.vol_ratio < 0.8 ? "text-green-500" : ""}>量比{c.anchor.vol_ratio.toFixed(2)}</span> : ""})</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="text-muted-foreground mb-1">中军</div>
+                                    <div className="font-medium">{c.zhongjun?.name}</div>
+                                    <div className={c.zhongjun && (c.zhongjun.chg_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}>
+                                      开盘 {c.zhongjun ? `${c.zhongjun.chg_pct >= 0 ? "+" : ""}${c.zhongjun.chg_pct.toFixed(2)}%` : "—"}
+                                    </div>
+                                    <div className="text-muted-foreground">
+                                      竞价量 {c.zhongjun?.vol.toLocaleString()}
+                                      {c.zhongjun?.yest_vol != null && (
+                                        <span className="ml-1">(昨{c.zhongjun.yest_vol.toLocaleString()} {c.zhongjun.vol_ratio != null ? <span className={c.zhongjun.vol_ratio >= 1.2 ? "text-red-500" : c.zhongjun.vol_ratio < 0.8 ? "text-green-500" : ""}>量比{c.zhongjun.vol_ratio.toFixed(2)}</span> : ""})</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="text-muted-foreground mb-1">最高板</div>
+                                    {c.top_limit.length > 0 ? (
+                                      c.top_limit.map(t => (
+                                        <div key={t.name} className="font-medium text-amber-600">
+                                          {t.name} {t.limit_n}板
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <div className="text-muted-foreground">—</div>
+                                    )}
+                                  </div>
+                                  <div>
+                                    <div className="text-muted-foreground mb-1">弹性</div>
+                                    {c.tanxing.length > 0 ? (
+                                      c.tanxing.map(t => (
+                                        <div key={t.name}>
+                                          <span className="text-red-600">{t.name} {t.chg_pct >= 0 ? "+" : ""}{t.chg_pct.toFixed(2)}%</span>
+                                          {t.yest_vol != null && (
+                                            <span className="ml-1 text-muted-foreground">
+                                              量比{t.vol_ratio?.toFixed(2) ?? "N/A"}
+                                            </span>
+                                          )}
+                                        </div>
+                                      ))
+                                    ) : (
+                                      <div className="text-muted-foreground">—</div>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="mt-2 text-xs text-muted-foreground">
+                                  红盘率 {(c.red_ratio * 100).toFixed(0)}% | 高开&gt;2% {c.hh_n}只 | 竞价涨停开 {c.limit_up_open_n ?? 0}只 | 竞价额 {(c.total_amount / 10000).toFixed(0)}万
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         /* Volume tab */

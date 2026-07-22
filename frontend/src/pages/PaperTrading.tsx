@@ -354,7 +354,7 @@ export function PaperTrading() {
                       <td className="px-4 py-2 text-muted-foreground">{pick.rank}</td>
                       <td className="px-4 py-2 font-mono text-xs cursor-pointer hover:text-primary"
                           onClick={() => openStock(pick.code)}>{pick.code}</td>
-                      <td className="px-4 py-2 font-medium">{pick.name}</td>
+                      <td className="px-4 py-2 font-medium cursor-pointer hover:text-primary" onClick={() => openStock(pick.code)}>{pick.name}</td>
                       <td className="px-4 py-2 text-right font-mono">{pick.price.toFixed(2)}</td>
                       <td className={`px-4 py-2 text-right font-mono ${pick.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
                         {formatPct(pick.change_pct / 100)}
@@ -420,7 +420,7 @@ export function PaperTrading() {
                   return (
                     <tr key={pos.code} className="border-b last:border-0 hover:bg-muted/30">
                       <td className="px-4 py-3 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(pos.code)}>{pos.code}</td>
-                      <td className="px-4 py-3 font-medium">{pos.name}</td>
+                      <td className="px-4 py-3 font-medium cursor-pointer hover:text-primary" onClick={() => openStock(pos.code)}>{pos.name}</td>
                       <td className="px-4 py-3 text-right font-mono">{unitCost.toFixed(2)}</td>
                       <td className="px-4 py-3 text-right font-medium">{pos.current_price.toFixed(2)}</td>
                       <td className="px-4 py-3 text-right">{pos.shares}</td>
@@ -545,14 +545,14 @@ export function PaperTrading() {
                         </span>
                       </td>
                       <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
-                      <td className="px-4 py-2.5">{t.name || "-"}</td>
+                      <td className="px-4 py-2.5 cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.name || "-"}</td>
                       <td className="px-4 py-2.5">
                         <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                          t.action === "buy" ? "bg-green-100 text-green-700" :
-                          t.action === "sell" ? "bg-red-100 text-red-700" :
-                          "bg-yellow-100 text-yellow-700"
+                          t.strategy === "V1" ? "bg-blue-100 text-blue-700" :
+                          t.strategy === "CV" ? "bg-orange-100 text-orange-700" :
+                          "bg-purple-100 text-purple-700"
                         }`}>
-                          {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action}
+                          {t.strategy}
                         </span>
                       </td>
                       <td className="px-4 py-2.5 text-right">{t.price?.toFixed(2) || "-"}</td>
@@ -696,7 +696,7 @@ export function PaperTrading() {
                   <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
                     <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">{t.date}</td>
                     <td className="px-4 py-2.5 font-mono text-xs cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.code}</td>
-                    <td className="px-4 py-2.5">{t.name || "-"}</td>
+                    <td className="px-4 py-2.5 cursor-pointer hover:text-primary" onClick={() => openStock(t.code)}>{t.name || "-"}</td>
                     <td className="px-4 py-2.5">
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                         t.action === "buy" ? "bg-green-100 text-green-700" :

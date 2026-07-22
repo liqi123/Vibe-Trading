@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { api } from "@/lib/api";
 import { useModalStore } from "../../stores/modal";
-import { IntradaySparkline } from "@/components/charts/IntradaySparkline";
+import { IntradayChart } from "@/components/charts/IntradayChart";
 
 interface KlineBar {
   date: string;
@@ -31,25 +31,31 @@ export function StockDetailPanel() {
   const [price, setPrice] = useState(0);
   const [changePct, setChangePct] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [intradayBars, setIntradayBars] = useState<any[]>([]);
+  const [prevClose, setPrevClose] = useState<number | null>(null);
 
   useEffect(() => {
     if (!stockCode) return;
     setLoading(true);
     setKline([]);
     setIndicators(null);
+    setIntradayBars([]);
 
     Promise.all([
       api.tools.get<any>(`/stock/${stockCode}`),
       api.tools.get<any>(`/stock/${stockCode}/indicators`),
       api.tools.get<any>(`/prices?codes=${stockCode}`),
+      api.tools.get<any>(`/stock/${stockCode}/intraday`),
     ])
-      .then(([klineData, indData, priceData]) => {
+      .then(([klineData, indData, priceData, intradayData]) => {
         setKline(klineData.kline || []);
         setName(klineData.name || "");
         setIndicators(indData.indicators || null);
         const pi = priceData.prices?.[stockCode] || {};
         setPrice(pi.price || 0);
         setChangePct(pi.change_pct || 0);
+        setIntradayBars(intradayData.bars || []);
+        setPrevClose(intradayData.prev_close ?? null);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -94,11 +100,9 @@ export function StockDetailPanel() {
         ) : (
           <div className="p-5 space-y-5">
             {/* 分时图 */}
-            <div className="border rounded-lg p-3 bg-muted/10">
-              <h4 className="text-sm font-medium mb-2">今日分时</h4>
-              <div className="flex justify-center">
-                <IntradaySparkline code={stockCode} width={360} height={160} />
-              </div>
+            <div className="border rounded-lg bg-muted/10 overflow-hidden">
+              <h4 className="text-sm font-medium px-3 pt-3">今日分时</h4>
+              <IntradayChart bars={intradayBars} prevClose={prevClose} height={280} />
             </div>
 
             {/* K-line summary */}

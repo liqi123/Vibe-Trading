@@ -33,16 +33,19 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const { headers, ...rest } = options ?? {};
-  const mergedHeaders: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
+  const mergedHeaders: Record<string, string> = { "Content-Type": "application/json", "Accept": "application/json", ...authHeaders() };
   if (headers) {
     new Headers(headers).forEach((value, key) => {
       mergedHeaders[key] = value;
     });
   }
-  const res = await fetch(`${BASE}${path}`, {
+  const url = `${BASE}${path}`;
+  console.log(`[api] → ${options?.method || "GET"} ${url}`);
+  const res = await fetch(url, {
     ...rest,
     headers: mergedHeaders,
   });
+  console.log(`[api] ← ${res.status} ${res.headers.get("content-type")} for ${url}`);
   if (!res.ok) {
     throw await errorFromResponse(res);
   }
@@ -52,6 +55,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const contentType = res.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
     const preview = text.slice(0, 80).replace(/\s+/g, " ");
+    console.error(`[api] ✗ non-JSON response:`, { url, contentType, preview });
     throw new ApiError(
       `Expected JSON from ${path}, got ${contentType || "unknown content type"}: ${preview}`,
       res.status,

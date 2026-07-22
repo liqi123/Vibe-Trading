@@ -7,6 +7,7 @@ import { useDarkMode } from "@/hooks/useDarkMode";
 import { api, type SessionItem } from "@/lib/api";
 import { useAgentStore } from "@/stores/agent";
 import { ConnectionBanner } from "@/components/layout/ConnectionBanner";
+import { StockDetailPanel } from "@/components/stock/StockDetailPanel";
 import { SUPPORTED_LANGUAGES } from "@/i18n";
 
 // APP_VERSION is sourced from i18n locale files (app.version key) to keep a
@@ -259,6 +260,7 @@ export function Layout() {
         <main className="flex-1 overflow-auto">
           <Outlet />
         </main>
+        <StockDetailPanel />
       </div>
     </div>
   );

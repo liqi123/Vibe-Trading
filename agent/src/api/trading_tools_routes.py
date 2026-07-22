@@ -984,32 +984,60 @@ def get_stock_info(code: str) -> dict:
 
 @router.get("/stock/{code}/intraday")
 def get_stock_intraday(code: str) -> dict:
-    """Return today's 1-minute intraday kline via mootdx for mini 分时 sparkline."""
+    """今日1分钟分时图，含 price + volume + prev_close。"""
     raw = code
     for pfx in ("sh", "sz", "bj"):
         if code.startswith(pfx):
             raw = code[len(pfx):]
             break
     try:
+        from datetime import datetime, timedelta
+
+        # 前收盘（DB 中 code 带 sz/sh 前缀）
+        prev_close = None
+        try:
+            import sqlite3
+            from pathlib import Path
+            candidates = [r"G:\tdx_data\tdx_daily.db", r"E:\DataBase\tdx_data.db"]
+            db_path = next((c for c in candidates if Path(c).exists()), None)
+            if db_path:
+                conn = sqlite3.connect(db_path)
+                prefixes = []
+                if code.startswith(("sh", "sz", "bj")):
+                    prefixes = [code[:2]]
+                else:
+                    prefixes = ["sz", "sh", "bj"]
+                for pfx in prefixes:
+                    row = conn.execute(
+                        "SELECT close FROM daily_kline WHERE code=? ORDER BY trade_date DESC LIMIT 1",
+                        (f"{pfx}{raw}",),
+                    ).fetchone()
+                    if row:
+                        prev_close = float(row[0])
+                        break
+                conn.close()
+        except Exception:
+            pass
+
         from mootdx.quotes import Quotes
         client = Quotes.factory(market='std')
-        bars = client.bars(symbol=raw, frequency=8, offset=240)
-        if bars is not None and len(bars) > 0:
-            from datetime import date
-            today = date.today().isoformat()
-            today_bars = bars[bars.index >= today] if hasattr(bars.index, 'date') else bars[bars['datetime'].str[:10] == today]
-            if len(today_bars) > 0:
-                result = []
-                for _, r in today_bars.iterrows():
-                    dt_str = str(r['datetime'] if hasattr(r, 'datetime') else r.name)
-                    t_part = dt_str.split(" ")[1][:5] if " " in dt_str else dt_str
-                    result.append({"t": t_part, "p": float(r['close'])})
-                return {"code": code, "bars": result}
-    except ImportError:
-        pass
+        df = client.minute(symbol=raw)
+        if df is not None and len(df) > 0:
+            now = datetime.now()
+            open_dt = datetime(now.year, now.month, now.day, 9, 31)
+            result = []
+            for i, (_, r) in enumerate(df.iterrows()):
+                bar_dt = open_dt + timedelta(minutes=i)
+                if bar_dt.hour == 11 and bar_dt.minute >= 31:
+                    bar_dt += timedelta(minutes=89)
+                t = bar_dt.strftime("%H:%M")
+                p = float(r["price"])
+                v = int(r.get("volume", 0))
+                result.append({"t": t, "p": p, "v": v})
+            return {"code": code, "bars": result, "prev_close": prev_close}
     except Exception:
         pass
-    return {"code": code, "bars": []}
+    return {"code": code, "bars": [], "prev_close": None}
 
 
 @router.post("/stock/{code}/buy")
@@ -2309,6 +2337,40 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         return {"gainers": [], "losers": [], "increase": 0, "decrease": 0, "total": 0}
     finally:
         db.close()
+
+
+@router.get("/auction/concept-analysis")
+def get_auction_concept_analysis(date: str = "", source: str = "industry"):
+    """Return sector-level auction analysis (超预期/锚点/中军/弹性/最高板).
+    
+    Args:
+        date: 日期 YYYY-MM-DD
+        source: 'industry' 东财行业分组, 'concept' 概念板块分组
+    """
+    _log.warning("[concept-analysis] hit endpoint date=%s source=%s", date, source)
+    if not date:
+        db = _get_db()
+        if db:
+            try:
+                r = db.execute("SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 1").fetchone()
+                if r:
+                    date = r[0]
+            except Exception:
+                pass
+            finally:
+                db.close()
+    if not date:
+        _log.warning("[concept-analysis] no date, returning empty")
+        return {"date": "", "concepts": []}
+    try:
+        _log.warning("[concept-analysis] importing analyze_to_json...")
+        from data.auction_concept_analysis import analyze_to_json
+        result = analyze_to_json(date, top_concepts=50, source=source)
+        _log.warning("[concept-analysis] success, concepts=%d", len(result.get("concepts", [])))
+        return result
+    except Exception as e:
+        _log.warning("[concept-analysis] FAILED for %s: %s", date, e, exc_info=True)
+        return {"date": date, "concepts": [], "error": str(e)}
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def _claw_headers(call_type="normal"):
     return {
         "X-Claw-Call-Type": call_type,
         "X-Claw-Skill-Id": "report-search",
-        "X-Claw-Skill-Version": "3.0.0",
+        "X-Claw-Skill-Version": "1.0.0",
         "X-Claw-Plugin-Id": "none",
         "X-Claw-Plugin-Version": "none",
         "X-Claw-Trace-Id": secrets.token_hex(32),
@@ -86,6 +87,9 @@ def query_iwencai(query: str, max_retries: int = 2) -> list[dict]:
     for attempt in range(max_retries):
         try:
             r = requests.post(_QUERY_URL, json=payload, headers=headers, timeout=(10, 60))
+            if r.status_code == 401:
+                log.error("iwencai 401 认证失败，请检查 IWENCAI_API_KEY: %s", r.text[:200])
+                sys.exit(1)
             if r.status_code != 200:
                 log.warning("iwencai HTTP %d: %s", r.status_code, r.text[:200])
                 time.sleep(3)
@@ -110,7 +114,8 @@ def query_iwencai(query: str, max_retries: int = 2) -> list[dict]:
                     pass
         return []
 
-    return []
+    log.error("iwencai %d 次重试后仍然失败，停止", max_retries)
+    sys.exit(1)
 
 
 def _stock_code_from_identifier(identifier: str) -> str:
@@ -250,7 +255,9 @@ def _init_fund_table():
     if not db:
         return None
     try:
-        conn = sqlite3.connect(db, timeout=10)
+        conn = sqlite3.connect(db, timeout=60)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=60000")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS fund_daily (
                 date TEXT NOT NULL,

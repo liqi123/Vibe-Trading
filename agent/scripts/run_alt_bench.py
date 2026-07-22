@@ -28,17 +28,21 @@ log = logging.getLogger("alt_bench")
 UNIVERSE = "all-a-share"
 PERIOD = "2026-04-01/2026-07-10"
 ALPHA_IDS = [
-    # === 4幸存者(baseline对比) ===
-    "my_volume_ratio_reversal",
-    "my_volume_volatility",
-    # === 时序因子(非截面) ===
-    "my_ts_streak",
-    "my_ts_drawdown",
-    "my_ts_gap_momentum",
-    # === K线形态因子 ===
-    "my_pattern_doji",
-    "my_pattern_hammer",
-    "my_pattern_engulfing",
+    # === 问财fund因子 ===
+    "my_pe_value",                  # 价值复合 — E/P + B/P z-score
+    "my_turnover_momentum",         # 换手率动量
+    "my_cap_neutral_turnover",      # 市值中性换手率
+    "my_composite_small_value",     # 小市值+低PE+高换手复合
+    "my_flow_acceleration",         # 资金流加速度
+    "my_flow_turnover_interaction", # 资金流×换手率交互
+    "my_flow_price_divergence",     # 资金流价格背离
+    "my_flow_volume_surge",         # 资金流量能爆发
+    "my_flow_volume_confirm",       # 资金流量能确认
+    "my_value_momentum_confirm",    # 价值动量共振
+    "my_residual_flow",             # 残差资金流强度
+    "my_margin_sentiment",          # 融资情绪
+    "my_main_net_flow",             # 主力净流入占比
+    "my_main_flow",                 # 主力资金强度
 ]
 
 
