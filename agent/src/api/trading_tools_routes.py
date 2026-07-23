@@ -2146,9 +2146,15 @@ def _check_auction_time() -> tuple[bool, dict | None]:
 @router.post("/auction/collect")
 def collect_auction_data():
     """Collect auction data from Tencent for all stocks and store in DB.
-    
-    Only collects before 09:30. After 09:30, returns existing data if available.
+
+    Only collects during auction period (09:15~09:30). After 09:30, returns
+    existing data if available. Before 09:15, rejects because auction hasn't started.
     """
+    now = datetime.now()
+    minute_of_day = now.hour * 60 + now.minute
+    if minute_of_day < 9 * 60 + 15:
+        return _err(f"竞价尚未开始（当前{now.strftime('%H:%M')}，09:15后才能采集）", status="too_early")
+
     blocked, resp = _check_auction_time()
     if blocked:
         return resp
@@ -2177,6 +2183,8 @@ def collect_auction_data():
             basic = _parse_basic(fields)
             code = raw_code
             vol = int(basic["volume"])
+            if vol <= 0:
+                continue
             amount = basic["amount"]
             price = basic["price"]
             open_px = basic["open"]
@@ -2234,6 +2242,40 @@ def get_auction_dates():
         return {"dates": []}
     finally:
         db.close()
+
+
+@router.post("/auction/snapshot")
+def register_auction_snapshot_task():
+    """Register Windows scheduled task for auction snapshot collection (9:15/9:18/9:20/9:26)."""
+    import subprocess
+    try:
+        snapshot_script = str(_PROJECT_ROOT / "data" / "snapshot_collector.py")
+        import sys as _sys
+        python_exe = _sys.executable
+        ps_cmd = (
+            f'$taskName = "AuctionSnapshot"; '
+            f'$action = New-ScheduledTaskAction -Execute "{python_exe}" '
+            f'-Argument "`\"{snapshot_script}`\" collect" '
+            f'-WorkingDirectory "{_PROJECT_ROOT}"; '
+            f'$t1 = New-ScheduledTaskTrigger -Daily -At "09:15"; '
+            f'$t2 = New-ScheduledTaskTrigger -Daily -At "09:20"; '
+            f'$t3 = New-ScheduledTaskTrigger -Daily -At "09:23"; '
+            f'$t4 = New-ScheduledTaskTrigger -Daily -At "09:25"; '
+            f'Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue; '
+            f'Register-ScheduledTask -TaskName $taskName -Action $action '
+            f'-Trigger $t1,$t2,$t3,$t4 -Description "AuctionSnapshot(9:15/9:20/9:23/9:26)" -RunLevel Limited'
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return _ok(status="registered", message="竞价快照定时任务已注册 (9:14/9:17/9:19/9:26)")
+        else:
+            return _err(f"注册失败: {result.stderr or result.stdout}")
+    except Exception as e:
+        _log.warning("register auction snapshot task failed", exc_info=True)
+        return _err(str(e))
 
 
 @router.get("/auction/latest")

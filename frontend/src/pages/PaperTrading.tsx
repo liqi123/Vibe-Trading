@@ -236,7 +236,7 @@ export function PaperTrading() {
   const initial = state?.initial_capital || 200000;
 
   const marketValue = positions.reduce((s, p: any) => s + (p.current_price || p.buy_price) * p.shares, 0);
-  const totalCost = positions.reduce((s, p: any) => s + p.cost, 0);
+  const totalCost = positions.reduce((s, p: any) => s + p.cost + (p.fee || 0), 0);
   const totalPnl = marketValue - totalCost;
   const totalValue = cash + marketValue;
   const totalReturn = (totalValue - initial) / initial;

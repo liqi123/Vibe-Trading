@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles } from "lucide-react";
+import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface AuctionStat {
@@ -69,6 +69,7 @@ export function AuctionBoard() {
   const [stats, setStats] = useState<AuctionStat | null>(null);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
+  const [snapshotting, setSnapshotting] = useState(false);
   const [tab, setTab] = useState<"volume" | "compare" | "expectation" | "concept">("volume");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
   const [expectStocks, setExpectStocks] = useState<ExpectStock[]>([]);
@@ -131,6 +132,19 @@ export function AuctionBoard() {
         fetchConceptAnalysis();
     } catch (e) { /* ignore */ }
     finally { setCollecting(false); }
+  };
+
+  const handleSnapshot = async () => {
+    setSnapshotting(true);
+    try {
+      const data = await api.tools.post<any>("/auction/snapshot");
+      if (data.ok) {
+        toast.success(data.message || "竞价快照定时任务已注册");
+      } else {
+        toast.error(data.error || "注册失败");
+      }
+    } catch (e) { toast.error("请求失败"); }
+    finally { setSnapshotting(false); }
   };
 
   const fetchExpectData = async () => {
@@ -249,6 +263,14 @@ export function AuctionBoard() {
           >
             <Zap className={`h-4 w-4 ${collecting ? "animate-spin" : ""}`} />
             {collecting ? "采集中..." : "采集竞价"}
+          </button>
+          <button
+            onClick={handleSnapshot}
+            disabled={snapshotting}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm bg-orange-600 text-white rounded-md hover:opacity-90 transition-colors disabled:opacity-50"
+          >
+            <Camera className={`h-4 w-4 ${snapshotting ? "animate-spin" : ""}`} />
+            {snapshotting ? "采集中..." : "采集快照"}
           </button>
           <button
             onClick={() => { if (selectedDate) fetchDateData(selectedDate); }}
