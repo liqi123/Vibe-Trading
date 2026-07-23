@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("backfill")
 
-PERIOD = "2024-01-02/2026-07-20"
+PERIOD = "2024-01-02/2026-07-23"
 UNIVERSE = "all-a-share"
 
 
