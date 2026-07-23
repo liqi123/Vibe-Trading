@@ -432,9 +432,9 @@ def get_portfolio() -> dict:
 
 
 @router.get("/portfolio/v5")
-def get_portfolio_v5() -> dict:
+def get_portfolio_trend() -> dict:
     """Return V5 paper trading state (trend strategy) with live prices."""
-    path = _PAPER_DIR / "paper_trading_state_v2.json"
+    path = _PAPER_DIR / "paper_trading_state_trend.json"
     try:
         from trading.paper_trading import load_state
         state = load_state(path)
@@ -753,7 +753,7 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
         if datetime.now().hour < 13:
             from datetime import timedelta
             date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    prefix = "v1" if strategy == "fibonacci" else "v5" if strategy == "v5" else "ict"
+    prefix = "v1" if strategy == "fibonacci" else "trend" if strategy == "trend" else "ict"
 
     def _load(cache_date: str) -> dict | None:
         p = _PAPER_DIR / f"{prefix}_screening_cache_{cache_date}.json"
@@ -835,17 +835,17 @@ def api_runaway_price(code: str = "", date: str = "") -> dict:
 def update_position_field(data: dict):
     """Update a single field of a position.
 
-    Expects: {code, portfolio: "v1"|"v5", field, value}
+    Expects: {code, portfolio: "v1"|"trend", field, value}
     """
     code = data.get("code", "").strip().lower()
-    portfolio = data.get("portfolio", "v5")
+    portfolio = data.get("portfolio", "trend")
     field = data.get("field", "")
     value = data.get("value")
 
     if not code or not field:
         raise HTTPException(status_code=400, detail="Code and field required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json" if portfolio == "v5" else "paper_trading_state_ict.json"
+    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_trend.json" if portfolio == "trend" else "paper_trading_state_ict.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -866,17 +866,17 @@ def update_position_field(data: dict):
 def sell_position(data: dict):
     """Sell a position from paper trading.
 
-    Expects: {code, portfolio: "v1"|"v5"|"ict", shares?, reason?}
+    Expects: {code, portfolio: "v1"|"trend"|"ict", shares?, reason?}
     """
     code = data.get("code", "").strip().lower()
-    portfolio = data.get("portfolio", "v5")
+    portfolio = data.get("portfolio", "trend")
     shares = data.get("shares")  # None means sell all
     reason = data.get("reason", "手动卖出")
 
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_v2.json" if portfolio == "v5" else "paper_trading_state_ict.json"
+    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_trend.json" if portfolio == "trend" else "paper_trading_state_ict.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -1044,7 +1044,7 @@ def get_stock_intraday(code: str) -> dict:
 def buy_stock(code: str, data: dict):
     """Buy a stock into paper trading portfolio.
 
-    Expects: {strategy: "fibonacci"|"v5"|"ict", name, price, score?, E?, stop?, ...}
+    Expects: {strategy: "fibonacci"|"trend"|"ict", name, price, score?, E?, stop?, ...}
     """
     strategy = data.get("strategy", "fibonacci")
     if strategy == "fibonacci":
@@ -1052,7 +1052,7 @@ def buy_stock(code: str, data: dict):
     elif strategy == "ict":
         state_file = "paper_trading_state_ict.json"
     else:
-        state_file = "paper_trading_state_v2.json"
+        state_file = "paper_trading_state_trend.json"
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     if not state:
@@ -1649,7 +1649,7 @@ def run_script(data: dict):
     script = data.get("script", "")
     scripts = {
         "fibonacci": "strategies/daily_check.py",
-        "v5": "strategies/daily_check_v5.py",
+        "trend": "strategies/daily_check_trend.py",
         "ict": "strategies/ict_scan_fast.py",
         "stops": "-m utils stops",
         "review": "analysis/generate_review.py",
@@ -1749,9 +1749,9 @@ def get_trades() -> dict:
 
 
 @router.get("/trades/v5")
-def get_trades_v5() -> dict:
+def get_trades_trend() -> dict:
     """Return V5 trade history (newest first)."""
-    state = _read_json(_PAPER_DIR / "paper_trading_state_v2.json")
+    state = _read_json(_PAPER_DIR / "paper_trading_state_trend.json")
     history = sorted(state.get("history", []), key=lambda x: x.get("date", ""), reverse=True)
     return {"history": history}
 
