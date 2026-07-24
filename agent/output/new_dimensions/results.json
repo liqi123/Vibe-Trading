@@ -1,0 +1,169 @@
+{
+  "period": "2025-01-02/2026-07-10",
+  "correlations": {
+    "rsi_14": 0.3600132690541718,
+    "rsi_divergence": 0.13117166414014925,
+    "macd_hist": -0.2141464888136676,
+    "macd_cross": -0.18956996715142632,
+    "bb_position": 0.4036868249082036,
+    "bb_width": 0.4593543067786113,
+    "atr_pct": -0.18413246976919198,
+    "atr_change": 0,
+    "relative_strength": -0.37481749282939536,
+    "size_neutral_mom": -0.37481749282939536,
+    "cross_sectional_rank": -0.18413246976919198,
+    "mom_5d": -0.28771134006110616,
+    "mom_20d": -0.37481749282939536,
+    "mom_60d": -0.41384062763502383,
+    "mom_consistency": -0.41703727780451666,
+    "reversal_5d": 0.28771134006110616,
+    "vol_regime": -0.2063455036459446,
+    "trend_regime": -0.35094125949081395,
+    "market_breadth": 0,
+    "mom_dispersion": 0.5798280457411107
+  },
+  "ic_results": {
+    "rsi_14": {
+      "ic": 0.036,
+      "ir": 0.2828,
+      "t": 5.3131
+    },
+    "rsi_divergence": {
+      "ic": 0.0153,
+      "ir": 0.136,
+      "t": 2.4824
+    },
+    "macd_hist": {
+      "ic": -0.0237,
+      "ir": -0.1738,
+      "t": -3.3214
+    },
+    "macd_cross": {
+      "ic": -0.0173,
+      "ir": -0.1547,
+      "t": -2.9439
+    },
+    "bb_position": {
+      "ic": 0.0396,
+      "ir": 0.3114,
+      "t": 5.801
+    },
+    "bb_width": {
+      "ic": 0.0388,
+      "ir": 0.2329,
+      "t": 4.3385
+    },
+    "atr_pct": {
+      "ic": -0.0119,
+      "ir": -0.0713,
+      "t": -1.3399
+    },
+    "atr_change": {
+      "ic": 0,
+      "ir": 0,
+      "t": 0
+    },
+    "relative_strength": {
+      "ic": -0.0424,
+      "ir": -0.3084,
+      "t": -5.7362
+    },
+    "size_neutral_mom": {
+      "ic": -0.0424,
+      "ir": -0.3084,
+      "t": -5.7362
+    },
+    "cross_sectional_rank": {
+      "ic": -0.0103,
+      "ir": -0.0618,
+      "t": -1.1821
+    },
+    "mom_5d": {
+      "ic": -0.0385,
+      "ir": -0.292,
+      "t": -5.5479
+    },
+    "mom_20d": {
+      "ic": -0.0424,
+      "ir": -0.3084,
+      "t": -5.7362
+    },
+    "mom_60d": {
+      "ic": -0.0356,
+      "ir": -0.2559,
+      "t": -4.4758
+    },
+    "mom_consistency": {
+      "ic": -0.0344,
+      "ir": -0.2982,
+      "t": -5.665
+    },
+    "reversal_5d": {
+      "ic": 0.0385,
+      "ir": 0.292,
+      "t": 5.5479
+    },
+    "vol_regime": {
+      "ic": -0.0321,
+      "ir": -0.307,
+      "t": -5.37
+    },
+    "trend_regime": {
+      "ic": -0.0246,
+      "ir": -0.1999,
+      "t": -3.7239
+    },
+    "market_breadth": {
+      "ic": 0,
+      "ir": 0,
+      "t": 0
+    },
+    "mom_dispersion": {
+      "ic": 0.0514,
+      "ir": 0.2679,
+      "t": 4.9841
+    }
+  },
+  "results": {
+    "14-Factor": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "ic": 0.0779,
+      "ir": 0.545
+    },
+    "Tech-Indicator-4F": {
+      "total_return": -2.85,
+      "annual_return": -1.97,
+      "sharpe": -0.09,
+      "max_drawdown": -19.64,
+      "ic": 0.0261,
+      "ir": 0.2048
+    },
+    "Multi-Timeframe-4F": {
+      "total_return": 20.92,
+      "annual_return": 13.93,
+      "sharpe": 0.56,
+      "max_drawdown": -18.16,
+      "ic": -0.0485,
+      "ir": -0.3802
+    },
+    "14F+NewDim3-50/17/17/17": {
+      "total_return": 30.18,
+      "annual_return": 19.85,
+      "sharpe": 1.23,
+      "max_drawdown": -17.04,
+      "ic": 0.0168,
+      "ir": 0.1517
+    },
+    "All-NewDim-EqualWeight": {
+      "total_return": 16.6,
+      "annual_return": 11.12,
+      "sharpe": 0.48,
+      "max_drawdown": -16.84,
+      "ic": -0.0315,
+      "ir": -0.2281
+    }
+  }
+}

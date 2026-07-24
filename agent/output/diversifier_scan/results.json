@@ -1,0 +1,64 @@
+{
+  "period": "2025-01-02/2026-07-10",
+  "correlations": {
+    "volatility_contraction": -0.1740319941693565,
+    "volatility_expansion": 0.1740319941693565,
+    "low_vol_preference": 0.538315701030945,
+    "vol_change_rate": 0.19581273599976562,
+    "trend_decay": 0.272753213418556,
+    "ma_convergence": 0.3430318764555172,
+    "price_position": 0.28006768873623256,
+    "vol_stability": 0.34128344304795455,
+    "vol_trend": 0.3184354974216978,
+    "vol_price_divergence": 0.21313916686934795,
+    "momentum_reversal": 0.37481749282939536,
+    "momentum_decay": -0.22767993231078898,
+    "momentum_consistency": -0.19576813350932407,
+    "liquidity_change": -0.140647910611229,
+    "liquidity_stability": 0.05016811091829462,
+    "amplitude_contraction": 0.26288874523779904,
+    "amplitude_stability": 0.22823056390125224
+  },
+  "results": {
+    "14-Factor": {
+      "ic": 0.07790144978326158,
+      "ir": 0.5450450070887698,
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85
+    },
+    "14F+volatility_contraction": {
+      "ic": 0.04345286900793007,
+      "ir": 0.3787318761429576,
+      "total_return": 16.06,
+      "annual_return": 10.77,
+      "sharpe": 0.67,
+      "max_drawdown": -22.5
+    },
+    "14F+momentum_decay": {
+      "ic": 0.036126218216532266,
+      "ir": 0.31213217086150774,
+      "total_return": 21.84,
+      "annual_return": 14.53,
+      "sharpe": 0.89,
+      "max_drawdown": -17.54
+    },
+    "14F+momentum_consistency": {
+      "ic": 0.044465371279443944,
+      "ir": 0.48358693591361035,
+      "total_return": 16.47,
+      "annual_return": 11.04,
+      "sharpe": 0.7,
+      "max_drawdown": -20.27
+    },
+    "14F+liquidity_change": {
+      "ic": 0.036964023827913604,
+      "ir": 0.3323759210655443,
+      "total_return": -18.13,
+      "annual_return": -12.83,
+      "sharpe": -0.85,
+      "max_drawdown": -33.03
+    }
+  }
+}

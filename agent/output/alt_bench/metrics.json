@@ -1,8 +1,153 @@
 {
   "universe": "all-a-share",
-  "period": "2024-01-02/2026-07-20",
+  "period": "2026-04-01/2026-07-10",
   "n_stocks": 4919,
-  "n_days": 615,
-  "elapsed_seconds": 872.2,
-  "results": []
+  "n_days": 68,
+  "elapsed_seconds": 474.5,
+  "results": [
+    {
+      "alpha_id": "my_residual_flow",
+      "nickname": "残差资金流强度 — residual(main_net_flow/amount | ret)",
+      "n_days": 58,
+      "ic_mean": 0.0183,
+      "ic_std": 0.0632,
+      "ir": 0.289,
+      "ic_pos_ratio": 0.6034,
+      "t_stat": 2.2,
+      "compute_seconds": 387.98,
+      "nan_ratio_pct": 64.7
+    },
+    {
+      "alpha_id": "my_margin_sentiment",
+      "nickname": "融资情绪 — Δ余额% × 2日均线",
+      "n_days": 65,
+      "ic_mean": -0.0002,
+      "ic_std": 0.0892,
+      "ir": -0.002,
+      "ic_pos_ratio": 0.4615,
+      "t_stat": -0.02,
+      "compute_seconds": 0.24,
+      "nan_ratio_pct": 94.7
+    },
+    {
+      "alpha_id": "my_main_net_flow",
+      "nickname": "主力净流入强度 — 个股资金流主力净额/成交额",
+      "n_days": 53,
+      "ic_mean": -0.0014,
+      "ic_std": 0.0608,
+      "ir": -0.0238,
+      "ic_pos_ratio": 0.4906,
+      "t_stat": -0.17,
+      "compute_seconds": 0.19,
+      "nan_ratio_pct": 64.6
+    },
+    {
+      "alpha_id": "my_pe_value",
+      "nickname": "价值复合 — E/P + B/P z-score",
+      "n_days": 67,
+      "ic_mean": -0.0076,
+      "ic_std": 0.2169,
+      "ir": -0.0349,
+      "ic_pos_ratio": 0.5075,
+      "t_stat": -0.29,
+      "compute_seconds": 1.6,
+      "nan_ratio_pct": 70.0
+    },
+    {
+      "alpha_id": "my_value_momentum_confirm",
+      "nickname": "估值动量确认 — rank(-PE) × rank(close/MA20)",
+      "n_days": 48,
+      "ic_mean": -0.0077,
+      "ic_std": 0.1029,
+      "ir": -0.0752,
+      "ic_pos_ratio": 0.4792,
+      "t_stat": -0.52,
+      "compute_seconds": 0.38,
+      "nan_ratio_pct": 70.4
+    },
+    {
+      "alpha_id": "my_flow_acceleration",
+      "nickname": "资金加速度 — rank(Δ5(flow/mcap))",
+      "n_days": 62,
+      "ic_mean": -0.0049,
+      "ic_std": 0.0619,
+      "ir": -0.0789,
+      "ic_pos_ratio": 0.4839,
+      "t_stat": -0.62,
+      "compute_seconds": 0.04,
+      "nan_ratio_pct": 82.4
+    },
+    {
+      "alpha_id": "my_flow_turnover_interaction",
+      "nickname": "资金换手交互 — rank(flow/mcap) × rank(turnover)",
+      "n_days": 67,
+      "ic_mean": -0.0212,
+      "ic_std": 0.1744,
+      "ir": -0.1216,
+      "ic_pos_ratio": 0.4776,
+      "t_stat": -1.0,
+      "compute_seconds": 0.08,
+      "nan_ratio_pct": 58.2
+    },
+    {
+      "alpha_id": "my_flow_volume_surge",
+      "nickname": "主力放量确认 — rank(flow/amount) × rank(vol/MA5)",
+      "n_days": 49,
+      "ic_mean": -0.0094,
+      "ic_std": 0.0629,
+      "ir": -0.1497,
+      "ic_pos_ratio": 0.5102,
+      "t_stat": -1.05,
+      "compute_seconds": 0.76,
+      "nan_ratio_pct": 70.7
+    },
+    {
+      "alpha_id": "my_flow_volume_confirm",
+      "nickname": "资金量确认 — rank(flow/amount) × rank(vol/MA5)",
+      "n_days": 49,
+      "ic_mean": -0.0094,
+      "ic_std": 0.0629,
+      "ir": -0.1497,
+      "ic_pos_ratio": 0.5102,
+      "t_stat": -1.05,
+      "compute_seconds": 1.15,
+      "nan_ratio_pct": 70.7
+    },
+    {
+      "alpha_id": "my_cap_neutral_turnover",
+      "nickname": "市值中性换手率 — rank(turnover) - rank(mcap)",
+      "n_days": 67,
+      "ic_mean": -0.0252,
+      "ic_std": 0.1556,
+      "ir": -0.1619,
+      "ic_pos_ratio": 0.4925,
+      "t_stat": -1.33,
+      "compute_seconds": 0.12,
+      "nan_ratio_pct": 58.2
+    },
+    {
+      "alpha_id": "my_main_flow",
+      "nickname": "主力资金流 — 市值中性化净流入 rank",
+      "n_days": 67,
+      "ic_mean": -0.0204,
+      "ic_std": 0.1031,
+      "ir": -0.1983,
+      "ic_pos_ratio": 0.4328,
+      "t_stat": -1.62,
+      "compute_seconds": 0.08,
+      "nan_ratio_pct": 58.2
+    },
+    {
+      "alpha_id": "my_composite_small_value",
+      "nickname": "小市值价值复合 — rank(-PE) + rank(turnover) - rank(mcap)",
+      "n_days": 67,
+      "ic_mean": -0.0283,
+      "ic_std": 0.1308,
+      "ir": -0.2162,
+      "ic_pos_ratio": 0.4179,
+      "t_stat": -1.77,
+      "compute_seconds": 0.11,
+      "nan_ratio_pct": 58.2
+    }
+  ]
 }

@@ -1,0 +1,105 @@
+{
+  "universe": "all-a-share",
+  "period": "2025-01-02/2026-07-10",
+  "n_stocks": 4921,
+  "n_days": 367,
+  "elapsed_seconds": 45.4,
+  "results": [
+    {
+      "alpha_id": "my_main_flow_v2",
+      "nickname": "主力资金流 v2 — 翻转+量价确认",
+      "n_days": 308,
+      "ic_mean": 0.0369,
+      "ic_std": 0.1099,
+      "ir": 0.3354,
+      "ic_pos_ratio": 0.6494,
+      "t_stat": 5.89,
+      "compute_seconds": 1.43,
+      "nan_ratio_pct": 68.0,
+      "yearly": {
+        "2025": {
+          "ic": 0.0413,
+          "ir": 0.3657,
+          "n": 239
+        },
+        "2026": {
+          "ic": 0.0216,
+          "ir": 0.2198,
+          "n": 69
+        }
+      }
+    },
+    {
+      "alpha_id": "my_flow_turnover_interaction_v2",
+      "nickname": "资金换手交互 v2 — 翻转+动量",
+      "n_days": 293,
+      "ic_mean": 0.0265,
+      "ic_std": 0.1268,
+      "ir": 0.2094,
+      "ic_pos_ratio": 0.5768,
+      "t_stat": 3.58,
+      "compute_seconds": 1.56,
+      "nan_ratio_pct": 69.8,
+      "yearly": {
+        "2025": {
+          "ic": 0.0272,
+          "ir": 0.2073,
+          "n": 224
+        },
+        "2026": {
+          "ic": 0.0244,
+          "ir": 0.218,
+          "n": 69
+        }
+      }
+    },
+    {
+      "alpha_id": "my_cap_neutral_turnover_v2",
+      "nickname": "市值中性换手率 v2 — 翻转+动量",
+      "n_days": 293,
+      "ic_mean": 0.0325,
+      "ic_std": 0.1606,
+      "ir": 0.2021,
+      "ic_pos_ratio": 0.5495,
+      "t_stat": 3.46,
+      "compute_seconds": 1.52,
+      "nan_ratio_pct": 36.6,
+      "yearly": {
+        "2025": {
+          "ic": 0.0335,
+          "ir": 0.201,
+          "n": 224
+        },
+        "2026": {
+          "ic": 0.0292,
+          "ir": 0.2076,
+          "n": 69
+        }
+      }
+    },
+    {
+      "alpha_id": "my_composite_small_value_v2",
+      "nickname": "大盘成长复合 v2 — 翻转+质量+动量",
+      "n_days": 293,
+      "ic_mean": 0.0045,
+      "ic_std": 0.1448,
+      "ir": 0.0311,
+      "ic_pos_ratio": 0.4881,
+      "t_stat": 0.53,
+      "compute_seconds": 2.23,
+      "nan_ratio_pct": 36.6,
+      "yearly": {
+        "2025": {
+          "ic": -0.0021,
+          "ir": -0.0146,
+          "n": 224
+        },
+        "2026": {
+          "ic": 0.026,
+          "ir": 0.1871,
+          "n": 69
+        }
+      }
+    }
+  ]
+}

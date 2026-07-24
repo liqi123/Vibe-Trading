@@ -1,0 +1,32 @@
+{
+  "period": "2025-01-02/2026-07-10",
+  "results": {
+    "14-Factor": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "ic": 0.0779,
+      "ir": 0.545,
+      "t": 9.53
+    },
+    "19F-Behavioral": {
+      "total_return": -6.51,
+      "annual_return": -4.52,
+      "sharpe": -0.29,
+      "max_drawdown": -24.69,
+      "ic": -0.0032,
+      "ir": -0.0249,
+      "t": -0.44
+    },
+    "20F-Reversal": {
+      "total_return": -5.93,
+      "annual_return": -4.11,
+      "sharpe": -0.21,
+      "max_drawdown": -28.5,
+      "ic": 0.0575,
+      "ir": 0.5575,
+      "t": 9.75
+    }
+  }
+}

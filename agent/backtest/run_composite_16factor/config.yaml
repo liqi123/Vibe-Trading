@@ -1,0 +1,18 @@
+name: composite_16factor
+description: "16-Factor Composite (14 量价 + 2 资金流)"
+
+engine:
+  class: code.signal_engine.SignalEngine
+  params:
+    top_pct: 0.2
+    bottom_pct: 0.2
+
+universe: all-a-share
+start_date: "2025-01-02"
+end_date: "2026-07-10"
+
+backtest:
+  initial_capital: 1000000
+  commission: 0.001
+  slippage: 0.001
+  rebalance_freq: daily

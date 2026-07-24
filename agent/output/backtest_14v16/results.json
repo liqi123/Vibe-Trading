@@ -1,0 +1,54 @@
+{
+  "config": {
+    "period": "2025-01-02/2026-07-10",
+    "top_pct": 0.05,
+    "commission": 0.0015,
+    "slippage": 0.001
+  },
+  "results": {
+    "14-Factor": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "annual_vol": 16.02,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "win_rate": 45.8,
+      "avg_turnover": 53.4,
+      "n_days": 367,
+      "yearly": {
+        "2025": {
+          "return": 15.4,
+          "sharpe": 1.31,
+          "days": 243
+        },
+        "2026": {
+          "return": -14.27,
+          "sharpe": -0.65,
+          "days": 124
+        }
+      }
+    },
+    "16-Factor v2": {
+      "total_return": -3.93,
+      "annual_return": -2.72,
+      "annual_vol": 14.11,
+      "sharpe": -0.19,
+      "max_drawdown": -23.53,
+      "win_rate": 45.0,
+      "avg_turnover": 54.1,
+      "n_days": 367,
+      "yearly": {
+        "2025": {
+          "return": 10.45,
+          "sharpe": 1.02,
+          "days": 243
+        },
+        "2026": {
+          "return": -13.02,
+          "sharpe": -0.66,
+          "days": 124
+        }
+      }
+    }
+  }
+}

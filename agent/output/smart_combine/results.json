@@ -1,0 +1,59 @@
+{
+  "period": "2025-01-02/2026-07-10",
+  "correlations": {
+    "shadow_stability": 0.5936357958948043,
+    "price_reversal_20d": 0.37481749282939536,
+    "gap_momentum": 0.3175821105279785,
+    "vol_dry": 0.3397675635733549,
+    "volume_price_corr": 0.5005192405872465,
+    "high_low_range": 0.6406294031436909,
+    "volatility_contraction": -0.1740319941693565,
+    "relative_strength": -0.4435962572952177
+  },
+  "results": {
+    "14-Factor": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "win_rate": 45.8,
+      "n_days": 367,
+      "ic": 0.0779,
+      "ir": 0.545,
+      "t": 9.53
+    },
+    "New-LowCorr": {
+      "total_return": -13.53,
+      "annual_return": -9.5,
+      "sharpe": -0.47,
+      "max_drawdown": -26.27,
+      "win_rate": 50.1,
+      "n_days": 367,
+      "ic": -0.015,
+      "ir": -0.1708,
+      "t": -3.18
+    },
+    "14F+New-70/30": {
+      "total_return": 16.06,
+      "annual_return": 10.77,
+      "sharpe": 0.67,
+      "max_drawdown": -22.5,
+      "win_rate": 47.4,
+      "n_days": 367,
+      "ic": 0.0435,
+      "ir": 0.3787,
+      "t": 6.63
+    },
+    "14F+New-50/50": {
+      "total_return": 13.8,
+      "annual_return": 9.28,
+      "sharpe": 0.58,
+      "max_drawdown": -22.82,
+      "win_rate": 45.5,
+      "n_days": 367,
+      "ic": 0.0116,
+      "ir": 0.1266,
+      "t": 2.21
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "period": "2025-01-02/2026-07-10",
+  "correlations": {
+    "momentum_decay": -0.22767993231078898,
+    "volatility_contraction": -0.1740319941693565,
+    "momentum_consistency": -0.19576813350932407,
+    "vol_concentration": -0.467270811163974,
+    "vol_price_mom": -0.35332395659479654,
+    "vol_regime": -0.2502925622981138
+  },
+  "ic_weights": {
+    "f14": 0.2991,
+    "momentum_decay": 0.0948,
+    "volatility_contraction": 0.0574,
+    "momentum_consistency": 0.0803,
+    "vol_concentration": 0.1767,
+    "vol_price_mom": 0.1671,
+    "vol_regime": 0.1246
+  },
+  "results": {
+    "14-Factor": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "ic": 0.0779,
+      "ir": 0.545
+    },
+    "14F+MD-70/30": {
+      "total_return": 21.84,
+      "annual_return": 14.53,
+      "sharpe": 0.89,
+      "max_drawdown": -17.54,
+      "ic": 0.0361,
+      "ir": 0.3121
+    },
+    "14F+Top3Neg-40/20/20/20": {
+      "total_return": 32.79,
+      "annual_return": 21.5,
+      "sharpe": 1.16,
+      "max_drawdown": -11.72,
+      "ic": -0.0284,
+      "ir": -0.2246
+    },
+    "ML-IC-Weighted": {
+      "total_return": 27.34,
+      "annual_return": 18.05,
+      "sharpe": 0.86,
+      "max_drawdown": -11.62,
+      "ic": -0.0331,
+      "ir": -0.2557
+    },
+    "ML-Ridge-Positive": {
+      "total_return": -1.07,
+      "annual_return": -0.73,
+      "sharpe": -0.05,
+      "max_drawdown": -23.85,
+      "ic": 0.0779,
+      "ir": 0.545
+    }
+  }
+}

@@ -1,1 +1,4 @@
-@echo offcd /d C:\Users\Lychee\trading\Vibe-Trading\agentset PYTHONPATH=C:\Users\Lychee\trading\Vibe-Trading\agentpython -m cli serve --host 127.0.0.1 --port 8899
+@echo off
+cd /d C:\Users\XYXS\trading\Vibe-Trading\agent
+set PYTHONPATH=C:\Users\XYXS\trading\Vibe-Trading\agent
+python -m cli serve --host 127.0.0.1 --port 8899
