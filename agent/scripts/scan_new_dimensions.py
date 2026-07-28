@@ -219,7 +219,7 @@ def main():
     log.info("  共 %d 个因子", len(factors))
 
     # 计算与14F的相关性
-    from strategies.composite_14factor import compute_14factor
+    from strategies.composite.composite_14factor import compute_14factor
     f14 = compute_14factor(panel)
     forward_ret = c.pct_change(periods=1).shift(-1)
 

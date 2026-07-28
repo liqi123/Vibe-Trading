@@ -2381,6 +2381,254 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         db.close()
 
 
+def _is_limit_up(code: str, price: float, prev_close: float) -> bool:
+    """Check if price is at limit-up (涨停) for the given stock."""
+    if prev_close <= 0 or price <= 0:
+        return False
+    ratio = price / prev_close
+    if code.startswith("300") or code.startswith("301") or code.startswith("688"):
+        return ratio >= 1.198
+    if code.startswith("8"):
+        return ratio >= 1.298
+    return ratio >= 1.098
+
+
+def _limit_pct(code: str) -> float:
+    """Return the limit-up percentage for the given stock code."""
+    if code.startswith("300") or code.startswith("301") or code.startswith("688"):
+        return 19.8
+    if code.startswith("8"):
+        return 29.8
+    return 9.8
+
+
+@router.get("/auction/limit-up-compare")
+def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
+    """Compare auction volumes of yesterday's limit-up stocks vs today's auction limit-up stocks.
+    
+    Uses daily_kline close prices for yesterday's limit-up detection,
+    and auction table for today's auction limit-up detection.
+    
+    Args:
+        date1: today's date (YYYY-MM-DD)
+        date2: yesterday's date (YYYY-MM-DD)
+    """
+    if not date1 or not date2:
+        return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
+    db = _get_db()
+    if db is None:
+        return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
+    try:
+        cur = db.cursor()
+        # date2 → integer format for daily_kline
+        d2_int = int(date2.replace("-", ""))
+        
+        # Find previous trading day before date2
+        cur.execute(
+            "SELECT MAX(trade_date) FROM daily_kline WHERE trade_date < ?",
+            (d2_int,),
+        )
+        prev_trade_date = cur.fetchone()[0]
+        if not prev_trade_date:
+            return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
+
+        # Get stocks that closed at limit-up on date2 (yesterday)
+        # Need to handle prefix: daily_kline stores codes with prefix (sh/sz),
+        # auction table stores without prefix
+        cur.execute(
+            "SELECT c.code, c.close, p.close as prev_close "
+            "FROM daily_kline c "
+            "JOIN daily_kline p ON c.code = p.code AND p.trade_date = ? "
+            "WHERE c.trade_date = ? AND p.close > 0",
+            (prev_trade_date, d2_int),
+        )
+        prev_limitup_codes = set()
+        prev_limitup_close = {}  # code_no_prefix → close
+        for r in cur.fetchall():
+            code_full = r[0]
+            close = r[1]
+            prev_close = r[2]
+            if prev_close <= 0:
+                continue
+            # Strip prefix for matching with auction table
+            code_clean = code_full[2:] if code_full.startswith(("sh", "sz", "bj")) else code_full
+            if _is_limit_up(code_clean, close, prev_close):
+                prev_limitup_codes.add(code_clean)
+                prev_limitup_close[code_clean] = close
+
+        # Get date2 auction data
+        cur.execute(
+            "SELECT code, name, auction_vol, auction_amount, auction_price, prev_close "
+            "FROM auction WHERE date=?",
+            (date2,),
+        )
+        prev_auction = {}
+        for r in cur.fetchall():
+            prev_auction[r[0]] = {"name": r[1], "vol": r[2] or 0, "amount": r[3] or 0,
+                                  "price": r[4] or 0, "prev_close": r[5] or 0}
+
+        # Get date1 (today) auction data
+        cur.execute(
+            "SELECT code, name, auction_vol, auction_amount, auction_price, prev_close "
+            "FROM auction WHERE date=?",
+            (date1,),
+        )
+        today_auction = {}
+        for r in cur.fetchall():
+            today_auction[r[0]] = {"name": r[1], "vol": r[2] or 0, "amount": r[3] or 0,
+                                   "price": r[4] or 0, "prev_close": r[5] or 0}
+
+        # Classify today's auction limit-up stocks
+        today_limitup_codes = set()
+        for code, info in today_auction.items():
+            if _is_limit_up(code, info["price"], info["prev_close"]):
+                today_limitup_codes.add(code)
+
+        def build_stock(code):
+            p = prev_auction.get(code)
+            t = today_auction.get(code)
+            name = (p or t or {}).get("name", "")
+            p_vol = (p or {}).get("vol", 0) or 0
+            t_vol = (t or {}).get("vol", 0) or 0
+            p_amt = (p or {}).get("amount", 0) or 0
+            t_amt = (t or {}).get("amount", 0) or 0
+            p_price = (p or {}).get("price", 0) or 0
+            t_price = (t or {}).get("price", 0) or 0
+            t_pc = (t or {}).get("prev_close", 0) or 0
+            p_pc = (p or {}).get("prev_close", 0) or 0
+            prev_close = t_pc or p_pc
+            vol_chg = t_vol - p_vol
+            vol_pct = round(t_vol / p_vol * 100, 2) if p_vol > 0 else 999.0
+            auction_chg = round((t_price - prev_close) / prev_close * 100, 2) if prev_close and t_price else None
+            is_prev = code in prev_limitup_codes
+            is_today = code in today_limitup_codes
+            return {
+                "code": code, "name": name,
+                "is_prev_limitup": is_prev,
+                "is_today_limitup": is_today,
+                "vol_today": t_vol, "vol_prev": p_vol,
+                "vol_chg": vol_chg, "vol_pct": vol_pct,
+                "amt_today": t_amt, "amt_prev": p_amt,
+                "price_today": t_price, "price_prev": p_price,
+                "prev_close": prev_close,
+                "auction_chg_today": auction_chg,
+            }
+
+        all_codes = prev_limitup_codes | today_limitup_codes
+        both = [build_stock(c) for c in sorted(prev_limitup_codes & today_limitup_codes)]
+        prev_only = [build_stock(c) for c in sorted(prev_limitup_codes - today_limitup_codes)]
+        today_only = [build_stock(c) for c in sorted(today_limitup_codes - prev_limitup_codes)]
+
+        both.sort(key=lambda x: x["vol_today"], reverse=True)
+        prev_only.sort(key=lambda x: x["vol_today"], reverse=True)
+        today_only.sort(key=lambda x: x["vol_today"], reverse=True)
+        return {
+            "prev_limitup": prev_only,
+            "today_limitup": today_only,
+            "both_limitup": both,
+            "date1": date1, "date2": date2,
+            "prev_count": len(prev_only) + len(both),
+            "today_count": len(today_only) + len(both),
+            "both_count": len(both),
+        }
+    except Exception as e:
+        _log.warning("auction limit-up-compare failed", exc_info=True)
+        return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
+    finally:
+        db.close()
+
+
+@router.get("/auction/search")
+def get_auction_search(keyword: str = "", date1: str = "", date2: str = "", top: int = 30):
+    """Search stocks by keyword across two dates and compare auction data."""
+    if not keyword or not date1 or not date2:
+        return {"results": [], "total": 0}
+    db = _get_db()
+    if db is None:
+        return {"results": [], "total": 0}
+    try:
+        cur = db.cursor()
+        like = f"%{keyword}%"
+        cur.execute(
+            "SELECT code, name, auction_vol, auction_amount, auction_price, collect_time, prev_close "
+            "FROM auction WHERE date=? AND (code LIKE ? OR name LIKE ?)",
+            (date1, like, like),
+        )
+        d1_map = {}
+        for r in cur.fetchall():
+            d1_map[r[0]] = {"name": r[1], "vol": r[2], "amount": r[3], "price": r[4], "time": r[5], "prev_close": r[6] or 0}
+        cur.execute(
+            "SELECT code, name, auction_vol, auction_amount, auction_price, collect_time, prev_close "
+            "FROM auction WHERE date=? AND (code LIKE ? OR name LIKE ?)",
+            (date2, like, like),
+        )
+        d2_map = {}
+        for r in cur.fetchall():
+            d2_map[r[0]] = {"name": r[1], "vol": r[2], "amount": r[3], "price": r[4], "time": r[5], "prev_close": r[6] or 0}
+
+        all_codes = set(d1_map) | set(d2_map)
+        results = []
+        for code in sorted(all_codes):
+            t = d1_map.get(code)
+            p = d2_map.get(code)
+            if t and p:
+                t_vol, p_vol = t["vol"] or 0, p["vol"] or 0
+                vol_pct = round(t_vol / p_vol * 100, 2) if p_vol > 0 else 999.0
+                amt_pct = round(t["amount"] / p["amount"] * 100, 2) if (p.get("amount") or 0) > 0 else 0
+                results.append({
+                    "code": code, "name": t["name"],
+                    "is_new": False, "is_gone": False,
+                    "vol_today": t["vol"] or 0, "vol_prev": p["vol"] or 0,
+                    "vol_pct": vol_pct,
+                    "amt_today": t["amount"] or 0, "amt_prev": p["amount"] or 0,
+                    "amt_pct": amt_pct,
+                    "price_today": t["price"] or 0, "price_prev": p["price"] or 0,
+                    "prev_close": t["prev_close"],
+                })
+            elif t and not p:
+                results.append({
+                    "code": code, "name": t["name"],
+                    "is_new": True, "is_gone": False,
+                    "vol_today": t["vol"] or 0, "vol_prev": 0,
+                    "vol_pct": 999.0,
+                    "amt_today": t["amount"] or 0, "amt_prev": 0,
+                    "amt_pct": 0,
+                    "price_today": t["price"] or 0, "price_prev": 0,
+                    "prev_close": t["prev_close"],
+                })
+            elif p and not t:
+                results.append({
+                    "code": code, "name": p["name"],
+                    "is_new": False, "is_gone": True,
+                    "vol_today": 0, "vol_prev": p["vol"] or 0,
+                    "vol_pct": 0,
+                    "amt_today": 0, "amt_prev": p["amount"] or 0,
+                    "amt_pct": 0,
+                    "price_today": 0, "price_prev": p["price"] or 0,
+                    "prev_close": p["prev_close"],
+                })
+
+        results.sort(key=lambda x: (0 if x["is_new"] else 1, 0 if x["is_gone"] else 1, -x["vol_pct"]))
+        new_count = sum(1 for r in results if r["is_new"])
+        gone_count = sum(1 for r in results if r["is_gone"])
+        up = sum(1 for r in results if not r["is_new"] and not r["is_gone"] and r["vol_pct"] > 120)
+        down = sum(1 for r in results if not r["is_new"] and not r["is_gone"] and r["vol_pct"] < 80)
+
+        return {
+            "date1": date1, "date2": date2,
+            "keyword": keyword,
+            "results": results[:top],
+            "total": len(results),
+            "new_count": new_count, "gone_count": gone_count,
+            "up": up, "down": down,
+        }
+    except Exception as e:
+        _log.warning("auction search failed: %s", e, exc_info=True)
+        return {"results": [], "total": 0}
+    finally:
+        db.close()
+
+
 @router.get("/auction/concept-analysis")
 def get_auction_concept_analysis(date: str = "", source: str = "industry"):
     """Return sector-level auction analysis (超预期/锚点/中军/弹性/最高板).
@@ -2861,7 +3109,7 @@ def get_smc_analysis(code: str):
         _sys.path.insert(0, _trading_root)
 
     try:
-        from strategies.ict_strategy import (
+        from strategies.ict.ict_strategy import (
             _fetch_kline, smc_pipeline, swing_points, calc_bos_choch,
             calc_order_blocks, calc_fvg, calc_liquidity_sweep,
             detect_3_1_structure, calc_ote, calc_trend_continuous

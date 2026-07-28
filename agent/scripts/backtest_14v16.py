@@ -97,8 +97,8 @@ def run_backtest(
 
 
 def main():
-    from strategies.composite_14factor import compute_14factor
-    from strategies.composite_16factor_v2 import compute_16factor_v2
+    from strategies.composite.composite_14factor import compute_14factor
+    from strategies.composite.composite_16factor_v2 import compute_16factor_v2
 
     t0 = time.time()
     log.info("=" * 80)

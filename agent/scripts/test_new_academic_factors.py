@@ -85,9 +85,9 @@ def main():
 
     # ── 2. 计算因子 ──
     log.info("\n[2/3] 计算因子 ...")
-    from strategies.composite_14factor import compute_14factor
-    from strategies.composite_19factor_behavioral import compute_19factor_behavioral
-    from strategies.composite_20factor_reversal import compute_20factor_reversal
+    from strategies.composite.composite_14factor import compute_14factor
+    from strategies.composite.composite_19factor_behavioral import compute_19factor_behavioral
+    from strategies.composite.composite_20factor_reversal import compute_20factor_reversal
 
     forward_ret = c.pct_change(periods=1).shift(-1)
     results = {}

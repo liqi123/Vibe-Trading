@@ -84,7 +84,7 @@ def compute_all_factors(panel):
     factors = {}
 
     # === 原14因子 ===
-    from strategies.composite_14factor import compute_14factor
+    from strategies.composite.composite_14factor import compute_14factor
     factors["f14"] = compute_14factor(panel)
 
     # === 已验证的diversifier ===
@@ -151,7 +151,7 @@ def compute_all_factors(panel):
 
 
 def main():
-    from strategies.composite_14factor import compute_14factor
+    from strategies.composite.composite_14factor import compute_14factor
 
     t0 = time.time()
     log.info("=" * 80)

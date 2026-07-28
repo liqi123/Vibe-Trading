@@ -85,7 +85,7 @@ def main():
 
     # ── 2. 计算因子 ──
     log.info("\n[2/3] 计算因子 ...")
-    from strategies.composite_14factor import compute_14factor
+    from strategies.composite.composite_14factor import compute_14factor
 
     f14 = compute_14factor(panel)
 

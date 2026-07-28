@@ -71,7 +71,7 @@ def run_backtest(factor_df, close, top_pct=0.05, commission=0.0015, slippage=0.0
 
 
 def main():
-    from strategies.composite_14factor import compute_14factor
+    from strategies.composite.composite_14factor import compute_14factor
 
     t0 = time.time()
     log.info("=" * 80)

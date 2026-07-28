@@ -85,10 +85,10 @@ def main():
 
     # ── 2. 计算因子 ──
     log.info("\n[2/3] 计算因子 ...")
-    from strategies.composite_14factor import compute_14factor
-    from strategies.composite_17factor_optimal import compute_17factor_optimal
-    from strategies.composite_21factor_lowvol import compute_21factor_lowvol
-    from strategies.composite_22factor_neutral import compute_22factor_neutral
+    from strategies.composite.composite_14factor import compute_14factor
+    from strategies.composite.composite_17factor_optimal import compute_17factor_optimal
+    from strategies.composite.composite_21factor_lowvol import compute_21factor_lowvol
+    from strategies.composite.composite_22factor_neutral import compute_22factor_neutral
 
     forward_ret = c.pct_change(periods=1).shift(-1)
     results = {}
