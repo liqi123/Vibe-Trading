@@ -1,16 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera } from "lucide-react";
+import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera, Search, Bot, ArrowUpRight } from "lucide-react";
 import { api } from "@/lib/api";
-
-interface AuctionStat {
-  count: number; total_vol: number; total_amount: number; avg_ratio?: number;
-}
-
-interface AuctionStock {
-  code: string; name: string; auction_vol: number; auction_amount: number;
-  auction_price: number; open_price: number;
-}
 
 interface DateInfo {
   date: string; count: number; total_vol: number;
@@ -44,16 +35,18 @@ interface ConceptItem {
   tanxing: ConceptStockBrief[]; top_limit: ConceptStockBrief[];
 }
 
+interface GapUpStock {
+  code: string; name: string; auction_price: number; prev_close: number;
+  chg_pct: number; auction_vol: number; auction_amount_wan: number;
+  prev_auction_vol: number; vol_ratio: number | null;
+  prev_high: number | null; gap_break_prev_high: boolean;
+  top_industry?: string | null; top_industry_chg?: number | null;
+}
+
 function volClass(v: number) {
   if (v > 0) return "text-red-600";
   if (v < 0) return "text-green-600";
   return "text-muted-foreground";
-}
-
-function formatVol(v: number) {
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + "亿";
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + "万";
-  return String(v);
 }
 
 function auctionChgCell(v: number | null) {
@@ -65,12 +58,22 @@ function auctionChgCell(v: number | null) {
 export function AuctionBoard() {
   const [dates, setDates] = useState<DateInfo[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
-  const [stocks, setStocks] = useState<AuctionStock[]>([]);
-  const [stats, setStats] = useState<AuctionStat | null>(null);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
   const [snapshotting, setSnapshotting] = useState(false);
-  const [tab, setTab] = useState<"volume" | "compare" | "expectation" | "concept">("volume");
+  const [tab, setTab] = useState<"limitup" | "compare" | "expectation" | "concept" | "ai" | "gapup">("limitup");
+  const [limitUpData, setLimitUpData] = useState<{
+    prev_limitup: any[];
+    today_limitup: any[];
+    both_limitup: any[];
+    date1: string;
+    date2: string;
+    prev_count: number;
+    today_count: number;
+    both_count: number;
+  } | null>(null);
+  const [limitUpLoading, setLimitUpLoading] = useState(false);
+  const [limitUpSubTab, setLimitUpSubTab] = useState<"both" | "yesterday" | "today">("both");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
   const [expectStocks, setExpectStocks] = useState<ExpectStock[]>([]);
   const [expectItems, setExpectItems] = useState<ExpectAuctionItem[]>([]);
@@ -81,6 +84,15 @@ export function AuctionBoard() {
   const [conceptLoading, setConceptLoading] = useState(false);
   const [expandedConcept, setExpandedConcept] = useState<string | null>(null);
   const [analysisSource, setAnalysisSource] = useState<"industry" | "concept">("industry");
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchResults, setSearchResults] = useState<any[] | null>(null);
+  const [searchMeta, setSearchMeta] = useState<any>(null);
+  const [searching, setSearching] = useState(false);
+  const [aiReport, setAiReport] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [gapUpData, setGapUpData] = useState<{ date: string; stocks: GapUpStock[] } | null>(null);
+  const [gapUpLoading, setGapUpLoading] = useState(false);
 
   const fetchDates = async (selectLatest = false) => {
     try {
@@ -90,16 +102,6 @@ export function AuctionBoard() {
         setSelectedDate(data.dates[0].date);
       }
     } catch (e) { /* ignore */ }
-  };
-
-  const fetchDateData = async (date: string) => {
-    setLoading(true);
-    try {
-      const data = await api.tools.get<any>(`/auction/latest?date=${encodeURIComponent(date)}&limit=100`);
-      setStocks(data.stocks || []);
-      setStats(data.stats || null);
-    } catch (e) { /* ignore */ }
-    finally { setLoading(false); }
   };
 
   const fetchCompare = async () => {
@@ -114,6 +116,35 @@ export function AuctionBoard() {
     } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
+
+  const fetchLimitUp = async () => {
+    if (dates.length < 2) return;
+    const d1 = selectedDate || dates[0].date;
+    const d2 = dates.find(d => d.date !== d1)?.date || dates[1]?.date;
+    if (!d2) return;
+    setLimitUpLoading(true);
+    try {
+      const data = await api.tools.get<any>(`/auction/limit-up-compare?date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}`);
+      setLimitUpData(data);
+      if (data.both_limitup?.length > 0) setLimitUpSubTab("both");
+    } catch (e) { /* ignore */ }
+    finally { setLimitUpLoading(false); }
+  };
+
+  const handleSearch = useCallback(async () => {
+    const kw = searchKeyword.trim();
+    if (!kw || dates.length < 2) return;
+    const d1 = selectedDate || dates[0].date;
+    const d2 = dates.find(d => d.date !== d1)?.date || dates[1]?.date;
+    if (!d2) return;
+    setSearching(true);
+    try {
+      const data = await api.tools.get<any>(`/auction/search?keyword=${encodeURIComponent(kw)}&date1=${encodeURIComponent(d1)}&date2=${encodeURIComponent(d2)}&top=30`);
+      setSearchResults(data.results || []);
+      setSearchMeta(data);
+    } catch (e) { /* ignore */ }
+    finally { setSearching(false); }
+  }, [searchKeyword, selectedDate, dates]);
 
   const handleCollect = async () => {
     setCollecting(true);
@@ -204,6 +235,39 @@ export function AuctionBoard() {
     finally { setConceptLoading(false); }
   };
 
+  const fetchAiAnalysis = async () => {
+    const d = selectedDate || dates[0]?.date;
+    if (!d) { toast.warning("请先选择日期"); return; }
+    setAiLoading(true);
+    setAiReport("");
+    setAiError("");
+    try {
+      const res = await api.tools.post<any>("/auction/ai-analysis", {
+        date: d,
+        concept_source: analysisSource,
+      });
+      if (res.error) {
+        setAiError(res.error);
+      } else {
+        setAiReport(res.report || "");
+      }
+    } catch (e: any) {
+      setAiError(e.message || String(e));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const fetchGapUp = async () => {
+    if (!selectedDate) return;
+    setGapUpLoading(true);
+    try {
+      const data = await api.tools.get<any>(`/auction/gap-up?date=${encodeURIComponent(selectedDate)}&min_chg=3&max_chg=9&min_vol_ratio=1&limit=100`);
+      setGapUpData(data);
+    } catch (e) { /* ignore */ }
+    finally { setGapUpLoading(false); }
+  };
+
   const handleAddStock = async () => {
     if (!newCode.trim()) return;
     try {
@@ -244,7 +308,8 @@ export function AuctionBoard() {
       if (tab === "compare") fetchCompare();
       else if (tab === "expectation") fetchExpectData();
       else if (tab === "concept") fetchConceptAnalysis(selectedDate);
-      else fetchDateData(selectedDate);
+      else if (tab === "limitup") fetchLimitUp();
+      else if (tab === "gapup") fetchGapUp();
     }
   }, [selectedDate, tab, analysisSource]);
 
@@ -273,7 +338,14 @@ export function AuctionBoard() {
             {snapshotting ? "采集中..." : "采集快照"}
           </button>
           <button
-            onClick={() => { if (selectedDate) fetchDateData(selectedDate); }}
+            onClick={() => {
+              if (!selectedDate) return;
+              if (tab === "compare") fetchCompare();
+              else if (tab === "expectation") fetchExpectData();
+              else if (tab === "concept") fetchConceptAnalysis(selectedDate);
+              else if (tab === "limitup") fetchLimitUp();
+              else if (tab === "gapup") fetchGapUp();
+            }}
             disabled={loading}
             className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
           >
@@ -302,35 +374,15 @@ export function AuctionBoard() {
         </span>
       </div>
 
-      {/* Stats Cards */}
-      {stats && (
-        <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
-          <div className="border rounded-lg p-4 bg-card">
-            <div className="text-sm text-muted-foreground mb-1">股票数量</div>
-            <p className="text-xl font-bold">{stats.count}</p>
-          </div>
-          <div className="border rounded-lg p-4 bg-card">
-            <div className="text-sm text-muted-foreground mb-1">竞价总量</div>
-            <p className="text-xl font-bold">{formatVol(stats.total_vol)}</p>
-          </div>
-          <div className="border rounded-lg p-4 bg-card">
-            <div className="text-sm text-muted-foreground mb-1">竞价总额</div>
-            <p className="text-xl font-bold">{formatVol(stats.total_amount)}</p>
-          </div>
-          <div className="border rounded-lg p-4 bg-card">
-            <div className="text-sm text-muted-foreground mb-1">平均竞价比</div>
-            <p className="text-xl font-bold">{stats.avg_ratio}%</p>
-          </div>
-        </div>
-      )}
-
       {/* Tabs */}
       <div className="flex items-center gap-1 border-b">
         {[
-          { key: "volume" as const, label: "竞价量排行", icon: BarChart3 },
+          { key: "limitup" as const, label: "涨停竞价", icon: BarChart3 },
+          { key: "gapup" as const, label: "跳空高开", icon: ArrowUpRight },
           { key: "compare" as const, label: "竞价对比", icon: TrendingDown },
           { key: "expectation" as const, label: "预期管理", icon: Eye },
           { key: "concept" as const, label: "竞价分析", icon: Sparkles },
+          { key: "ai" as const, label: "AI分析", icon: Bot },
         ].map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -347,8 +399,234 @@ export function AuctionBoard() {
         ))}
       </div>
 
-      {tab === "compare" && compareData ? (
+      {tab === "gapup" && gapUpData ? (
+        <div className="space-y-4">
+          {/* Header summary */}
+          <div className="grid grid-cols-4 gap-4 text-sm">
+            <div className="border rounded-lg bg-card p-3">
+              <div className="text-muted-foreground">竞价日期</div>
+              <div className="text-xl font-bold">{gapUpData.date || "-"}</div>
+            </div>
+            <div className="border rounded-lg bg-card p-3">
+              <div className="text-muted-foreground">跳空高开（≥3%）</div>
+              <div className="text-xl font-bold text-red-600">{gapUpData.stocks.length}只</div>
+            </div>
+            <div className="border rounded-lg bg-card p-3">
+              <div className="text-muted-foreground">跳空突破前高🔥</div>
+              <div className="text-xl font-bold text-orange-600">
+                {gapUpData.stocks.filter(s => s.gap_break_prev_high).length}只
+              </div>
+            </div>
+            <div className="border rounded-lg bg-card p-3">
+              <div className="text-muted-foreground">放量幅度（量比均值）</div>
+              <div className="text-xl font-bold">
+                {gapUpData.stocks.filter(s => s.vol_ratio).length > 0
+                  ? (gapUpData.stocks.reduce((a, s) => a + (s.vol_ratio || 0), 0) /
+                     gapUpData.stocks.filter(s => s.vol_ratio).length).toFixed(2)
+                  : "-"}×
+              </div>
+            </div>
+          </div>
+
+          <div className="border rounded-lg bg-card overflow-hidden">
+            <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2 justify-between">
+              <div className="flex items-center gap-2">
+                <ArrowUpRight className="h-4 w-4 text-red-500" />
+                <h2 className="font-semibold">
+                  跳空高开（竞价涨幅 3%~9%，量比≥1）
+                </h2>
+              </div>
+              <span className="text-xs text-muted-foreground">按同花顺行业板块涨幅倒序</span>
+            </div>
+            {gapUpLoading ? (
+              <div className="p-8 text-center text-muted-foreground animate-pulse">加载中...</div>
+            ) : gapUpData.stocks.length === 0 ? (
+              <div className="p-8 text-center text-muted-foreground">当日无符合条件的跳空高开股票</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">排名</th>
+                      <th className="px-3 py-2 text-left font-medium">代码</th>
+                      <th className="px-3 py-2 text-left font-medium">名称</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价价</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
+                      <th className="px-3 py-2 text-right font-medium">昨收</th>
+                      <th className="px-3 py-2 text-right font-medium">昨日高点</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价量(手)</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价金额</th>
+                      <th className="px-3 py-2 text-right font-medium">量比(vs昨)</th>
+                      <th className="px-3 py-2 text-left font-medium">同花顺行业</th>
+                      <th className="px-3 py-2 text-center font-medium">标签</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {gapUpData.stocks.map((s, i) => (
+                      <tr key={s.code} className={`border-t hover:bg-muted/30 ${
+                        s.gap_break_prev_high ? "bg-orange-50/40 dark:bg-orange-950/20" : ""
+                      }`}>
+                        <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
+                        <td className="px-3 py-2 font-mono">{s.code}</td>
+                        <td className="px-3 py-2 font-medium">{s.name}</td>
+                        <td className="px-3 py-2 text-right font-medium text-red-600">
+                          {s.auction_price.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-medium text-red-600">
+                          +{s.chg_pct.toFixed(2)}%
+                        </td>
+                        <td className="px-3 py-2 text-right text-muted-foreground">
+                          {s.prev_close.toFixed(2)}
+                        </td>
+                        <td className="px-3 py-2 text-right text-muted-foreground">
+                          {s.prev_high != null ? s.prev_high.toFixed(2) : "-"}
+                        </td>
+                        <td className="px-3 py-2 text-right">{s.auction_vol.toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right">
+                          {s.auction_amount_wan >= 10000
+                            ? `${(s.auction_amount_wan / 10000).toFixed(2)}亿`
+                            : `${s.auction_amount_wan.toFixed(0)}万`}
+                        </td>
+                        <td className={`px-3 py-2 text-right font-medium ${
+                          s.vol_ratio == null ? "text-muted-foreground" :
+                          s.vol_ratio >= 2 ? "text-red-600" :
+                          s.vol_ratio >= 1.5 ? "text-orange-600" : "text-muted-foreground"
+                        }`}>
+                          {s.vol_ratio == null ? "-" : `${s.vol_ratio.toFixed(2)}×`}
+                        </td>
+                        <td className="px-3 py-2">
+                          {s.top_industry ? (
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              (s.top_industry_chg || 0) >= 3
+                                ? "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400 font-medium"
+                                : (s.top_industry_chg || 0) >= 1
+                                ? "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400"
+                                : (s.top_industry_chg || 0) < 0
+                                ? "bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-400"
+                                : "bg-muted/40 text-muted-foreground"
+                            }`}>
+                              {s.top_industry}
+                              {s.top_industry_chg != null ? ` ${s.top_industry_chg >= 0 ? "+" : ""}${s.top_industry_chg.toFixed(2)}%` : ""}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">-</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          {s.gap_break_prev_high ? (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-950/50 dark:text-orange-400 font-medium">
+                              突破前高🔥
+                            </span>
+                          ) : (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-red-50 text-red-600 dark:bg-red-950/20 dark:text-red-400">
+                              跳空高开
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : tab === "compare" && compareData ? (
         <div className="space-y-6">
+          {/* Search Bar */}
+          <div className="border rounded-lg bg-card p-4">
+            <div className="flex items-center gap-3">
+              <Search className="h-4 w-4 text-muted-foreground" />
+              <input
+                type="text"
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+                placeholder="搜索股票代码或名称（回车搜索）"
+                className="flex-1 border rounded-md px-3 py-1.5 text-sm bg-background"
+              />
+              <button
+                onClick={handleSearch}
+                disabled={searching || !searchKeyword.trim()}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors disabled:opacity-50"
+              >
+                <Search className={`h-4 w-4 ${searching ? "animate-spin" : ""}`} />
+                {searching ? "搜索中..." : "搜索"}
+              </button>
+              {searchResults && (
+                <button
+                  onClick={() => { setSearchResults(null); setSearchKeyword(""); }}
+                  className="px-3 py-1.5 text-sm border rounded-md hover:bg-muted"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Search Results */}
+          {searchResults && (
+            <div className="border rounded-lg bg-card overflow-hidden">
+              <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2">
+                <Search className="h-4 w-4" />
+                <h2 className="font-semibold">搜索结果: "{searchMeta?.keyword}"</h2>
+                <span className="text-xs text-muted-foreground ml-auto">
+                  共 {searchMeta?.total} 只  |  新增 {searchMeta?.new_count}  |  消失 {searchMeta?.gone_count}  |  放量 {searchMeta?.up}  |  缩量 {searchMeta?.down}
+                </span>
+              </div>
+              {searchResults.length === 0 ? (
+                <div className="p-8 text-center text-muted-foreground">未找到匹配股票</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/40 text-xs text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">代码</th>
+                        <th className="px-3 py-2 text-left font-medium">名称</th>
+                        <th className="px-3 py-2 text-right font-medium">今竞价量</th>
+                        <th className="px-3 py-2 text-right font-medium">昨竞价量</th>
+                        <th className="px-3 py-2 text-right font-medium">变化%</th>
+                        <th className="px-3 py-2 text-right font-medium">今金额(万)</th>
+                        <th className="px-3 py-2 text-right font-medium">竞价价</th>
+                        <th className="px-3 py-2 text-center font-medium">状态</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {searchResults.map((r) => {
+                        const pct = r.is_new ? 999 : r.vol_pct;
+                        const status = r.is_new ? "新增" : r.is_gone ? "消失" : pct > 120 ? "放量↑" : pct < 80 ? "缩量↓" : "持平→";
+                        const isHighlight = !r.is_new && !r.is_gone && pct > 150;
+                        return (
+                          <tr key={r.code} className={`border-t hover:bg-muted/30 ${isHighlight ? "bg-red-50/30" : ""}`}>
+                            <td className="px-3 py-2 font-mono">{r.code}</td>
+                            <td className="px-3 py-2 font-medium">{r.name}</td>
+                            <td className="px-3 py-2 text-right">{r.vol_today > 0 ? r.vol_today.toLocaleString() : "—"}</td>
+                            <td className="px-3 py-2 text-right text-muted-foreground">{r.vol_prev > 0 ? r.vol_prev.toLocaleString() : "—"}</td>
+                            <td className={`px-3 py-2 text-right font-medium ${r.is_new ? "text-blue-600" : r.is_gone ? "text-muted-foreground" : r.vol_pct > 100 ? "text-red-600" : "text-green-600"}`}>
+                              {r.is_new ? "NEW" : r.is_gone ? "—" : `${r.vol_pct >= 0 ? "+" : ""}${r.vol_pct.toFixed(1)}%`}
+                              {isHighlight && " ★"}
+                            </td>
+                            <td className="px-3 py-2 text-right">{r.amt_today > 0 ? r.amt_today.toLocaleString() : "—"}</td>
+                            <td className="px-3 py-2 text-right">{r.price_today > 0 ? r.price_today.toFixed(2) : "—"}</td>
+                            <td className="px-3 py-2 text-center">
+                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                                status === "新增" ? "bg-blue-100 text-blue-700" :
+                                status === "消失" ? "bg-gray-100 text-gray-500" :
+                                status === "放量↑" ? "bg-red-100 text-red-700" :
+                                status === "缩量↓" ? "bg-green-100 text-green-700" :
+                                "bg-gray-50 text-gray-400"
+                              }`}>{status}</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid gap-4 grid-cols-4">
             <div className="border rounded-lg p-4 bg-card">
               <div className="text-sm text-muted-foreground mb-1">对比日期</div>
@@ -399,10 +677,10 @@ export function AuctionBoard() {
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                       <td className="px-3 py-2 font-mono">{s.code}</td>
                       <td className="px-3 py-2">{s.name}</td>
-                      <td className="px-3 py-2 text-right">{Math.round(s.vol_today / 100).toLocaleString()}</td>
-                      <td className="px-3 py-2 text-right text-muted-foreground">{Math.round(s.vol_prev / 100).toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right">{s.vol_today.toLocaleString()}</td>
+                      <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev.toLocaleString()}</td>
                       <td className={`px-3 py-2 text-right ${volClass(s.vol_chg)}`}>
-                        {(s.vol_chg > 0 ? "+" : "") + Math.round(Math.abs(s.vol_chg) / 100).toLocaleString()}
+                        {(s.vol_chg > 0 ? "+" : "") + Math.abs(s.vol_chg).toLocaleString()}
                       </td>
                       <td className={`px-3 py-2 text-right font-medium ${volClass(s.vol_pct)}`}>
                         {s.vol_pct >= 999 ? "NEW" : `${s.vol_pct >= 0 ? "+" : ""}${s.vol_pct.toFixed(1)}%`}
@@ -865,44 +1143,171 @@ export function AuctionBoard() {
             )}
           </div>
         </div>
+      ) : tab === "ai" ? (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 justify-between">
+            <div className="text-sm text-muted-foreground">
+              {selectedDate ? `分析日期: ${selectedDate}` : "请先选择日期"}
+            </div>
+            <button
+              onClick={fetchAiAnalysis}
+              disabled={aiLoading || !selectedDate}
+              className="flex items-center gap-2 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors disabled:opacity-50"
+            >
+              <Bot className={`h-4 w-4 ${aiLoading ? "animate-pulse" : ""}`} />
+              {aiLoading ? "AI分析中..." : "开始AI分析"}
+            </button>
+          </div>
+
+          {aiLoading && (
+            <div className="border rounded-lg bg-card p-8 text-center">
+              <Bot className="h-8 w-8 mx-auto mb-3 animate-pulse text-primary" />
+              <p className="text-sm text-muted-foreground">
+                正在调用 LLM 分析竞价数据，约需 30~60 秒...
+              </p>
+            </div>
+          )}
+
+          {!aiLoading && aiError && (
+            <div className="border border-red-300 rounded-lg bg-red-50 dark:bg-red-950/20 p-4">
+              <p className="text-sm text-red-600">
+                <span className="font-medium">分析失败: </span>
+                {aiError}
+              </p>
+            </div>
+          )}
+
+          {!aiLoading && aiReport && (
+            <div className="border rounded-lg bg-card p-6">
+              <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap">
+                {aiReport}
+              </div>
+            </div>
+          )}
+
+          {!aiLoading && !aiReport && !aiError && (
+            <div className="border rounded-lg bg-card p-8 text-center text-muted-foreground">
+              <Bot className="h-8 w-8 mx-auto mb-3 opacity-40" />
+              <p className="text-sm">点击"开始AI分析"，将汇总当日竞价板块、涨停、量能数据并调用 LLM 生成分析报告</p>
+            </div>
+          )}
+        </div>
       ) : (
-        /* Volume tab */
-        <div className="border rounded-lg bg-card overflow-hidden">
-          <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-            <h2 className="font-semibold">竞价量排行</h2>
-            <span className="text-xs text-muted-foreground">{stocks.length} 只</span>
+        /* 涨停竞价对比 */
+        <div className="space-y-4">
+          {/* Sub-tabs */}
+          <div className="flex items-center gap-2">
+            {[
+              { key: "both" as const, label: "双涨停", countKey: "both_count" as const },
+              { key: "yesterday" as const, label: "昨日涨停", countKey: "prev_count" as const },
+              { key: "today" as const, label: "竞价涨停", countKey: "today_count" as const },
+            ].map(({ key, label, countKey }) => (
+              <button
+                key={key}
+                onClick={() => setLimitUpSubTab(key)}
+                className={`flex items-center gap-1 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  limitUpSubTab === key
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted/40 text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+                <span className="text-xs opacity-70">
+                  ({limitUpData ? (key === "today" ? limitUpData.both_limitup.length + limitUpData.today_limitup.length : limitUpData[countKey]) : 0})
+                </span>
+              </button>
+            ))}
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium">排名</th>
-                  <th className="px-3 py-2 text-left font-medium">代码</th>
-                  <th className="px-3 py-2 text-left font-medium">名称</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价量（手）</th>
-                  <th className="px-3 py-2 text-right font-medium">竞价额</th>
-                  <th className="px-3 py-2 text-right font-medium">价格</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stocks.map((s, i) => (
-                  <tr key={s.code} className="border-t hover:bg-muted/30 transition-colors">
-                    <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
-                    <td className="px-3 py-2 font-mono">{s.code}</td>
-                    <td className="px-3 py-2">{s.name}</td>
-                    <td className="px-3 py-2 text-right font-medium">{Math.round(s.auction_vol / 100).toLocaleString()}</td>
-                    <td className="px-3 py-2 text-right">{s.auction_amount ? (s.auction_amount / 10000).toFixed(0) + "万" : "-"}</td>
-                    <td className="px-3 py-2 text-right">{s.auction_price?.toFixed(2)}</td>
-                  </tr>
-                ))}
-                {stocks.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+
+          {limitUpLoading ? (
+            <div className="py-12 text-center text-muted-foreground">加载中...</div>
+          ) : !limitUpData ? (
+            <div className="py-12 text-center text-muted-foreground">请先选择日期</div>
+          ) : (
+            <div className="border rounded-lg bg-card overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">代码</th>
+                      <th className="px-3 py-2 text-left font-medium">名称</th>
+                      <th className="px-3 py-2 text-left font-medium">概念</th>
+                      <th className="px-3 py-2 text-right font-medium">今竞价量</th>
+                      <th className="px-3 py-2 text-right font-medium">昨竞价量</th>
+                      <th className="px-3 py-2 text-right font-medium">量变化</th>
+                      <th className="px-3 py-2 text-right font-medium">量比</th>
+                      <th className="px-3 py-2 text-right font-medium">今竞价额</th>
+                      <th className="px-3 py-2 text-right font-medium">昨竞价额</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      let items: any[] = [];
+                      if (limitUpSubTab === "both") items = limitUpData.both_limitup;
+                      else if (limitUpSubTab === "yesterday") items = limitUpData.prev_limitup;
+                      else items = [...limitUpData.both_limitup, ...limitUpData.today_limitup];
+                      return items.length > 0 ? items.map((s: any) => (
+                        <tr key={s.code} className="border-t hover:bg-muted/30 transition-colors">
+                          <td className="px-3 py-2 font-mono">{s.code}</td>
+                          <td className="px-3 py-2">{s.name}</td>
+                          <td className="px-3 py-2 max-w-[240px]">
+                            {s.concepts && s.concepts.length > 0 ? (
+                              <span className="flex flex-wrap gap-1">
+                                {s.concepts.slice(0, 4).map((c: string) => (
+                                  <span key={c} className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground whitespace-nowrap">{c}</span>
+                                ))}
+                                {s.concepts.length > 4 && (
+                                  <span className="text-xs text-muted-foreground">+{s.concepts.length - 4}</span>
+                                )}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium">{s.vol_today.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev > 0 ? s.vol_prev.toLocaleString() : "-"}</td>
+                          <td className={`px-3 py-2 text-right font-medium ${s.vol_chg > 0 ? "text-red-600" : s.vol_chg < 0 ? "text-green-600" : ""}`}>
+                            {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
+                          </td>
+                          <td className={`px-3 py-2 text-right font-medium ${s.vol_pct >= 999 ? "" : s.vol_pct >= 100 ? "text-red-600" : "text-green-600"}`}>
+                            {s.vol_pct >= 999 ? "新" : `${s.vol_pct.toFixed(0)}%`}
+                          </td>
+                          <td className="px-3 py-2 text-right">{s.amt_today > 0 ? s.amt_today.toLocaleString() : "-"}</td>
+                          <td className="px-3 py-2 text-right text-muted-foreground">{s.amt_prev > 0 ? s.amt_prev.toLocaleString() : "-"}</td>
+                          <td className={`px-3 py-2 text-right font-medium ${(s.auction_chg_today ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                            {s.auction_chg_today != null ? `${s.auction_chg_today >= 0 ? "+" : ""}${s.auction_chg_today.toFixed(2)}%` : "-"}
+                          </td>
+                        </tr>
+                      )) : (
+                        <tr>
+                          <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                        </tr>
+                      );
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Summary stats */}
+          {limitUpData && (
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              <div className="border rounded-lg bg-card p-3 text-center">
+                <div className="text-muted-foreground">昨日涨停</div>
+                <div className="text-xl font-bold">{limitUpData.prev_count}只</div>
+              </div>
+              <div className="border rounded-lg bg-card p-3 text-center">
+                <div className="text-muted-foreground">竞价涨停</div>
+                <div className="text-xl font-bold">{limitUpData.today_count}只</div>
+              </div>
+              <div className="border rounded-lg bg-card p-3 text-center">
+                <div className="text-muted-foreground">双涨停</div>
+                <div className="text-xl font-bold">{limitUpData.both_count}只</div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

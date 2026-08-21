@@ -822,6 +822,8 @@
     "thEPrice": "E价",
     "thXPrice": "X价",
     "thRunawayPrice": "异常价",
+    "thSupport": "支撑",
+    "thResistance": "压力",
     "thSuggestion": "建议",
     "thAction": "操作",
     "suggestionNone": "--",
@@ -832,6 +834,7 @@
     "save": "保存",
     "cancel": "取消",
     "edit": "编辑",
+    "editName": "双击编辑名称",
     "delete": "删除",
     "addStockTitle": "添加股票",
     "searchPlaceholder": "按代码或名称搜索..."

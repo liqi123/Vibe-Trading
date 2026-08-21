@@ -10,19 +10,32 @@ from __future__ import annotations
 
 import logging
 import os
+import sys as _sys
 from pathlib import Path
 from typing import Any, Dict
+
+# Ensure the agent directory is on sys.path so uvicorn reload (import string mode)
+# and direct invocations can resolve src.* and cli.*.
+_AGENT_DIR = Path(__file__).resolve().parent
+if str(_AGENT_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_AGENT_DIR))
 
 from fastapi import FastAPI, HTTPException, Request, status  # noqa: F401
 from fastapi.responses import FileResponse  # noqa: F401
 from fastapi.middleware.cors import CORSMiddleware
 from rich.console import Console
 
-from cli._version import __version__ as APP_VERSION
+# Version — use installed metadata when available rather than importing
+# cli._version, which can fail under uvicorn's subprocess import-string mode.
+try:
+    from importlib.metadata import version as _pkg_ver
+    APP_VERSION: str = _pkg_ver("vibe-trading-ai")
+except Exception:
+    APP_VERSION = "unknown"
+
 from src.ui_services import build_run_analysis, load_run_context  # noqa: F401
 
 # UTF-8 on Windows
-import sys as _sys
 for _s in ("stdout", "stderr"):
     _r = getattr(getattr(_sys, _s, None), "reconfigure", None)
     if callable(_r):
@@ -178,8 +191,12 @@ async def _stop_scheduled_research_on_shutdown() -> None:
 # ============================================================================
 
 # --- Runs ---
+# register_runs_routes looks up api_server in sys.modules;
+# when run as __main__, alias it so the lookup succeeds.
+import sys as _sys_for_run; _sys_for_run.modules.setdefault("api_server", _sys_for_run.modules.get(__name__))
 from src.api.runs_routes import register_runs_routes  # noqa: E402
-register_runs_routes(app)
+from src.api.security import require_auth  # noqa: F401
+register_runs_routes(app, require_auth=require_auth)
 
 from src.api.runs_routes import (  # noqa: F401, E402
     _load_json_file,
@@ -232,6 +249,18 @@ from src.api.qveris_routes import qveris_router  # noqa: E402  # QVERIS-INTEGRAT
 app.include_router(qveris_router)  # QVERIS-INTEGRATION
 from src.api.trading_tools_routes import register_trading_tools_routes  # noqa: E402
 register_trading_tools_routes(app)
+
+# --- 缠论 CZSC 策略 ---
+from src.api.czsc_routes import register_czsc_routes  # noqa: E402
+register_czsc_routes(app)
+
+# --- Vibe 短线复盘（移植自 vibe-astock，Apache-2.0） ---
+from src.api.vibe_routes import register_vibe_routes  # noqa: E402
+register_vibe_routes(app)
+
+# --- 恐惧贪婪指数（移植自 Quantify-hp/Market-sentiment-index，MIT） ---
+from src.api.sentiment_routes import register_sentiment_routes  # noqa: E402
+register_sentiment_routes(app)
 
 from src.api.channels_routes import (  # noqa: F401, E402
     ChannelPairingCommandRequest,
@@ -329,6 +358,7 @@ def serve_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8000, help="Listen port (default 8000)")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address")
     parser.add_argument("--dev", action="store_true", help="Dev mode: spawn Vite on :5173")
+    parser.add_argument("--reload", action="store_true", help="Hot reload on code changes")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -375,7 +405,7 @@ def serve_main(argv: list[str] | None = None) -> int:
     install_access_log_redaction_filter()
 
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        uvicorn.run("api_server:app", host=args.host, port=args.port, log_level="info", reload=args.reload)
     finally:
         if vite_proc:
             vite_proc.terminate()
@@ -385,3 +415,4 @@ def serve_main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(serve_main())
+ 

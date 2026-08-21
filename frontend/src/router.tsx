@@ -56,7 +56,13 @@ const NewsSearch = lazy(() =>
   import("@/pages/tools/NewsSearch").then((m) => ({ default: m.NewsSearch })),
 );
 const DailyReview = lazy(() =>
-  import("@/pages/tools/DailyReview").then((m) => ({ default: m.DailyReview })),
+  import("@/pages/tools/MarketReview").then((m) => ({ default: m.MarketReview })),
+);
+const VibeReview = lazy(() =>
+  import("@/pages/tools/VibeReview").then((m) => ({ default: m.VibeReview })),
+);
+const SentimentIndex = lazy(() =>
+  import("@/pages/tools/SentimentIndex").then((m) => ({ default: m.SentimentIndex })),
 );
 const ScheduledTasks = lazy(() =>
   import("@/pages/ScheduledTasks").then((m) => ({ default: m.ScheduledTasks })),
@@ -67,13 +73,15 @@ const AuctionBoard = lazy(() =>
 const StockAnalysis = lazy(() =>
   import("@/pages/tools/StockAnalysis").then((m) => ({ default: m.StockAnalysis })),
 );
+const CzscAnalysis = lazy(() =>
+  import("@/pages/tools/CzscAnalysis").then((m) => ({ default: m.CzscAnalysis })),
+);
 const MarketLadder = lazy(() =>
   import("@/pages/MarketLadder").then((m) => ({ default: m.MarketLadder })),
 );
 const VolumeRank = lazy(() =>
   import("@/pages/VolumeRank").then((m) => ({ default: m.VolumeRank })),
 );
-
 function PageLoader() {
   return (
     <div className="flex h-[60vh] items-center justify-center text-muted-foreground">
@@ -117,9 +125,12 @@ export const router = createBrowserRouter([
       { path: "/backtest-eval", element: wrap(BacktestEval) },
       { path: "/news", element: wrap(NewsSearch) },
       { path: "/daily-review", element: wrap(DailyReview) },
+      { path: "/vibe-review", element: wrap(VibeReview) },
+      { path: "/sentiment-index", element: wrap(SentimentIndex) },
       { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
       { path: "/auction-board", element: wrap(AuctionBoard) },
       { path: "/stock-analysis", element: wrap(StockAnalysis) },
+      { path: "/czsc-analysis", element: wrap(CzscAnalysis) },
       { path: "/market-ladder", element: wrap(MarketLadder) },
       { path: "/volume-rank", element: wrap(VolumeRank) },
     ],

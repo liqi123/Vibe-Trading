@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign } from "lucide-react";
+import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network } from "lucide-react";
 
 const TOOLS = [
   {
@@ -55,8 +55,22 @@ const TOOLS = [
     to: "/daily-review",
     icon: TrendingUp,
     title: "每日复盘",
-    desc: "市场概览、持仓摘要、选股执行、今日交易一站聚合",
+    desc: "大盘/全球指数、市场情绪、连板梯队、成交额榜、板块资金一屏看全 + AI 复盘与本地复盘报告",
     color: "text-rose-500",
+  },
+  {
+    to: "/vibe-review",
+    icon: Brain,
+    title: "短线智能体复盘",
+    desc: "五智能体叙事复盘：情绪/资金/题材/龙虎榜/龙头 + 明日验证条件闭环 + 首板/外围/热度",
+    color: "text-red-500",
+  },
+  {
+    to: "/sentiment-index",
+    icon: Gauge,
+    title: "恐惧贪婪指数",
+    desc: "增强版AFGI：9分项加权情绪温度计（波动率/成交/广度/涨跌停/赚钱效应等），五档状态",
+    color: "text-indigo-500",
   },
   {
     to: "/ai-analysis",
@@ -78,6 +92,13 @@ const TOOLS = [
     title: "个股深度分析",
     desc: "斐波那契价位、技术指标、摆动周期、K线数据一站式分析",
     color: "text-rose-500",
+  },
+  {
+    to: "/czsc-analysis",
+    icon: Network,
+    title: "缠论结构分析",
+    desc: "缠中说禅（czsc）分型/笔/中枢/三类买卖点识别 + 222信号函数选股扫描",
+    color: "text-indigo-500",
   },
   {
     to: "/news",

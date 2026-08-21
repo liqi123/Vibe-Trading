@@ -20,7 +20,8 @@ const PROXY_PATHS = [
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_API_URL || "http://127.0.0.1:8899";
-  const apiProxy = { target: apiTarget, changeOrigin: true };
+  // proxy 超时 5 分钟，避免长耗时请求（如 czsc/scan 全市场扫描）被截断
+  const apiProxy = { target: apiTarget, changeOrigin: true, timeout: 300000 };
   const apiProxyWithHtmlFallback = {
     ...apiProxy,
     bypass(req: { headers: { accept?: string } }) {
@@ -36,6 +37,7 @@ export default defineConfig(({ mode }) => {
       alias: { "@": path.resolve(__dirname, "./src") },
     },
     server: {
+      host: true,
       port: 5899,
       proxy: {
         ...Object.fromEntries(PROXY_PATHS.map((p) => [p, apiProxy])),

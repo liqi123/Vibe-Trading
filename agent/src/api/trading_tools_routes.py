@@ -93,19 +93,98 @@ def _stock_table(db: sqlite3.Connection | None = None) -> str:
     return _STOCK_TABLE_CACHE
 
 
-def _get_db() -> sqlite3.Connection | None:
-    """Open the SQLite database if it exists."""
-    # Try config DB path first (project convention: from utils.config import DB_PATH)
+def _open_db_readonly(path: str) -> sqlite3.Connection | None:
+    """以 immutable 只读模式打开 SQLite，绕过 sandbox 对 -wal/-journal 的拦截。
+
+    immutable=1 告知 SQLite 文件不会被修改，故不打开 WAL/journal，
+    仅读主 .db 文件——适合只读 API。主库写操作由 `python -m utils update` 独立连接处理。
+    """
+    uri = "file:" + str(path).replace("\\", "/").lstrip("/") + "?immutable=1"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=10)
+        conn.execute("SELECT 1").fetchone()  # 验证可读
+        return conn
+    except Exception:
+        return None
+
+
+def _get_db(writable: bool = False) -> sqlite3.Connection | None:
+    """Open the SQLite database holding daily_kline.
+
+    候选路径优先级: utils.config.DB_PATH > G:/E: 盘 > 项目本地 tdx_daily.db > 旧 tdx_data.db。
+    - 只读（默认）: 用 immutable=1 URI 打开，避开 sandbox 对 WAL 的拦截，并按 max date 选最新库。
+    - 可写（writable=True）: 用普通 sqlite3.connect，选第一个能打开且有 daily_kline 表的库
+      （sandbox 下 G:\\ 可能因 WAL 打不开，会回退到本地可写副本）。
+    """
+    candidates = [
+        r"G:\tdx_data\tdx_daily.db",
+        r"E:\DataBase\tdx_data.db",
+        str(_PROJECT_ROOT / "tdx_daily.db"),
+        str(_PROJECT_ROOT / "tdx_daily_writable.db"),   # 可写副本（G盘WAL锁死时，update 会写到这里）
+        str(_DB_PATH),
+    ]
+    # 优先从 utils.config 拿 DB_PATH（项目规范）
     try:
         from utils.config import DB_PATH
-        if Path(str(DB_PATH)).exists():
-            return sqlite3.connect(str(DB_PATH))
+        p = Path(str(DB_PATH))
+        if p.exists():
+            candidates.insert(0, str(p))
     except Exception:
-        _log.warning("_get_db: config DB_PATH failed, falling back to _DB_PATH", exc_info=True)
-    # Fallback to project root path
-    if _DB_PATH.exists():
-        return sqlite3.connect(str(_DB_PATH))
-    return None
+        pass
+
+    if writable:
+        # 可写模式: 普通 connect，选第一个有 daily_kline 表的库
+        for c in candidates:
+            p = Path(c)
+            if not p.exists():
+                continue
+            try:
+                conn = sqlite3.connect(str(p), timeout=10)
+                tabs = {r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if "daily_kline" in tabs:
+                    return conn
+                conn.close()
+            except Exception:
+                continue
+        return None
+
+    # 只读模式: immutable=1 + 新鲜度比较
+    best_conn: sqlite3.Connection | None = None
+    best_max = None
+    for c in candidates:
+        p = Path(c)
+        if not p.exists():
+            continue
+        conn = _open_db_readonly(c)
+        if conn is None:
+            continue
+        try:
+            tabs = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "daily_kline" not in tabs:
+                conn.close()
+                continue
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_kline)").fetchall()}
+            dc = "trade_date" if "trade_date" in cols else "date"
+            mx = conn.execute(f"SELECT MAX({dc}) FROM daily_kline").fetchone()[0]
+            if mx is None:
+                conn.close()
+                continue
+            if best_max is None or mx > best_max:
+                if best_conn is not None:
+                    best_conn.close()
+                best_conn = conn
+                best_max = mx
+            else:
+                conn.close()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            continue
+    return best_conn
 
 
 def _latest_trade_date(db: sqlite3.Connection) -> str | None:
@@ -146,6 +225,8 @@ def get_expectations() -> dict:
     """Return expectation state for all positions, with live prev_close from DB."""
     state = _read_json(_PAPER_DIR / "expectation_state.json")
     positions = state.get("positions", [])
+    for p in positions:
+        p.setdefault("category", "holding")
     if not positions:
         return state
 
@@ -159,11 +240,14 @@ def get_expectations() -> dict:
             code = p["code"]
             bare_code = code[2:] if code.startswith(("sh", "sz")) else code
 
-            # 优先从auction表获取prev_close（更及时）
-            auction_row = db.execute(
-                "SELECT prev_close FROM auction WHERE code=? ORDER BY date DESC LIMIT 1",
-                (bare_code,)
-            ).fetchone()
+            # 优先从auction表获取prev_close（更及时）,表不存在则回退daily_kline
+            try:
+                auction_row = db.execute(
+                    "SELECT prev_close FROM auction WHERE code=? ORDER BY date DESC LIMIT 1",
+                    (bare_code,)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                auction_row = None
             if auction_row and auction_row[0]:
                 p["prev_close"] = auction_row[0]
             else:
@@ -217,6 +301,11 @@ def add_expectation(data: dict):
     if not raw:
         raise HTTPException(status_code=400, detail="Code required")
 
+    # 分类: observation=观察股, holding=持仓股(默认)
+    category = data.get("category", "holding")
+    if category not in ("observation", "holding"):
+        category = "holding"
+
     # Normalize code: if pure digits, add market prefix
     code = raw.lower()
     if code.isdigit():
@@ -241,6 +330,12 @@ def add_expectation(data: dict):
     for p in positions:
         stored = p.get("code", "").lower()
         if stored == code or stored.lstrip("shsz") == code.lstrip("shsz"):
+            # 已存在: 若分类不同则移动到目标分类, 否则提示已存在
+            if p.get("category", "holding") != category:
+                p["category"] = category
+                state["positions"] = positions
+                _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
+                return _ok(message="Moved")
             return _ok(message="Already exists")
 
     # Get stock name from DB
@@ -272,6 +367,7 @@ def add_expectation(data: dict):
         "name": name,
         "prev_close": prev_close,
         "status": "关注中",
+        "category": category,
     })
     state["positions"] = positions
 
@@ -281,7 +377,7 @@ def add_expectation(data: dict):
 
 @router.post("/expectations/update-prices")
 def update_expectation_prices(data: dict):
-    """Update E price, X price and runaway price for a stock."""
+    """Update E price, X price, runaway price, name, and suggestion for a stock."""
     code = data.get("code", "").strip().lower()
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
@@ -291,14 +387,164 @@ def update_expectation_prices(data: dict):
 
     for p in positions:
         if p.get("code") == code:
-            p["e_price"] = data.get("e_price", 0)
-            p["x_price"] = data.get("x_price", 0)
-            p["runaway_price"] = data.get("runaway_price", 0)
+            if "e_price" in data:
+                p["e_price"] = data.get("e_price", 0)
+            if "x_price" in data:
+                p["x_price"] = data.get("x_price", 0)
+            if "runaway_price" in data:
+                p["runaway_price"] = data.get("runaway_price", 0)
+            if "name" in data:
+                p["name"] = data.get("name", "")
+            if "suggestion" in data:
+                p["suggestion"] = data.get("suggestion", "")
+            if "note" in data:
+                p["note"] = data.get("note", "")
             break
 
     state["positions"] = positions
     _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
     return _ok()
+
+
+@router.post("/expectations/update-support-resistance")
+def update_support_resistance(data: dict):
+    """计算个股支撑/压力位(SMC结构位: 订单块/摆动高低点)并写入 note 的固定标记段。
+
+    写入格式: note 中出现【支撑压力】开头的行会被整体替换，其余用户备注文字原样保留。
+    """
+    import sys as _sys
+    import re
+    import pandas as pd
+
+    code = data.get("code", "").strip().lower()
+    if not code:
+        raise HTTPException(status_code=400, detail="Code required")
+
+    _trading_root = str(_PROJECT_ROOT)
+    if _trading_root not in _sys.path:
+        _sys.path.insert(0, _trading_root)
+
+    try:
+        from strategies.ict.ict_indicators import smc_pipeline, swing_points
+    except ImportError as e:
+        return _err(f"ict_strategy不可用: {e}")
+
+    db = _get_db()
+    if db is None:
+        return _err("无法连接数据库")
+    try:
+        date_col = "trade_date"
+        cols = {r[1] for r in db.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        if "date" in cols and "trade_date" not in cols:
+            date_col = "date"
+        df = pd.read_sql(
+            f"SELECT {date_col} as date, open, high, low, close, volume "
+            f"FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 120",
+            db, params=[code],
+        )
+    finally:
+        db.close()
+
+    if df.empty:
+        return _err(f"无数据: {code}")
+
+    if date_col == "trade_date":
+        df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d")
+    else:
+        df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = df[col].astype(float)
+
+    try:
+        result, major_ob, minor_ob, fvg_df = smc_pipeline(df)
+    except Exception as exc:
+        return _err(f"SMC计算失败: {exc}")
+
+    last_close = float(result.iloc[-1]["close"])
+    support = None
+    resistance = None
+
+    # 1) 主源: major 订单块(OB)边界 — 下方最近 OB 下沿=支撑, 上方最近 OB 上沿=压力
+    if major_ob is not None and not major_ob.empty:
+        below = major_ob[major_ob["ob_bottom"] < last_close]
+        if not below.empty:
+            support = float(below["ob_bottom"].max())
+        above = major_ob[major_ob["ob_top"] > last_close]
+        if not above.empty:
+            resistance = float(above["ob_top"].min())
+
+    # 2) 次源: swing 摆动高低点 (若 OB 某一侧缺失)
+    if support is None or resistance is None:
+        try:
+            base = result if "swing" in result.columns else df
+            sw_df = swing_points(base, size=3)
+            sw = sw_df["swing"].fillna(0).astype(int).values
+            lows = sw_df["low"].values
+            highs = sw_df["high"].values
+            if support is None:
+                cand = [float(lows[i]) for i in range(len(sw)) if sw[i] == -1 and lows[i] < last_close]
+                if cand:
+                    support = max(cand)
+            if resistance is None:
+                cand = [float(highs[i]) for i in range(len(sw)) if sw[i] == 1 and highs[i] > last_close]
+                if cand:
+                    resistance = min(cand)
+        except Exception:
+            pass
+
+    # 3) 兜底: 滚动窗口高低点 (永远可用，确保每只票都有支撑/压力)
+    if support is None:
+        bl = df[df["low"] < last_close]
+        if not bl.empty:
+            support = float(bl["low"].max())
+    if resistance is None:
+        ah = df[df["high"] > last_close]
+        if not ah.empty:
+            resistance = float(ah["high"].min())
+
+    if support is None and resistance is None:
+        return _err("未能计算出支撑/压力位")
+
+    # 操作建议(基于现价相对支撑/压力的位置；不重复数字，数字已在独立列展示)
+    pct_s = (last_close - support) / last_close * 100 if support else None   # 支撑在现价下方，正数
+    pct_r = (resistance - last_close) / last_close * 100 if resistance else None  # 压力在现价上方，正数
+    if support and last_close <= support:
+        advice = "已跌破支撑,观望等待企稳"
+    elif resistance and last_close >= resistance:
+        advice = "已突破压力,回踩确认后可跟随"
+    elif pct_s is not None and pct_s <= 3:
+        advice = "贴近支撑,可关注低吸/布局"
+    elif pct_r is not None and pct_r <= 3:
+        advice = "临近压力,建议逢高减仓/了结"
+    else:
+        advice = "区间震荡,支撑上方低吸、压力下方高抛,波段操作"
+    advice_text = "【操作建议】" + advice
+
+    state = _read_json(_PAPER_DIR / "expectation_state.json")
+    positions = state.get("positions", [])
+    updated = False
+    new_note = None
+    for p in positions:
+        if p.get("code") == code:
+            old_note = p.get("note", "") or ""
+            if re.search(r"【支撑压力】|【操作建议】", old_note):
+                new_note = re.sub(r"【支撑压力】[^\n]*|【操作建议】[^\n]*", advice_text, old_note)
+            else:
+                new_note = (old_note + "\n" + advice_text).strip() if old_note else advice_text
+            p["note"] = new_note
+            # 结构化字段(供前端展示与预警高亮)
+            p["support"] = support
+            p["resistance"] = resistance
+            updated = True
+            break
+
+    if not updated:
+        return _err(f"自选股中未找到: {code}")
+
+    state["positions"] = positions
+    _atomic_write_json(_PAPER_DIR / "expectation_state.json", state)
+    return _ok(code=code, support=support, resistance=resistance, note=new_note)
 
 
 @router.post("/expectations/remove")
@@ -876,7 +1122,14 @@ def sell_position(data: dict):
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
 
-    state_file = "paper_trading_state.json" if portfolio == "v1" else "paper_trading_state_trend.json" if portfolio == "trend" else "paper_trading_state_ict.json"
+    # map frontend tab names to state file names
+    _portfolio_file = {
+        "v1": "paper_trading_state.json",
+        "trend": "paper_trading_state_trend.json",
+        "v5": "paper_trading_state_trend.json",
+        "ict": "paper_trading_state_ict.json",
+    }
+    state_file = _portfolio_file.get(portfolio, "paper_trading_state_trend.json")
     path = _PAPER_DIR / state_file
     state = _read_json(path)
     positions = state.get("positions", [])
@@ -1295,6 +1548,351 @@ def get_market_realtime() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Daily Review (每日复盘看板) — 移植自 Vibe-Research market.py / gstock.py
+# 数据源：腾讯 gtimg（指数，不封IP）+ 东财 push2/push2ex（em_get 内置限流）
+# ---------------------------------------------------------------------------
+
+_review_cache: dict = {}
+_REVIEW_TTL = 300  # 5 分钟；数据源为空的结果不缓存，下次请求直接重试
+
+
+def _review_cached(key: str, fn, valid=bool):
+    now = time.time()
+    hit = _review_cache.get(key)
+    if hit and now - hit[0] < _REVIEW_TTL:
+        return hit[1]
+    val = fn()
+    if valid(val):
+        _review_cache[key] = (now, val)
+    return val
+
+
+def _em_num(v) -> int:
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return 0
+
+
+_A_INDEX_CODES = ["sh000001", "sz399001", "sz399006", "sh000300"]  # 上证/深成/创业板/沪深300
+
+
+@router.get("/market/indices")
+def get_market_indices() -> list[dict]:
+    """A股大盘指数实时行情（上证/深证成指/创业板指/沪深300），腾讯源。"""
+    from data.tencent_quotes import fetch_quotes
+
+    quotes = fetch_quotes(_A_INDEX_CODES)
+    out = []
+    for full in _A_INDEX_CODES:
+        q = quotes.get(full)
+        if q:
+            out.append({"name": q["name"], "price": q["price"], "change_pct": q["change_pct"]})
+    return out
+
+
+_GLOBAL_INDICES = (
+    {"key": "dji", "name": "道琼斯", "secid": "100.DJIA", "region": "美股"},
+    {"key": "spx", "name": "标普500", "secid": "100.SPX", "region": "美股"},
+    {"key": "ndx", "name": "纳斯达克", "secid": "100.NDX", "region": "美股"},
+    {"key": "hsi", "name": "恒生指数", "secid": "100.HSI", "region": "港股"},
+    {"key": "hstech", "name": "恒生科技", "secid": "124.HSTECH", "region": "港股"},
+)
+
+
+def _push2_stock_get(secid: str, fields: str) -> dict | None:
+    """东财 push2 stock/get：push2 优先、失败降级 push2delay（延时行情，看板场景足够）。"""
+    from data.eastmoney import em_get
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for host in ("push2.eastmoney.com", "push2delay.eastmoney.com"):
+        try:
+            r = em_get(f"https://{host}/api/qt/stock/get",
+                       params={"secid": secid, "fields": fields},
+                       headers=headers, timeout=10)
+            d = r.json().get("data")
+        except Exception:
+            continue
+        if d:
+            return d
+    return None
+
+
+def _em_price(d: dict, key: str):
+    """f43 等价格字段：除以 10^f59 还原。'-'/None → None。"""
+    v = d.get(key)
+    if not isinstance(v, (int, float)):
+        return None
+    dec = d.get("f59")
+    if not isinstance(dec, int):
+        dec = 2
+    return round(v / (10 ** dec), dec)
+
+
+@router.get("/market/global-indices")
+def get_global_indices() -> list[dict]:
+    """全球指数快照（道指/标普500/纳指/恒生/恒生科技），5 分钟缓存。"""
+    def build():
+        out = []
+        for idx in _GLOBAL_INDICES:
+            d = _push2_stock_get(idx["secid"], "f43,f57,f58,f59,f60,f170")
+            if not d:
+                continue
+            chg = d.get("f170")
+            out.append({
+                "key": idx["key"], "name": idx["name"], "region": idx["region"],
+                "price": _em_price(d, "f43"),
+                "change_pct": round(chg / 100, 2) if isinstance(chg, (int, float)) else None,
+            })
+        return out
+    return _review_cached("global_indices", build, valid=bool)
+
+
+_EM_ZT_UT = "7eea3edcaed734bea9cbfc24409ed989"
+
+
+def _em_zt_pool(endpoint: str, date_str: str, sort: str = "fbt:asc") -> list[dict]:
+    """东财涨停板行情中心原始池（push2ex）。
+    endpoint: getTopicZTPool(涨停) / getTopicZBPool(炸板) / getTopicDTPool(跌停) / getYesterdayZTPool(昨涨停)
+    date: YYYYMMDD 交易日；非交易日/参数错 → []。"""
+    from data.eastmoney import em_get
+
+    url = f"https://push2ex.eastmoney.com/{endpoint}"
+    params = {"ut": _EM_ZT_UT, "dpt": "wz.ztzt", "Pageindex": 0,
+              "pagesize": 10000, "sort": sort, "date": date_str}
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+    try:
+        r = em_get(url, params=params, headers=headers, timeout=10)
+        return (r.json().get("data") or {}).get("pool") or []
+    except Exception:
+        return []
+
+
+def _em_f(v):
+    """东财数值字段可能是 '-'（停牌/无数据）→ 归一成 float 或 None。"""
+    return v if isinstance(v, (int, float)) else None
+
+
+@router.get("/market/emotion")
+def get_short_term_emotion() -> dict:
+    """短线情绪（聚合口径）：连板梯队 / 最高连板 / 炸板率 / 封板率 / 晋级率 / 涨跌停家数 + 连板股清单。
+    数据源＝东财涨停板四池（push2ex）。"""
+    def build():
+        # 定位最近交易日：从今天往前回溯，第一日有涨停池即取（非交易日/盘前返空则继续回溯）
+        from collections import Counter
+
+        today = datetime.now().date()
+        resolved, zt = "", []
+        for back in range(8):
+            d = (today - timedelta(days=back)).strftime("%Y%m%d")
+            zt = _em_zt_pool("getTopicZTPool", d, "fbt:asc")
+            if zt:
+                resolved = d
+                break
+        if not resolved:
+            return {}
+
+        zb = _em_zt_pool("getTopicZBPool", resolved, "fbt:asc")    # 炸板池
+        dt = _em_zt_pool("getTopicDTPool", resolved, "fund:asc")   # 跌停池
+        yzt = _em_zt_pool("getYesterdayZTPool", resolved, "zs:desc")  # 昨涨停池
+
+        boards = [_em_num(p.get("lbc")) or 1 for p in zt]          # 每只连板数（缺省按 1 板）
+        lianban = [b for b in boards if b >= 2]                    # 2 板及以上（连板）
+        # 连板梯队：2/3/4/5+ 各多少家（5 代表 5 板及以上）
+        tiers = Counter(min(b, 5) for b in lianban)
+        ladder = [{"boards": b, "count": tiers[b], "plus": b >= 5} for b in sorted(tiers)]
+
+        # 连板股清单（2 板+，客观公开榜单数据；按连板数、成交额降序）
+        lianban_stocks = sorted(
+            ({
+                "code": str(p.get("c", "")), "name": p.get("n", ""),
+                "boards": _em_num(p.get("lbc")) or 1,
+                "price": round((_em_f(p.get("p")) or 0) / 1000, 2),
+                "pct": round(_em_f(p.get("zdp")) or 0, 2),
+                "amount": _em_f(p.get("amount")),
+                "float_cap": _em_f(p.get("ltsz")),
+                "industry": p.get("hybk", ""),
+            } for p in zt if (_em_num(p.get("lbc")) or 1) >= 2),
+            key=lambda x: (-x["boards"], -(x["amount"] or 0)),
+        )
+
+        zt_count, zb_count, yzt_count = len(zt), len(zb), len(yzt)
+        attempts = zt_count + zb_count                              # 尝试涨停 = 封住 + 炸板
+        seal_rate = round(zt_count / attempts, 3) if attempts else None      # 封板率
+        break_rate = round(zb_count / attempts, 3) if attempts else None     # 炸板率
+        # 晋级率＝今日 2 板+（＝昨涨停今又停）÷ 昨日涨停家数
+        promotion_rate = round(len(lianban) / yzt_count, 3) if yzt_count else None
+
+        return {
+            "date": f"{resolved[:4]}-{resolved[4:6]}-{resolved[6:]}",
+            "zt_count": zt_count, "dt_count": len(dt), "zb_count": zb_count,
+            "max_boards": max(boards) if boards else 0,
+            "lianban_count": len(lianban), "ladder": ladder,
+            "lianban_stocks": lianban_stocks,
+            "seal_rate": seal_rate, "break_rate": break_rate,
+            "promotion_rate": promotion_rate, "yzt_count": yzt_count,
+        }
+    return _review_cached("emotion", build)
+
+
+_EM_ALL_A = "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048"  # 沪深京 A 股
+
+
+def _em_clist(fs: str, fields: str, fid: str = "f3", pz: int = 20, po: int = 1) -> list[dict]:
+    """东财行情中心 clist：push2 优先、失败降级 push2delay。"""
+    from data.eastmoney import em_get
+
+    params = {"pn": 1, "pz": pz, "po": po, "np": 1, "fltt": 2, "invt": 2,
+              "fid": fid, "fs": fs, "fields": fields}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for host in ("push2.eastmoney.com", "push2delay.eastmoney.com"):
+        try:
+            r = em_get(f"https://{host}/api/qt/clist/get", params=params,
+                       headers=headers, timeout=12)
+            diff = (r.json().get("data") or {}).get("diff") or []
+            if diff:
+                return diff
+        except Exception:
+            continue
+    return []
+
+
+def _em_sectors() -> list[dict]:
+    """行业资金流（按主力净流入降序）。东财行业板块 clist。"""
+    diff = _em_clist("m:90 t:2", "f12,f14,f3,f62,f104,f135,f136", fid="f62", pz=90)
+    out = []
+    for d in diff:
+        net = _em_f(d.get("f62"))
+        inflow = _em_f(d.get("f135"))
+        outflow = _em_f(d.get("f136"))
+        out.append({
+            "name": d.get("f14", ""),
+            "pct": round(_em_f(d.get("f3")) or 0, 2),
+            "net": round(net / 1e8, 2) if net is not None else None,
+            "inflow": round(inflow / 1e8, 2) if inflow is not None else None,
+            "outflow": round(outflow / 1e8, 2) if outflow is not None else None,
+            "firms": _em_num(d.get("f104")),
+        })
+    return [s for s in out if s["name"]]
+
+
+def _em_sentiment() -> dict:
+    """市场情绪：涨跌家数（复用腾讯全市场实时统计，30s 缓存）+ 涨停/跌停（东财四池）+ 宽度/投机度机械分档。"""
+    try:
+        realtime = get_market_realtime()
+    except HTTPException:
+        return {}
+    up, down, flat = realtime.get("up", 0), realtime.get("down", 0), realtime.get("flat", 0)
+
+    today = datetime.now().strftime("%Y%m%d")
+    zt_pool = _em_zt_pool("getTopicZTPool", today)
+    dt_pool = _em_zt_pool("getTopicDTPool", today)
+
+    def _real(pool: list[dict]) -> int:
+        # 真实涨停/跌停：剔除 ST 与未开板次新（名称 N/C 开头）
+        return sum(1 for p in pool
+                   if "ST" not in str(p.get("n", "")).upper()
+                   and not str(p.get("n", "")).startswith(("N", "C")))
+
+    zt, zt_real = len(zt_pool), _real(zt_pool)
+    dt, dt_real = len(dt_pool), _real(dt_pool)
+
+    r = up / max(down, 1)
+    if up < 600:
+        breadth = "冰点"
+    elif r < 0.7:
+        breadth = "偏弱"
+    elif r < 1.2:
+        breadth = "中性"
+    elif r < 2.5:
+        breadth = "偏强"
+    else:
+        breadth = "普涨"
+    speculation = "亢奋" if zt_real >= 100 else "活跃" if zt_real >= 60 else "普通" if zt_real >= 30 else "冰点"
+
+    return {
+        "up": up, "down": down, "flat": flat,
+        "zt": zt, "zt_real": zt_real, "dt": dt, "dt_real": dt_real,
+        "breadth": breadth, "speculation": speculation,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+    }
+
+
+@router.get("/market/pulse")
+def get_market_pulse() -> dict:
+    """市场情绪 + 行业资金流 + 全市场成交额榜 TOP20（每日复盘看板聚合），5 分钟缓存。"""
+    def build():
+        return {
+            "sentiment": _em_sentiment(),
+            "sectors": _em_sectors(),
+            "turnover": {"stocks": _em_turnover_top(20),
+                         "updated": datetime.now().strftime("%Y-%m-%d %H:%M")},
+            "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    return _review_cached("pulse", build, valid=lambda v: bool(v.get("sentiment") or v.get("sectors")))
+
+
+def _em_turnover_top(n: int = 20) -> list[dict]:
+    """全市场成交额榜（沪深京 A 股按成交额降序 TopN，客观公开榜单）。"""
+    diff = _em_clist(_EM_ALL_A, "f12,f14,f2,f3,f6,f20,f21,f100", fid="f6", pz=n)
+    return [{
+        "code": str(d.get("f12", "")), "name": d.get("f14", ""),
+        "price": _em_f(d.get("f2")), "pct": _em_f(d.get("f3")),
+        "amount": _em_f(d.get("f6")), "mcap": _em_f(d.get("f20")),
+        "float_cap": _em_f(d.get("f21")), "industry": d.get("f100", "") or "",
+    } for d in diff]
+
+
+@router.get("/market/turnover-top")
+def get_turnover_top() -> dict:
+    """全市场成交额榜 TOP20（客观公开榜单，5 分钟缓存）。"""
+    def build():
+        return {
+            "stocks": _em_turnover_top(20),
+            "updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+    return _review_cached("turnover_top", build, valid=lambda v: bool(v.get("stocks")))
+
+
+@router.post("/ai/review")
+def ai_review(data: dict) -> dict:
+    """AI 每日复盘：喂入当日大盘客观数据摘要，返回 AI 生成的复盘文本（非流式）。"""
+    summary = data.get("summary", "")
+    if not summary:
+        return {"error": "No data summary provided"}
+    try:
+        # LLM key 在根项目 .env（agent/.env 中 MIMO 为注释），显式加载
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(_PROJECT_ROOT / ".env")
+        except ImportError:
+            pass
+
+        from analysis.llm_analyzer import call_llm
+
+        prompt = (
+            f"以下是今天 A 股大盘的客观数据：\n{summary}\n\n"
+            "请用中文做一段当天大盘复盘：整体涨跌、主要指数表现、盘面值得注意的点。"
+            "只做客观陈述与多视角分析，不预测涨跌、不推荐任何标的、不构成投资建议。"
+        )
+        # agent/.env 的 LANGCHAIN_MODEL_NAME（openrouter 配置）会污染 call_llm 的模型选择，
+        # 显式指定 MIMO 模型（与根项目 .env 一致）
+        report = call_llm(prompt, model="mimo-v2.5-pro")
+        return {"report": report}
+    except Exception as e:
+        detail = str(e)
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                detail += " | body=" + str(resp.text[:500])
+            except Exception:
+                pass
+        _log.warning("ai_review failed: %s", detail)
+        return {"error": detail}
+
+
+# ---------------------------------------------------------------------------
 # Market Momentum (市场动量)
 # ---------------------------------------------------------------------------
 
@@ -1648,12 +2246,12 @@ def run_script(data: dict):
     """Run a trading script in background thread, return task id."""
     script = data.get("script", "")
     scripts = {
-        "fibonacci": "strategies/daily_check.py",
-        "trend": "strategies/daily_check_trend.py",
-        "ict": "strategies/ict_scan_fast.py",
+        "fibonacci": "strategies/fibonacci/daily_check.py",
+        "trend": "strategies/trend/daily_check_trend.py",
+        "ict": "strategies/ict/ict_scan_fast.py",
         "stops": "-m utils stops",
-        "review": "analysis/generate_review.py",
-        "review_v5": "analysis/generate_review.py",
+        "review": "analysis/reports/generate_review.py",
+        "review_v5": "analysis/reports/generate_review.py",
     }
     if script not in scripts:
         raise HTTPException(status_code=400, detail=f"Unknown script: {script}")
@@ -1958,7 +2556,7 @@ def backtest_eval(data: dict) -> dict:
 def search_news(q: str = "", stock_code: str = "") -> dict:
     """Search news by keyword or stock code."""
     try:
-        from analysis.news_search import get_stock_news
+        from analysis.external.news_search import get_stock_news
 
         if stock_code:
             db = _get_db()
@@ -1975,9 +2573,8 @@ def search_news(q: str = "", stock_code: str = "") -> dict:
             return {"items": items}
 
         # General search — use iwencai
-        from analysis.iwencai import IwencaiClient
-        client = IwencaiClient()
-        results = client.search(q, perpage=10)
+        from analysis.external.iwencai import search as iwencai_search
+        results = iwencai_search(q, channel="news", size=10)
         return {"items": results}
     except Exception as e:
         return {"items": [], "error": str(e)}
@@ -2125,7 +2722,7 @@ def _check_auction_time() -> tuple[bool, dict | None]:
     if not after_cutoff:
         return False, None
 
-    db = _get_db()
+    db = _get_db(writable=True)
     if db is None:
         return True, _err("no database")
     try:
@@ -2159,7 +2756,7 @@ def collect_auction_data():
     if blocked:
         return resp
 
-    db = _get_db()
+    db = _get_db(writable=True)
     if db is None:
         return _err("no database")
     today_str = date.today().isoformat()
@@ -2175,6 +2772,16 @@ def collect_auction_data():
         all_codes = [row[0] for row in cur.fetchall()]
         prefixed = [add_prefix(c) for c in all_codes]
 
+        # 预加载昨日收盘（用于 prev_close 兜底：竞价时段腾讯 fields[4] 可能为空）
+        cols = {r[1] for r in db.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        dc = "trade_date" if "trade_date" in cols else "date"
+        prev_close_map: dict[str, float] = {}
+        try:
+            for r in db.execute(f"SELECT code, close FROM daily_kline WHERE {dc}=?", (latest_date,)).fetchall():
+                prev_close_map[r[0]] = float(r[1])
+        except Exception:
+            pass
+
         raw = fetch_raw(prefixed)
         collected = 0
         for raw_code, fields in raw.items():
@@ -2185,12 +2792,23 @@ def collect_auction_data():
             vol = int(basic["volume"])
             if vol <= 0:
                 continue
-            amount = basic["amount"]
-            price = basic["price"]
+            # 竞价时段腾讯 fields[37]=amount 单位是"万元"；统一存储为"元"
+            amount = round(basic["amount"] * 10000, 2)
+            # 竞价期间 price(fields[3]) 经常为 0，用 open(fields[5]) 作为竞价价兜底
+            price = basic["price"] if basic["price"] > 0 else basic["open"]
             open_px = basic["open"]
             name = fields[1]
             prev_close = float(fields[4]) if fields[4] else 0
-            ratio = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0
+            # 竞价时 prev_close(fields[4]) 也常为 0，从 daily_kline 兜底取
+            if prev_close <= 0 and code in prev_close_map:
+                prev_close = prev_close_map[code]
+            # bare_code 对应 prev_close_map 里带前缀的 code
+            if prev_close <= 0:
+                bare_tmp = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+                for _pfx in ("sh", "sz", "bj"):
+                    if (_pfx + bare_tmp) in prev_close_map:
+                        prev_close = prev_close_map[_pfx + bare_tmp]
+                        break
             try:
                 bare_code = code[2:] if code.startswith(("sh", "sz", "bj")) else code
                 cur.execute(
@@ -2478,6 +3096,14 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
             today_auction[r[0]] = {"name": r[1], "vol": r[2] or 0, "amount": r[3] or 0,
                                    "price": r[4] or 0, "prev_close": r[5] or 0}
 
+        # 同花顺概念映射（涨停票概念展示）
+        concepts_map = {}
+        try:
+            from data.auction_concept_analysis import fetch_concepts
+            concepts_map = fetch_concepts(cur)
+        except Exception:
+            _log.warning("auction concepts load failed", exc_info=True)
+
         # Classify today's auction limit-up stocks
         today_limitup_codes = set()
         for code, info in today_auction.items():
@@ -2512,6 +3138,7 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
                 "price_today": t_price, "price_prev": p_price,
                 "prev_close": prev_close,
                 "auction_chg_today": auction_chg,
+                "concepts": concepts_map.get(code, []),
             }
 
         all_codes = prev_limitup_codes | today_limitup_codes
@@ -2663,6 +3290,537 @@ def get_auction_concept_analysis(date: str = "", source: str = "industry"):
         return {"date": date, "concepts": [], "error": str(e)}
 
 
+@router.get("/auction/gap-up")
+def get_auction_gap_up(
+    date: str = "",
+    min_chg: float = 3.0,
+    max_chg: float = 9.0,
+    min_vol_ratio: float = 1.0,
+    limit: int = 100,
+) -> dict:
+    """竞价跳空高开筛选。
+
+    筛选条件（严格按需求，无额外门槛）：
+      - 竞价涨幅 [min_chg%, max_chg%]（默认 3%~9%，排除一字涨停和微涨）
+      - 量比 ≥ min_vol_ratio（默认 1，竞价量必须大于前日竞价量）
+      - 排除 ST/退市股
+    按竞价金额倒序。返回字段含 gap_break_prev_high（是否跳空突破昨日K线高点）。
+    """
+    if not date:
+        db = _get_db()
+        if db:
+            try:
+                r = db.execute("SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 1").fetchone()
+                if r:
+                    date = r[0]
+            except Exception:
+                pass
+            finally:
+                db.close()
+    if not date:
+        return {"date": "", "stocks": []}
+
+    # 昨日竞价日期
+    prev_date = None
+    db = _get_db()
+    if db:
+        try:
+            dr = db.execute(
+                "SELECT DISTINCT date FROM auction WHERE date < ? ORDER BY date DESC LIMIT 1",
+                (date,),
+            ).fetchone()
+            if dr:
+                prev_date = dr[0]
+        finally:
+            db.close()
+
+    db = _get_db()
+    if db is None:
+        return {"date": date, "stocks": []}
+    try:
+        # 直接检测当前库的日期列名（避免 get_date_col() 误判到其它库）
+        cols = {r[1] for r in db.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        date_col = "trade_date" if "trade_date" in cols else "date"
+        is_int = date_col == "trade_date"
+
+        cur = db.cursor()
+        # 先按最宽门槛拉候选（创业板/科创板上限10%），Python层按板块二次过滤
+        sql_max = max(max_chg, 10.0)
+        cur.execute(
+            """
+            SELECT code, name, auction_price, prev_close, auction_vol, auction_amount
+            FROM auction
+            WHERE date=? AND prev_close>0 AND auction_price>0
+              AND (auction_price*1.0/prev_close) >= ?
+              AND (auction_price*1.0/prev_close) <= ?
+              AND name NOT LIKE '%ST%' AND name NOT LIKE '%退%'
+            ORDER BY auction_amount DESC
+            LIMIT ?
+            """,
+            (date, 1 + min_chg / 100, 1 + sql_max / 100, limit * 2),
+        )
+        today_rows = cur.fetchall()
+        if not today_rows:
+            return {"date": date, "stocks": []}
+
+        # 板块区分：创业板(300/301)、科创板(688) 20cm 上限 10%；主板(其他) 10cm 上限 9%
+        def _board_max_chg(code: str) -> float:
+            bare = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+            if bare.startswith(("300", "301", "688")):
+                return 10.0
+            return max_chg  # 默认 9%（主板）
+
+        filtered = []
+        for r in today_rows:
+            code = r[0]
+            ap, pc = r[2], r[3]
+            if pc and pc > 0 and ap:
+                chg = (ap / pc - 1) * 100
+                board_max = _board_max_chg(code)
+                if min_chg <= chg <= board_max:
+                    filtered.append(r)
+        today_rows = filtered
+        if not today_rows:
+            return {"date": date, "stocks": []}
+
+        # 昨日竞价量
+        codes = [r[0] for r in today_rows]
+        prev_auction_map: dict = {}
+        if prev_date:
+            placeholders = ",".join("?" * len(codes))
+            prev_rs = cur.execute(
+                f"SELECT code, auction_vol FROM auction WHERE date=? AND code IN ({placeholders})",
+                [prev_date] + codes,
+            ).fetchall()
+            prev_auction_map = {r[0]: r[1] for r in prev_rs}
+
+        # 昨收K线 high（判断是否跳空突破前高）
+        prev_date_val = None
+        if prev_date:
+            prev_date_val = int(prev_date.replace("-", "")) if is_int else prev_date
+        daily_high_map: dict = {}
+        if prev_date_val:
+            prefixed_codes = []
+            for c in codes:
+                if c.startswith(("sh", "sz")):
+                    prefixed_codes.append(c)
+                else:
+                    # auction 存的是裸代码，daily_kline 可能带前缀
+                    if c.startswith("6"):
+                        prefixed_codes.append("sh" + c)
+                    else:
+                        prefixed_codes.append("sz" + c)
+            # 同时尝试裸代码和带前缀代码
+            all_codes = list(dict.fromkeys(codes + prefixed_codes))
+            placeholders2 = ",".join("?" * len(all_codes))
+            daily_rows = cur.execute(
+                f"SELECT code, high FROM daily_kline WHERE {date_col}=? AND code IN ({placeholders2})",
+                [prev_date_val] + all_codes,
+            ).fetchall()
+            code_to_high: dict = {}
+            for r in daily_rows:
+                code_to_high[r[0]] = r[1]
+            # 映射回 auction 里的裸代码
+            for i, bare in enumerate(codes):
+                pre = prefixed_codes[i]
+                h = code_to_high.get(bare) or code_to_high.get(pre)
+                if h:
+                    daily_high_map[bare] = h
+
+        stocks: list[dict] = []
+        for r in today_rows:
+            code, name, auction_price, prev_close, auction_vol, auction_amount = r
+            chg_pct = (auction_price / prev_close - 1) * 100
+            prev_vol = prev_auction_map.get(code) or 0
+            vol_ratio = (auction_vol / prev_vol) if prev_vol > 0 else None
+            # 量比过滤：竞价量必须大于前日竞价量；前日无数据时不做过滤（避免新上市/首次采集被误伤）
+            if vol_ratio is not None and vol_ratio < min_vol_ratio:
+                continue
+            prev_high = daily_high_map.get(code)
+            # 是否跳空突破昨日高点
+            gap_break_prev_high = bool(prev_high and auction_price > prev_high)
+
+            stocks.append({
+                "code": code,
+                "name": name,
+                "auction_price": auction_price,
+                "prev_close": prev_close,
+                "chg_pct": round(chg_pct, 2),
+                "auction_vol": auction_vol,
+                "auction_amount_wan": round(auction_amount / 10000, 0) if auction_amount else 0,
+                "prev_auction_vol": prev_vol,
+                "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+                "prev_high": prev_high,
+                "gap_break_prev_high": gap_break_prev_high,
+            })
+
+        # 给每只股票匹配同花顺行业板块（L2），并按行业板块当日涨幅倒序
+        try:
+            import csv as _csv
+            from pathlib import Path as _Path
+            # 1) 加载同花顺行业列表（L2 名称 -> 881xxx 代码）
+            ths_csv = _Path(__file__).resolve().parents[4] / "data" / "market_sentiment" / "ths_industry_codes.csv"
+            name_to_code: dict[str, str] = {}
+            if ths_csv.exists():
+                with ths_csv.open(encoding="utf-8-sig", newline="") as f:
+                    for row in _csv.DictReader(f):
+                        nm, cd = (row.get("name") or "").strip(), (row.get("code") or "").strip()
+                        if nm and cd:
+                            name_to_code[nm] = cd
+
+            # 2) 裸代码 -> 带前缀代码（用于 stock_ths_industry 查询）
+            def _to_prefixed(bare: str) -> str:
+                if bare.startswith(("sh", "sz", "bj")):
+                    return bare
+                if bare.startswith("6"):
+                    return "sh" + bare
+                if bare.startswith(("0", "3")):
+                    return "sz" + bare
+                return "bj" + bare
+
+            prefixed = [_to_prefixed(c) for c in codes]
+            placeholders = ",".join("?" * len(prefixed))
+            # 3) 查询每只股票的同花顺行业 L2
+            ind_rows = cur.execute(
+                f"SELECT code, industry_l2 FROM stock_ths_industry WHERE code IN ({placeholders})",
+                prefixed,
+            ).fetchall()
+            code_to_l2 = {r[0]: r[1] for r in ind_rows if r[1]}
+
+            # 4) 查询当日所有 sh881xxx 行业指数的涨跌幅；当日缺失则回退最近交易日
+            today_val = int(date.replace("-", "")) if is_int else date
+            ind_idx_rows = cur.execute(
+                f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
+                (today_val,),
+            ).fetchall()
+            if not ind_idx_rows:
+                fb = cur.execute(
+                    f"SELECT MAX({date_col}) FROM daily_kline WHERE code LIKE 'sh881%'"
+                ).fetchone()
+                if fb and fb[0]:
+                    today_val = fb[0]
+                    ind_idx_rows = cur.execute(
+                        f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
+                        (today_val,),
+                    ).fetchall()
+            today_close = {r[0]: r[1] for r in ind_idx_rows}
+            # 前一交易日
+            prev_td_val = int(prev_date.replace("-", "")) if (prev_date and is_int) else prev_date
+            if not prev_td_val:
+                # 当 prev_date 缺失，回退 today_val 的前一交易日
+                pv = cur.execute(
+                    f"SELECT MAX({date_col}) FROM daily_kline WHERE code LIKE 'sh881%' AND {date_col} < ?",
+                    (today_val,),
+                ).fetchone()
+                if pv and pv[0]:
+                    prev_td_val = pv[0]
+            prev_close = {}
+            if prev_td_val:
+                prev_rows = cur.execute(
+                    f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
+                    (prev_td_val,),
+                ).fetchall()
+                prev_close = {r[0]: r[1] for r in prev_rows}
+
+            # 5) 行业 L2 名称 -> 当日涨幅
+            industry_chg: dict[str, float] = {}
+            for nm, cd in name_to_code.items():
+                tc, pc = today_close.get(f"sh{cd}"), prev_close.get(f"sh{cd}")
+                if tc and pc and pc > 0:
+                    industry_chg[nm] = round((tc / pc - 1) * 100, 2)
+
+            # 6) 给每只股票挂 top_industry / top_industry_chg
+            for s in stocks:
+                l2 = code_to_l2.get(_to_prefixed(s["code"]))
+                s["top_industry"] = l2
+                s["top_industry_chg"] = industry_chg.get(l2) if l2 else None
+            # 按行业板块涨幅倒序；同分按竞价金额倒序
+            stocks.sort(
+                key=lambda s: (-(s.get("top_industry_chg") or -999), -(s.get("auction_amount_wan") or 0)),
+            )
+        except Exception as e:
+            _log.warning("auction gap-up: top_industry matching failed: %s", e)
+
+        return {"date": date, "stocks": stocks}
+    finally:
+        db.close()
+
+
+@router.post("/auction/ai-analysis")
+def auction_ai_analysis(data: dict) -> dict:
+    """AI 竞价分析：汇总当日竞价数据，调用 LLM 生成分析报告。
+
+    Body: { "date": "YYYY-MM-DD", "concept_source": "industry|concept" }
+    """
+    date_str = data.get("date", "")
+    source = data.get("concept_source", "industry")
+
+    if not date_str:
+        db = _get_db()
+        if db:
+            try:
+                r = db.execute("SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 1").fetchone()
+                if r:
+                    date_str = r[0]
+            except Exception:
+                pass
+            finally:
+                db.close()
+    if not date_str:
+        return {"error": "无法确定竞价日期"}
+
+    # 1) 汇总竞价数据
+    sections: list[str] = [f"## 竞价日期: {date_str}"]
+
+    # 1a) 板块分析
+    try:
+        from data.auction_concept_analysis import analyze_to_json
+        concept_result = analyze_to_json(date_str, top_concepts=20, source=source)
+        concepts = concept_result.get("concepts", [])
+        if concepts:
+            lines = ["### 板块竞价分析"]
+            for c in concepts[:15]:
+                sig = c.get("signal", "") or ""
+                anchor = c.get("anchor")
+                zhongjun = c.get("zhongjun")
+                line = (
+                    f"- {c['tag']}: 评分{c['score']:.0f}, 红盘率{c['red_ratio']*100:.0f}%, "
+                    f"均涨幅{c['avg_chg']:+.2f}%, {c['n']}只"
+                )
+                if sig:
+                    line += f", 信号:{sig}"
+                if anchor:
+                    line += f" | 锚点:{anchor.get('name','')}({anchor.get('code','')}){anchor.get('chg_pct',0):+.2f}%"
+                if zhongjun:
+                    line += f" | 中军:{zhongjun.get('name','')}"
+                if c.get("max_limit", 0) > 0:
+                    line += f" | 最高板:{c['max_limit']}板"
+                lines.append(line)
+            sections.append("\n".join(lines))
+    except Exception as e:
+        _log.warning("auction AI: concept analysis failed: %s", e)
+
+    # 1b) 涨停竞价对比
+    try:
+        db = _get_db()
+        if db:
+            cur = db.cursor()
+            # 今日竞价涨停数
+            cur.execute(
+                "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price/prev_close >= 1.095",
+                (date_str,),
+            )
+            today_lu = cur.fetchall()
+            # 昨日涨停今日竞价
+            cur.execute("SELECT DISTINCT date FROM auction WHERE date < ? ORDER BY date DESC LIMIT 1", (date_str,))
+            prev_row = cur.fetchone()
+            prev_lu = []
+            if prev_row:
+                prev_date = prev_row[0]
+                cur.execute(
+                    "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price/prev_close >= 1.095",
+                    (prev_date,),
+                )
+                prev_lu = cur.fetchall()
+            db.close()
+
+            lu_lines = ["### 涨停竞价分析"]
+            lu_lines.append(f"- 今日竞价涨停: {len(today_lu)}只")
+            if today_lu:
+                top5 = today_lu[:10]
+                lu_lines.append("  " + ", ".join(f"{r[1]}({r[0]})" for r in top5))
+            lu_lines.append(f"- 昨日涨停股: {len(prev_lu)}只")
+            if prev_lu:
+                # 检查今日竞价表现
+                if today_lu:
+                    today_codes = {r[0] for r in today_lu}
+                    both = [r for r in prev_lu if r[0] in today_codes]
+                    lu_lines.append(f"- 昨日涨停今日竞价继续涨停: {len(both)}只")
+                    if both:
+                        lu_lines.append("  " + ", ".join(f"{r[1]}({r[0]})" for r in both[:10]))
+            sections.append("\n".join(lu_lines))
+    except Exception as e:
+        _log.warning("auction AI: limit-up analysis failed: %s", e)
+
+    # 1c) 竞价量排行 TOP10
+    try:
+        db = _get_db()
+        if db:
+            cur = db.cursor()
+            cur.execute(
+                "SELECT code, name, auction_vol, auction_amount, auction_price, prev_close FROM auction WHERE date=? ORDER BY auction_vol DESC LIMIT 10",
+                (date_str,),
+            )
+            top_stocks = cur.fetchall()
+            db.close()
+            if top_stocks:
+                vol_lines = ["### 竞价量排行 TOP10"]
+                for i, r in enumerate(top_stocks, 1):
+                    chg = ""
+                    if r[5] and r[5] > 0 and r[4] and r[4] > 0:
+                        chg_pct = (r[4] / r[5] - 1) * 100
+                        chg = f", 竞价涨幅{chg_pct:+.2f}%"
+                    vol_lines.append(f"{i}. {r[1]}({r[0]}): 竞价量{r[2]:,}, 金额{r[3]:,.0f}元{chg}")
+                sections.append("\n".join(vol_lines))
+    except Exception as e:
+        _log.warning("auction AI: top stocks failed: %s", e)
+
+    # 1d) 自选股竞价分析
+    try:
+        exp_state = _read_json(_PAPER_DIR / "expectation_state.json")
+        positions = exp_state.get("positions", []) if isinstance(exp_state, dict) else []
+        if positions:
+            # 获取昨日竞价日期用于量比计算
+            db = _get_db()
+            prev_date = None
+            if db:
+                try:
+                    dr = db.execute(
+                        "SELECT DISTINCT date FROM auction WHERE date < ? ORDER BY date DESC LIMIT 1",
+                        (date_str,),
+                    ).fetchone()
+                    if dr:
+                        prev_date = dr[0]
+                finally:
+                    db.close()
+
+            code_list = [p.get("code", "") for p in positions if p.get("code")]
+            bare_list = [c[2:] if c.startswith(("sh", "sz")) else c for c in code_list]
+            search_codes = list(dict.fromkeys(bare_list + code_list))
+
+            db = _get_db()
+            today_map: dict = {}
+            prev_map: dict = {}
+            if db and search_codes:
+                try:
+                    placeholders = ",".join("?" * len(search_codes))
+                    # 今日竞价
+                    today_rows = db.execute(
+                        f"SELECT code, name, auction_vol, auction_amount, auction_price, prev_close "
+                        f"FROM auction WHERE date=? AND code IN ({placeholders})",
+                        [date_str] + search_codes,
+                    ).fetchall()
+                    today_map = {}
+                    for r in today_rows:
+                        today_map[r[0]] = {
+                            "name": r[1], "vol": r[2], "amount": r[3],
+                            "price": r[4], "prev_close": r[5],
+                        }
+                    # 昨日竞价
+                    if prev_date:
+                        prev_rows = db.execute(
+                            f"SELECT code, auction_vol FROM auction WHERE date=? AND code IN ({placeholders})",
+                            [prev_date] + search_codes,
+                        ).fetchall()
+                        prev_map = {r[0]: r[1] for r in prev_rows}
+                finally:
+                    db.close()
+
+            wl_lines = ["### 自选股竞价分析"]
+            n_watch = 0
+            for i, p in enumerate(positions):
+                code = p.get("code", "")
+                name = p.get("name", "")
+                if not code:
+                    continue
+                bare = bare_list[i] if i < len(bare_list) else (code[2:] if code.startswith(("sh", "sz")) else code)
+                t = today_map.get(bare) or today_map.get(code) or {}
+                price = t.get("price") or 0
+                prev_close = t.get("prev_close") or p.get("prev_close") or 0
+                vol_amount = t.get("amount") or 0  # 竞价金额（auction_amount）
+                vol_prev = prev_map.get(bare) or prev_map.get(code) or 0
+                # 竞价涨幅
+                chg_pct = ((price / prev_close - 1) * 100) if (price and prev_close) else 0
+                # 量比（今日竞价量 / 昨日竞价量）
+                vol_ratio = (t.get("vol") or 0) / vol_prev if (vol_prev and vol_prev > 0) else 0
+                # 支撑/压力位
+                support = p.get("support") or 0
+                resistance = p.get("resistance") or 0
+                # 与支撑压力位关系
+                pos_tag = ""
+                if price and support and resistance:
+                    if price <= support * 1.02:
+                        pos_tag = "【贴近支撑位】"
+                    elif price >= resistance * 0.98:
+                        pos_tag = "【接近压力位】"
+                    elif support < price < resistance:
+                        pos_tag = "【支撑压力之间】"
+                    elif price > resistance:
+                        pos_tag = "【突破压力位⚠️】"
+                    elif price < support:
+                        pos_tag = "【跌破支撑位⚠️】"
+
+                chg_str = f"竞价{chg_pct:+.2f}%" if (price and prev_close) else "无竞价价"
+                vol_str = ""
+                if t.get("vol"):
+                    vol_str = f", 竞价量{(t.get('vol') or 0)/10000:.2f}万手"
+                if vol_amount:
+                    # auction_amount 单位为万元（DB中值≈万级别）
+                    vol_str += f", 额{vol_amount/10000:.2f}亿" if vol_amount >= 10000 else f", 额{vol_amount:.0f}万"
+                if vol_ratio:
+                    vol_str += f", 量较昨日{vol_ratio:.1f}倍"
+                sr_str = ""
+                if support and resistance:
+                    sr_str = f" 支撑{support:.2f}/压力{resistance:.2f}"
+                line = f"- {name}({code}): {chg_str}{vol_str}{pos_tag}{sr_str}"
+                wl_lines.append(line)
+                n_watch += 1
+            if n_watch:
+                sections.append("\n".join(wl_lines))
+    except Exception as e:
+        _log.warning("auction AI: watchlist analysis failed: %s", e)
+
+    if len(sections) <= 1:
+        return {"error": f"日期 {date_str} 无竞价数据可分析"}
+
+    summary = "\n\n".join(sections)
+
+    # 2) 调用 LLM
+    try:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(_PROJECT_ROOT / ".env")
+        except ImportError:
+            pass
+
+        from analysis.llm_analyzer import call_llm
+
+        auction_system = (
+            "你是 A 股短线竞价分析师，擅长从集合竞价数据中捕捉情绪、板块联动和量能异动。\n"
+            "分析要求：\n"
+            "1. 横向对比：把多只股票放一起看，找出谁超预期、谁低于预期、谁在异动，不要逐只孤立点评\n"
+            "2. 模式识别：竞价涨幅+量比+位置标签的组合要结合起来解读，例如『放量突破压力』和『缩量贴近支撑』是两种完全不同的信号\n"
+            "3. 具体到数字：点评要引用具体数据（如『竞价+7%且量较昨日2.9倍』），不要空泛地说『量能放大』\n"
+            "4. 给出判断而非复述：不要重复语料里已有的标签，要给出你的独立判断（是否符合预期、是机会还是风险、建议动作）\n"
+            "5. 简洁有重点：每只股票1-2句话点透，避免套话模板\n"
+            "6. 风险第一：高位放量、跌破支撑等危险信号要明确提示"
+        )
+
+        prompt = (
+            f"以下是今天 A 股集合竞价的数据摘要：\n\n{summary}\n\n"
+            "请用中文做一段竞价分析报告，结构如下：\n"
+            "1. **竞价整体情绪**（红盘率/涨停数/量能变化，一句话定性）\n"
+            "2. **热点板块解读**（最强板块的锚点/中军/弹性标的，结合竞价数据判断强度）\n"
+            "3. **重点个股关注**（竞价量异常/连续涨停/超预期标的，从全市场角度挑）\n"
+            "4. **自选股诊断**（重点：不要逐只复述数据，要做横向对比——谁最强、谁最弱、谁超预期、谁需要警惕；"
+            "每只结合『竞价涨幅+量比+支撑压力位置』给出独立判断和具体操作建议）\n"
+            "5. **操作思路**（接力方向/回避方向/风险提示）\n\n"
+            "注意：只做客观数据分析与多视角推演，不保证结果，不构成投资建议。"
+        )
+        report = call_llm(prompt, model="mimo-v2.5-pro", system_prompt=auction_system)
+        return {"report": report, "date": date_str, "summary": summary}
+    except Exception as e:
+        detail = str(e)
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                detail += " | body=" + str(resp.text[:500])
+            except Exception:
+                pass
+        _log.warning("auction AI analysis failed: %s", detail)
+        return {"error": detail}
+
+
 # ---------------------------------------------------------------------------
 # Market Ladder (连板梯队)
 # ---------------------------------------------------------------------------
@@ -2700,7 +3858,7 @@ def get_market_ladder():
                             os.environ[k.strip()] = v.strip()
                             break
 
-        from analysis.iwencai import query_data
+        from analysis.external.iwencai import query_data
 
         raw = query_data(
             "今日涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 连续涨停天数 涨停原因 成交额"
@@ -2708,6 +3866,21 @@ def get_market_ladder():
         if not raw:
             result = {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": "暂无数据"}
             return result
+
+        from data.auction_concept_analysis import SKIP_CONCEPTS
+
+        # 过滤业绩/股权/国资等杂标签，仅保留可交易的题材概念
+        _ladder_skip = {
+            "中报预增", "半年报预增", "中报增长", "半年报增长", "中报扭亏", "中报减亏",
+            "半年报预计扭亏", "年报预增", "季报预增", "预盈预增", "业绩预增", "业绩增长",
+            "业绩改善", "亏损收窄", "预增",
+            "国企改革", "央企改革", "央企国企改革", "国资改革", "混改",
+            "股权转让(并购重组)", "并购重组", "股权转让", "重组概念",
+            "举牌", "定增", "增持", "减持", "回购", "股权激励", "员工持股",
+        }
+
+        def _is_generic_concept(c: str) -> bool:
+            return c in _ladder_skip or c in SKIP_CONCEPTS or c.endswith("国资")
 
         ladder = []
         for row in raw:
@@ -2722,7 +3895,11 @@ def get_market_ladder():
             amount_str = row.get(f"成交额[{today_compact}]") or row.get("成交额", "0")
             reason = row.get(f"涨停原因[{today_compact}]") or row.get("涨停原因", "")
 
-            concepts = [c.strip() for c in reason.split("+") if c.strip()] if reason else []
+            concepts = (
+                [c.strip() for c in reason.split("+") if c.strip() and not _is_generic_concept(c.strip())]
+                if reason
+                else []
+            )
 
             try:
                 price = float(price_str) if price_str else 0
@@ -3109,13 +4286,13 @@ def get_smc_analysis(code: str):
         _sys.path.insert(0, _trading_root)
 
     try:
-        from strategies.ict.ict_strategy import (
-            _fetch_kline, smc_pipeline, swing_points, calc_bos_choch,
+        from strategies.ict.ict_indicators import (
+            smc_pipeline, swing_points, calc_bos_choch,
             calc_order_blocks, calc_fvg, calc_liquidity_sweep,
             detect_3_1_structure, calc_ote, calc_trend_continuous
         )
     except ImportError as e:
-        return _err(f"ict_strategy不可用: {e}")
+        return _err(f"ict_indicators不可用: {e}")
 
     db = _get_db()
     if db is None:
@@ -3268,6 +4445,21 @@ def get_smc_analysis(code: str):
         bos_last = int(last_row.get("bos", 0))
         choch_last = int(last_row.get("choch", 0))
 
+        # 多周期趋势分离（展示层，不影响回测核心）
+        # 主结构（HTF）：保留原始 swing_major 判定
+        trend_major = trend
+        # 短线状态（LTF）：MA5/MA20 排列 + 价格位置
+        ma5 = float(last_row.get("ma5", 0)) if pd.notna(last_row.get("ma5")) else 0
+        if ma5 > ma20 and last_close > ma20:
+            trend_recent = 1
+        elif ma5 < ma20 and last_close < ma20:
+            trend_recent = -1
+        else:
+            trend_recent = 0
+        # 日线前高（分水岭），用于解释
+        major_sh = result[result["swing_major"] == 1]
+        prev_high = round(float(major_sh["high"].max()), 2) if not major_sh.empty else None
+
         # 近期信号统计
         recent_signals = signals[-5:] if len(signals) >= 5 else signals
         recent_bull_bos = sum(1 for s in signals[-10:] if s["type"] == "BOS" and s["direction"] == "bullish")
@@ -3277,12 +4469,20 @@ def get_smc_analysis(code: str):
 
         # 分析建议
         analysis_parts = []
-        if trend > 0:
-            analysis_parts.append("当前处于上升趋势（HH/HL结构）")
-        elif trend < 0:
-            analysis_parts.append("当前处于下降趋势（LH/LL结构）")
+        if trend_major > 0:
+            analysis_parts.append("日线主结构偏多（HH/HL结构）")
+        elif trend_major < 0:
+            htf_text = "，前高 {} 未突破".format(prev_high) if prev_high else ""
+            analysis_parts.append("日线主结构偏空（LH/LL结构）{}".format(htf_text))
         else:
-            analysis_parts.append("趋势不明朗，处于震荡区间")
+            analysis_parts.append("日线主结构不明朗，处于震荡区间")
+
+        if trend_recent > 0:
+            analysis_parts.append("短线 MA5 站上 MA20 且价格站上 MA20，处于反弹/偏多状态")
+        elif trend_recent < 0:
+            analysis_parts.append("短线 MA5 跌破 MA20 且价格跌破 MA20，处于走弱状态")
+        else:
+            analysis_parts.append("短线围绕 MA20 震荡，方向不明")
 
         if ma20 > 0 and ma60 > 0:
             if ma20 > ma60:
@@ -3299,33 +4499,61 @@ def get_smc_analysis(code: str):
                 analysis_parts.append(f"RSI={rsi:.1f}，处于正常区间")
 
         if recent_bull_bos > recent_bear_bos:
-            analysis_parts.append(f"近期多头BOS({recent_bull_bos}次)多于空头BOS({recent_bear_bos}次)，结构偏多")
+            analysis_parts.append(f"近期多头BOS({recent_bull_bos}次)多于空头BOS({recent_bear_bos}次)，短线多头信号活跃")
         elif recent_bear_bos > recent_bull_bos:
-            analysis_parts.append(f"近期空头BOS({recent_bear_bos}次)多于多头BOS({recent_bull_bos}次)，结构偏空")
+            analysis_parts.append(f"近期空头BOS({recent_bear_bos}次)多于多头BOS({recent_bull_bos}次)，短线空头信号活跃")
 
         if fvg_zones:
             last_fvg = fvg_zones[-1]
-            if last_fvg["type"] == "bullish" and last_close >= last_fvg["bottom"]:
-                analysis_parts.append(f"价格在看涨FVG区间内({last_fvg['bottom']:.2f}-{last_fvg['top']:.2f})，存在支撑")
-            elif last_fvg["type"] == "bearish" and last_close <= last_fvg["top"]:
-                analysis_parts.append(f"价格在看跌FVG区间内({last_fvg['bottom']:.2f}-{last_fvg['top']:.2f})，存在压力")
+            fvg_bottom = last_fvg["bottom"]
+            fvg_top = last_fvg["top"]
+            if last_fvg["type"] == "bullish":
+                if fvg_bottom <= last_close <= fvg_top:
+                    analysis_parts.append(f"价格在看涨FVG区间内({fvg_bottom:.2f}-{fvg_top:.2f})，存在支撑")
+                elif last_close > fvg_top:
+                    analysis_parts.append(f"价格已突破看涨FVG上沿({fvg_top:.2f})，脱离支撑区，注意回踩")
+                else:
+                    analysis_parts.append(f"价格跌破看涨FVG({fvg_bottom:.2f}-{fvg_top:.2f})，支撑失效")
+            elif last_fvg["type"] == "bearish":
+                if fvg_bottom <= last_close <= fvg_top:
+                    analysis_parts.append(f"价格在看跌FVG区间内({fvg_bottom:.2f}-{fvg_top:.2f})，存在压力")
+                elif last_close > fvg_top:
+                    analysis_parts.append(f"价格突破看跌FVG上沿({fvg_top:.2f})，压力失效")
+                else:
+                    analysis_parts.append(f"价格位于看跌FVG下方({fvg_bottom:.2f}-{fvg_top:.2f})，远离压力区")
 
         if ob_zones:
             last_ob = ob_zones[-1]
             if last_close >= last_ob["bottom"] and last_close <= last_ob["top"]:
                 analysis_parts.append(f"价格在订单块(OB)区间内({last_ob['bottom']:.2f}-{last_ob['top']:.2f})，机构关注区域")
+            elif last_close < last_ob["bottom"]:
+                analysis_parts.append(f"价格跌破订单块下沿({last_ob['bottom']:.2f})，OB支撑失效")
+            else:
+                analysis_parts.append(f"价格位于订单块上方，原压力区({last_ob['bottom']:.2f}-{last_ob['top']:.2f})已转为潜在支撑")
 
-        # 综合建议
-        if trend > 0 and ma20 > ma60 and rsi < 55 and recent_bull_bos > 0:
-            suggestion = "结构偏多，可关注做多机会，注意FVG/OB支撑位入场"
-        elif trend < 0 or ma20 < ma60:
-            suggestion = "结构偏空，建议观望等待趋势反转信号"
+        # 综合建议：主结构 + 短线状态 + 共振
+        if trend_recent > 0 and trend_major > 0:
+            suggestion = "主结构与短线共振偏多，关注回踩 MA20 或 OB/FVG 支撑的做多机会"
+        elif trend_recent > 0 and trend_major < 0:
+            prev_hint = "，突破前高 {} 再看趋势反转".format(prev_high) if prev_high else ""
+            suggestion = "日线主结构偏空，但短线已站上 MA20 反弹；可依托 MA20 低吸/做 T{}".format(prev_hint)
+        elif trend_recent > 0 and trend_major == 0:
+            suggestion = "短线偏多反弹，但日线主结构尚未明朗，轻仓参与或观望"
+        elif trend_recent < 0 and trend_major > 0:
+            suggestion = "主结构偏多但短线走弱，等待回调至 MA20 或 OB/FVG 支撑企稳"
+        elif trend_recent < 0 and trend_major < 0:
+            if recent_bull_bos > recent_bear_bos:
+                suggestion = "主结构与短线共振偏空，但近期有短线 BOS 异动，暂观望"
+            else:
+                suggestion = "主结构与短线共振偏空，观望为主，等待止跌信号"
+        elif trend_recent < 0 and trend_major == 0:
+            suggestion = "短线走弱，主结构不明朗，观望等待方向选择"
         elif rsi > 70:
-            suggestion = "RSI超买，短期注意回调风险"
+            suggestion = "RSI 超买，短线注意回调风险"
         elif rsi < 30:
-            suggestion = "RSI超卖，可能存在反弹机会，但需等待结构确认"
+            suggestion = "RSI 超卖，可能存在反弹机会，但需等待结构确认"
         else:
-            suggestion = "趋势不明，建议观望等待方向明确"
+            suggestion = "短线方向不明，建议观望等待方向选择"
 
         return _ok(
             klines=klines,
@@ -3337,7 +4565,9 @@ def get_smc_analysis(code: str):
             analysis={
                 "date": last_date,
                 "price": last_close,
-                "trend": trend,
+                "trend": trend_recent,
+                "trend_major": trend_major,
+                "prev_high": prev_high,
                 "ma20": round(ma20, 2),
                 "ma60": round(ma60, 2),
                 "rsi": round(rsi, 1),
@@ -3381,3 +4611,4 @@ def register_trading_tools_routes(app, require_auth=None):
                 route.dependencies = dependencies
 
     app.include_router(router)
+ 

@@ -8,6 +8,7 @@ import { getChartTheme } from "@/lib/chart-theme";
 import { abbreviateNum } from "@/lib/formatters";
 import { echarts, CHART_GROUP, connectCharts } from "@/lib/echarts";
 import { useDarkMode } from "@/hooks/useDarkMode";
+import { ChartDrawingToolbar, useDrawing } from "./ChartDrawing";
 
 type Sub = "vol" | "macd" | "rsi" | "kdj";
 type Range = "1M" | "3M" | "6M" | "1Y" | "ALL";
@@ -40,7 +41,27 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
   const [range, setRange] = useState<Range>("ALL");
   const [overlays, setOverlays] = useState<Set<Overlay>>(new Set(["ma5", "ma20"]));
   const [showMenu, setShowMenu] = useState(false);
+  const { tool, drawings, setTool, addHLine, addVLine, clearAll } = useDrawing();
   const { dark } = useDarkMode();
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || tool === "none") return;
+    const onClick = (params: any) => {
+      if (tool === "hline" && params.value != null) {
+        addHLine(params.value);
+        setTool("none");
+      } else if (tool === "vline" && params.dataIndex != null) {
+        addVLine(params.dataIndex);
+        setTool("none");
+      } else if (tool === "erase") {
+        clearAll();
+        setTool("none");
+      }
+    };
+    chart.on("click", onClick);
+    return () => { chart.off("click", onClick); };
+  }, [tool, addHLine, addVLine, clearAll, setTool]);
 
   const toggleOverlay = useCallback((id: Overlay) => {
     setOverlays(prev => {
@@ -251,9 +272,24 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
         ...overlaySeries,
         ...extraSeries,
         ...subSeries,
+        ...(drawings.length > 0 ? [{
+          name: "drawings", type: "line" as const, data: [], xAxisIndex: 0, yAxisIndex: 0,
+          z: 100, symbol: "none", lineStyle: { width: 2 },
+          markLine: {
+            silent: true,
+            symbol: "none",
+            lineStyle: { color: "#ef4444", width: 2, type: "dashed" },
+            label: { show: true, formatter: (p: any) => p.data?.label || "", fontSize: 10, color: "#ef4444" },
+            data: drawings.map((d: any) => {
+              if (d.type === "hline") return { yAxis: d.yValue, label: { formatter: d.label } };
+              if (d.type === "vline") return { xAxis: d.xIndex, label: { formatter: d.label } };
+              return { coord: [d.coords[0][0], d.coords[0][1]], coord2: [d.coords[1][0], d.coords[1][1]], label: { formatter: d.label } };
+            }),
+          },
+        }] : []),
       ],
     }, true);
-  }, [data, markers, baseData, indicatorCache, extraIndicators, sub, range, overlays, dark]);
+  }, [data, markers, baseData, indicatorCache, extraIndicators, sub, range, overlays, dark, drawings]);
 
   if (data.length === 0) {
     return <div className="text-muted-foreground text-sm p-4">{i18n.t("charts.noPriceData")}</div>;
@@ -262,6 +298,16 @@ export function CandlestickChart({ data, markers, indicators, height = 500 }: Pr
   return (
     <div>
       <div className="flex items-center gap-2 mb-1 flex-wrap">
+        {/* Drawing tools */}
+        <ChartDrawingToolbar
+          tool={tool}
+          onSetTool={(t) => { setTool(t); }}
+          drawingsCount={drawings.length}
+          onClear={clearAll}
+        />
+
+        <div className="w-px h-3 bg-border/40" />
+
         {/* Time range */}
         <div className="flex gap-0.5">
           {(["1M", "3M", "6M", "1Y", "ALL"] as const).map((r) => (

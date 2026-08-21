@@ -4394,6 +4394,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     serve_parser.add_argument("--port", type=int, default=8000, help="Listen port")
     serve_parser.add_argument("--dev", action="store_true", help="Start the Vite dev server")
+    serve_parser.add_argument("--reload", action="store_true", help="Hot reload on code changes")
 
     provider_parser = subparsers.add_parser("provider", help="Manage OAuth providers")
     provider_subparsers = provider_parser.add_subparsers(dest="provider_command")
@@ -5279,7 +5280,7 @@ def cmd_dev(
         )
         return EXIT_USAGE_ERROR
 
-    backend_cmd = [sys.executable, "-m", "cli._legacy", "serve", "--port", str(backend_port)]
+    backend_cmd = [sys.executable, "-m", "cli._legacy", "serve", "--port", str(backend_port), "--reload"]
     # On Windows, ``npm`` is typically ``npm.cmd``. ``subprocess.Popen`` does
     # not consult ``PATHEXT`` for bare command names, so the call would fail
     # with ``FileNotFoundError`` even though ``shutil.which("npm")`` returned

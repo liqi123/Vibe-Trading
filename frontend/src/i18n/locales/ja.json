@@ -822,6 +822,8 @@
     "thEPrice": "E Price",
     "thXPrice": "X Price",
     "thRunawayPrice": "Runaway Price",
+    "thSupport": "Support",
+    "thResistance": "Resistance",
     "thSuggestion": "Suggestion",
     "thAction": "Action",
     "suggestionNone": "--",
@@ -832,6 +834,7 @@
     "save": "Save",
     "cancel": "Cancel",
     "edit": "Edit",
+    "editName": "Double-click to edit name",
     "delete": "Delete",
     "addStockTitle": "Add Stock",
     "searchPlaceholder": "Search by code or name..."

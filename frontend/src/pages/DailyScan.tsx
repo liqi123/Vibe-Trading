@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Search, RefreshCw, TrendingUp, Download, CandlestickChart as CandleIcon, X } from "lucide-react";
+import { Search, RefreshCw, TrendingUp, Download, BarChart3, CandlestickChart as CandleIcon, X } from "lucide-react";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
 import { SMCChart } from "@/components/charts/SMCChart";
 import { api } from "@/lib/api";
@@ -874,7 +874,7 @@ export function DailyScan() {
       {noCache && !running && !loading && (
         <div className="border rounded-lg p-8 bg-card">
           <h2 className="text-lg font-semibold mb-4 text-center">今日尚无选股结果</h2>
-          <div className="grid gap-3 md:grid-cols-2 max-w-lg mx-auto">
+          <div className="grid gap-3 md:grid-cols-3 max-w-2xl mx-auto">
             <button
               onClick={() => handleRunScan("fibonacci")}
               className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
@@ -895,6 +895,16 @@ export function DailyScan() {
                 <p className="text-xs text-muted-foreground">约需1-2分钟</p>
               </div>
             </button>
+            <button
+              onClick={() => handleRunScan("ict")}
+              className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
+            >
+              <BarChart3 className="h-5 w-5 text-primary" />
+              <div>
+                <p className="font-medium">ICT/SMC选股</p>
+                <p className="text-xs text-muted-foreground">约需4-5分钟</p>
+              </div>
+            </button>
           </div>
         </div>
       )}
@@ -904,7 +914,7 @@ export function DailyScan() {
           <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2">
             <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full" />
             <span className="font-semibold text-sm">
-              {running === "fibonacci" ? "斐波那契" : "V5趋势"}选股执行中...
+              {running === "fibonacci" ? "斐波那契" : running === "ict" ? "ICT/SMC" : "V5趋势"}选股执行中...
             </span>
           </div>
           <pre className="p-4 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-[400px] text-muted-foreground">
