@@ -826,6 +826,11 @@
     "thResistance": "压力",
     "thSuggestion": "建议",
     "thAction": "操作",
+    "thAuctionChange": "竞价涨幅",
+    "thAuctionVol": "竞价量",
+    "thAuctionRatio": "竞价量比",
+    "thIndustry": "同花顺行业",
+    "thConcept": "同花顺概念",
     "suggestionNone": "--",
     "suggestionBuy": "买入",
     "suggestionConsiderSell": "考虑卖出",
@@ -837,6 +842,10 @@
     "editName": "双击编辑名称",
     "delete": "删除",
     "addStockTitle": "添加股票",
-    "searchPlaceholder": "按代码或名称搜索..."
+    "searchPlaceholder": "按代码或名称搜索...",
+    "observationTitle": "观察股",
+    "holdingTitle": "持仓股",
+    "observationEmpty": "暂无观察股，点击右侧 + 添加",
+    "holdingEmpty": "暂无持仓股，点击右侧 + 添加"
   }
 }

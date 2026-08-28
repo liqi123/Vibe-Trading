@@ -11,50 +11,40 @@ interface WatchlistItem {
   name: string;
   price: number;
   change_pct: number;
-  e_price: number;
-  x_price: number;
-  runaway_price: number;
+  cost_price?: number;
+  ma5?: number;
+  ma10?: number;
+  ma20?: number;
   support?: number;
   resistance?: number;
   note?: string;
   category?: string;
+  // 观察股专用：竞价 + 同花顺行业
+  auction_price?: number;
+  prev_close?: number;
+  today_vol?: number;
+  prev_vol?: number;
+  industry?: string;
+  concepts?: string[];
+  auction_change_pct?: number;
+  auction_vol_ratio?: number | null;
 }
 
 
 
-  const getSuggestionKey = (price: number, e: number, x: number, run: number): { textKey: string; color: string } => {
-    if (!price || !e) return { textKey: "suggestionNone", color: "text-muted-foreground" };
-    if (price < e) return { textKey: "suggestionBuy", color: "text-green-600 font-bold" };
-    if (x && price >= x && (!run || price < run)) return { textKey: "suggestionConsiderSell", color: "text-orange-600 font-bold" };
-    if (run && price >= run) return { textKey: "suggestionSell", color: "text-red-600 font-bold" };
-    return { textKey: "suggestionHold", color: "text-blue-600" };
-  };
 
-// 接近预警: 现价距关键位 ≤1% 触发高亮
-const isNearLevel = (price: number, level?: number): boolean => {
-  if (!price || !level || level <= 0) return false;
-  return Math.abs(price - level) / level <= 0.01;
-};
-
-const supportCellClass = (price: number, support?: number): string =>
-  isNearLevel(price, support)
-    ? "text-green-700 font-bold bg-green-100/60 dark:bg-green-900/30"
-    : "text-green-700";
-
-const resistanceCellClass = (price: number, resistance?: number): string =>
-  isNearLevel(price, resistance)
-    ? "text-red-700 font-bold bg-red-100/60 dark:bg-red-900/30"
-    : "text-red-700";
 
 interface PositionData {
   code: string;
   name?: string;
-  e_price?: number;
-  x_price?: number;
-  runaway_price?: number;
+  cost_price?: number;
+  ma5?: number;
+  ma10?: number;
+  ma20?: number;
   support?: number;
   resistance?: number;
   note?: string;
+  category?: string;
 }
 
 export function Watchlist() {
@@ -64,7 +54,7 @@ export function Watchlist() {
   const [newCode, setNewCode] = useState("");
   const [searchResults, setSearchResults] = useState<{code: string; name: string}[]>([]);
   const [editingCode, setEditingCode] = useState<string | null>(null);
-  const [editValues, setEditValues] = useState({ e_price: "", x_price: "", runaway_price: "" });
+  const [editValues, setEditValues] = useState({ cost_price: "" });
   const [editingNoteCode, setEditingNoteCode] = useState<string | null>(null);
   const [editNote, setEditNote] = useState("");
   const openStock = useModalStore((s) => s.open);
@@ -109,7 +99,7 @@ export function Watchlist() {
       if (positions.length > 0) {
         const codes = positions.map((p: PositionData) => p.code).join(",");
         const priceData = await api.tools.get<any>(`/prices?codes=${codes}`);
-        const enriched = positions.map((p: PositionData) => {
+        let enriched: WatchlistItem[] = positions.map((p: PositionData) => {
           const priceInfo = priceData.prices?.[p.code]
             || priceData.prices?.[p.code.startsWith("6") ? "sh" + p.code : "sz" + p.code]
             || {};
@@ -118,15 +108,47 @@ export function Watchlist() {
             name: p.name || priceInfo.name || "",
             price: priceInfo.price || 0,
             change_pct: priceInfo.change_pct || 0,
-            e_price: p.e_price || 0,
-            x_price: p.x_price || 0,
-            runaway_price: p.runaway_price || 0,
+            cost_price: p.cost_price || 0,
+            ma5: p.ma5,
+            ma10: p.ma10,
+            ma20: p.ma20,
             support: p.support,
             resistance: p.resistance,
             note: p.note || "",
             category: p.category || "holding",
           };
         });
+        // 观察股：补充竞价数据 + 同花顺行业
+        const obsCodes = enriched.filter((i) => i.category === "observation").map((i) => i.code);
+        if (obsCodes.length > 0) {
+          try {
+            const aData = await api.tools.get<any>(`/watchlist-auction?codes=${obsCodes.join(",")}`);
+            const a = aData.auction || {};
+            enriched = enriched.map((it: WatchlistItem) => {
+              if (it.category !== "observation") return it;
+              const av = a[it.code] || {};
+              const auctionPrice = av.auction_price || 0;
+              const prevClose = av.prev_close || 0;
+              const todayVol = Math.round(av.today_vol || 0);
+              const prevVol = Math.round(av.prev_vol || 0);
+              const chg = auctionPrice > 0 && prevClose > 0
+                ? (auctionPrice - prevClose) / prevClose * 100
+                : 0;
+              const ratio = prevVol > 0 ? todayVol / prevVol : null;
+              return {
+                ...it,
+                auction_price: auctionPrice,
+                prev_close: prevClose,
+                today_vol: todayVol,
+                prev_vol: prevVol,
+                industry: av.industry || "",
+                concepts: av.concepts || [],
+                auction_change_pct: chg,
+                auction_vol_ratio: ratio,
+              };
+            });
+          } catch (e) { /* ignore */ }
+        }
         setItems(enriched);
       } else {
         setItems([]);
@@ -184,24 +206,20 @@ export function Watchlist() {
   const startEdit = (item: WatchlistItem) => {
     setEditingCode(item.code);
     setEditValues({
-      e_price: item.e_price ? String(item.e_price) : "",
-      x_price: item.x_price ? String(item.x_price) : "",
-      runaway_price: item.runaway_price ? String(item.runaway_price) : "",
+      cost_price: item.cost_price ? String(item.cost_price) : "",
     });
   };
 
   const cancelEdit = () => {
     setEditingCode(null);
-    setEditValues({ e_price: "", x_price: "", runaway_price: "" });
+    setEditValues({ cost_price: "" });
   };
 
   const saveEdit = async (code: string) => {
     try {
       await api.tools.post<any>("/expectations/update-prices", {
         code,
-        e_price: parseFloat(editValues.e_price) || 0,
-        x_price: parseFloat(editValues.x_price) || 0,
-        runaway_price: parseFloat(editValues.runaway_price) || 0,
+        cost_price: parseFloat(editValues.cost_price) || 0,
       });
       setEditingCode(null);
       fetchData();
@@ -273,12 +291,11 @@ export function Watchlist() {
                 <th className="px-4 py-3 text-left font-medium">{t("watchlist.thName")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
-                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thEPrice")}</th>
-                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thXPrice")}</th>
-                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thRunawayPrice")}</th>
-                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thSupport")}</th>
-                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thResistance")}</th>
-                <th className="px-4 py-3 text-center font-medium">{t("watchlist.thSuggestion")}</th>
+                <th className="px-4 py-3 text-right font-medium">成本价</th>
+                <th className="px-4 py-3 text-right font-medium">盈亏</th>
+                <th className="px-4 py-3 text-right font-medium">MA5</th>
+                <th className="px-4 py-3 text-right font-medium">MA10</th>
+                <th className="px-4 py-3 text-right font-medium">MA20</th>
                 <th className="px-4 py-3 text-left font-medium">备注</th>
                 <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
               </tr>
@@ -286,7 +303,9 @@ export function Watchlist() {
             <tbody>
               {rows.map((item) => {
                 const isEditing = editingCode === item.code;
-                const sug = getSuggestionKey(item.price, item.e_price, item.x_price, item.runaway_price);
+                const pnlPct = item.cost_price && item.cost_price > 0 && item.price > 0
+                  ? ((item.price - item.cost_price) / item.cost_price * 100)
+                  : null;
                 return (
                   <tr key={item.code} className="border-t hover:bg-muted/30 transition-colors">
                     <td className="px-4 py-3 font-mono cursor-pointer hover:text-primary" onClick={() => openStock(item.code)}>{item.code}</td>
@@ -302,55 +321,20 @@ export function Watchlist() {
                         <input
                           type="number"
                           step="0.01"
-                          value={editValues.e_price}
-                          onChange={(e) => setEditValues({ ...editValues, e_price: e.target.value })}
+                          value={editValues.cost_price}
+                          onChange={(e) => setEditValues({ ...editValues, cost_price: e.target.value })}
                           className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
                         />
                       ) : (
-                        <span className="font-mono text-primary">{item.e_price ? item.e_price.toFixed(2) : "-"}</span>
+                        <span className="font-mono">{item.cost_price ? item.cost_price.toFixed(2) : "-"}</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      {isEditing ? (
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={editValues.x_price}
-                          onChange={(e) => setEditValues({ ...editValues, x_price: e.target.value })}
-                          className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
-                        />
-                      ) : (
-                        <span className="font-mono text-green-600">{item.x_price ? item.x_price.toFixed(2) : "-"}</span>
-                      )}
+                    <td className={`px-4 py-3 text-right font-medium ${pnlPct == null ? "text-muted-foreground" : pnlPct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "-"}
                     </td>
-                    <td className="px-4 py-3 text-right">
-                      {isEditing ? (
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={editValues.runaway_price}
-                          onChange={(e) => setEditValues({ ...editValues, runaway_price: e.target.value })}
-                          className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
-                        />
-                      ) : (
-                        <span className="font-mono text-orange-600">{item.runaway_price ? item.runaway_price.toFixed(2) : "-"}</span>
-                      )}
-                    </td>
-                    <td className={`px-4 py-3 text-right font-mono ${supportCellClass(item.price, item.support)}`}>
-                      {item.support ? item.support.toFixed(2) : "-"}
-                    </td>
-                    <td className={`px-4 py-3 text-right font-mono ${resistanceCellClass(item.price, item.resistance)}`}>
-                      {item.resistance ? item.resistance.toFixed(2) : "-"}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={`text-xs ${sug.color}`}>
-                        {sug.textKey === "suggestionNone" ? t("watchlist.suggestionNone") :
-                         sug.textKey === "suggestionBuy" ? t("watchlist.suggestionBuy") :
-                         sug.textKey === "suggestionConsiderSell" ? t("watchlist.suggestionConsiderSell") :
-                         sug.textKey === "suggestionSell" ? t("watchlist.suggestionSell") :
-                         t("watchlist.suggestionHold")}
-                      </span>
-                    </td>
+                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma5?.toFixed(2) ?? "-"}</td>
+                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma10?.toFixed(2) ?? "-"}</td>
+                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma20?.toFixed(2) ?? "-"}</td>
                     <td className="px-4 py-3 text-left">
                       {editingNoteCode === item.code ? (
                         <input
@@ -444,6 +428,139 @@ export function Watchlist() {
     </div>
   );
 
+  const renderObservationTable = (title: string, rows: WatchlistItem[]) => (
+    <div className="border rounded-lg bg-card overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/30">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <span className="text-xs text-muted-foreground">({rows.length})</span>
+        </div>
+        <button
+          onClick={() => handleAdd("observation")}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+          {t("watchlist.add")}
+        </button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="p-8 text-center text-muted-foreground">
+          {t("watchlist.observationEmpty")}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/40 text-xs text-muted-foreground">
+              <tr>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thCode")}</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thName")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionChange")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionVol")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionRatio")}</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thIndustry")}</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thConcept")}</th>
+                <th className="px-4 py-3 text-left font-medium">备注</th>
+                <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((item) => {
+                const aucChg = item.auction_change_pct || 0;
+                return (
+                  <tr key={item.code} className="border-t hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3 font-mono cursor-pointer hover:text-primary" onClick={() => openStock(item.code)}>{item.code}</td>
+                    <td className="px-4 py-3">{item.name}</td>
+                    <td className={`px-4 py-3 text-right font-medium ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.price.toFixed(2)}
+                    </td>
+                    <td className={`px-4 py-3 text-right ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.change_pct >= 0 ? "+" : ""}{item.change_pct.toFixed(2)}%
+                    </td>
+                    <td className={`px-4 py-3 text-right font-medium ${aucChg >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.auction_change_pct ? (aucChg >= 0 ? "+" : "") + aucChg.toFixed(2) + "%" : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {item.today_vol ? item.today_vol.toLocaleString() : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {item.auction_vol_ratio != null ? item.auction_vol_ratio.toFixed(2) : "-"}
+                    </td>
+                    <td className="px-4 py-3">{item.industry || "-"}</td>
+                    <td className="px-4 py-3 max-w-[280px]">
+                      {item.concepts && item.concepts.length > 0 ? (
+                        <span
+                          className="text-xs text-foreground/80 leading-relaxed"
+                          title={item.concepts.join("、")}
+                        >
+                          {item.concepts.slice(0, 4).join("、")}
+                          {item.concepts.length > 4 ? ` +${item.concepts.length - 4}` : ""}
+                        </span>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-left">
+                      {editingNoteCode === item.code ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={editNote}
+                          onChange={(e) => setEditNote(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveNote(item.code);
+                            if (e.key === "Escape") cancelEditNote();
+                          }}
+                          onBlur={() => saveNote(item.code)}
+                          className="w-48 px-2 py-1 text-sm border rounded bg-background"
+                          placeholder="输入备注"
+                        />
+                      ) : (
+                        <span
+                          className={`cursor-pointer ${item.note ? "" : "text-muted-foreground"}`}
+                          onClick={() => startEditNote(item)}
+                          title="点击编辑备注"
+                        >
+                          {item.note || "添加备注"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => openSMC(item.code, item.name)}
+                          className="p-1 text-muted-foreground hover:text-purple-600 rounded transition-colors"
+                          title="SMC结构图"
+                        >
+                          <CandleIcon className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => openCzsc(item.code, item.name)}
+                          className="p-1 text-muted-foreground hover:text-indigo-600 rounded transition-colors"
+                          title="缠论结构图（笔/中枢/买卖点）"
+                        >
+                          <NetworkIcon className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => removeStock(item.code)}
+                          className="p-1 text-muted-foreground hover:text-red-600 rounded transition-colors"
+                          title={t("watchlist.delete")}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -470,189 +587,8 @@ export function Watchlist() {
         </div>
       </div>
 
-      <div className="border rounded-lg bg-card overflow-hidden">
-        {items.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">
-            {t("watchlist.emptyHint")}
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-3 text-left font-medium">{t("watchlist.thCode")}</th>
-                  <th className="px-4 py-3 text-left font-medium">{t("watchlist.thName")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thEPrice")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thXPrice")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thRunawayPrice")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thSupport")}</th>
-                  <th className="px-4 py-3 text-right font-medium">{t("watchlist.thResistance")}</th>
-                  <th className="px-4 py-3 text-center font-medium">{t("watchlist.thSuggestion")}</th>
-                  <th className="px-4 py-3 text-left font-medium">备注</th>
-                  <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((item) => {
-                  const isEditing = editingCode === item.code;
-                  const sug = getSuggestionKey(item.price, item.e_price, item.x_price, item.runaway_price);
-                  return (
-                    <tr key={item.code} className="border-t hover:bg-muted/30 transition-colors">
-                      <td className="px-4 py-3 font-mono cursor-pointer hover:text-primary" onClick={() => openStock(item.code)}>{item.code}</td>
-                      <td className="px-4 py-3">{item.name}</td>
-                      <td className={`px-4 py-3 text-right font-medium ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
-                        {item.price.toFixed(2)}
-                      </td>
-                      <td className={`px-4 py-3 text-right ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
-                        {item.change_pct >= 0 ? "+" : ""}{item.change_pct.toFixed(2)}%
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {isEditing ? (
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={editValues.e_price}
-                            onChange={(e) => setEditValues({ ...editValues, e_price: e.target.value })}
-                            className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
-                          />
-                        ) : (
-                          <span className="font-mono text-primary">{item.e_price ? item.e_price.toFixed(2) : "-"}</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {isEditing ? (
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={editValues.x_price}
-                            onChange={(e) => setEditValues({ ...editValues, x_price: e.target.value })}
-                            className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
-                          />
-                        ) : (
-                          <span className="font-mono text-green-600">{item.x_price ? item.x_price.toFixed(2) : "-"}</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {isEditing ? (
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={editValues.runaway_price}
-                            onChange={(e) => setEditValues({ ...editValues, runaway_price: e.target.value })}
-                            className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
-                          />
-                        ) : (
-                          <span className="font-mono text-orange-600">{item.runaway_price ? item.runaway_price.toFixed(2) : "-"}</span>
-                        )}
-                      </td>
-                      <td className={`px-4 py-3 text-right font-mono ${supportCellClass(item.price, item.support)}`}>
-                        {item.support ? item.support.toFixed(2) : "-"}
-                      </td>
-                      <td className={`px-4 py-3 text-right font-mono ${resistanceCellClass(item.price, item.resistance)}`}>
-                        {item.resistance ? item.resistance.toFixed(2) : "-"}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <span className={`text-xs ${sug.color}`}>
-                          {sug.textKey === "suggestionNone" ? t("watchlist.suggestionNone") :
-                           sug.textKey === "suggestionBuy" ? t("watchlist.suggestionBuy") :
-                           sug.textKey === "suggestionConsiderSell" ? t("watchlist.suggestionConsiderSell") :
-                           sug.textKey === "suggestionSell" ? t("watchlist.suggestionSell") :
-                           t("watchlist.suggestionHold")}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-left">
-                        {editingNoteCode === item.code ? (
-                          <input
-                            autoFocus
-                            type="text"
-                            value={editNote}
-                            onChange={(e) => setEditNote(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") saveNote(item.code);
-                              if (e.key === "Escape") cancelEditNote();
-                            }}
-                            onBlur={() => saveNote(item.code)}
-                            className="w-48 px-2 py-1 text-sm border rounded bg-background"
-                            placeholder="输入备注"
-                          />
-                        ) : (
-                          <span
-                            className={`cursor-pointer ${item.note ? "" : "text-muted-foreground"}`}
-                            onClick={() => startEditNote(item)}
-                            title="点击编辑备注"
-                          >
-                            {item.note || "添加备注"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        {isEditing ? (
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => saveEdit(item.code)}
-                              className="p-1 text-green-600 hover:bg-green-100 rounded transition-colors"
-                              title={t("watchlist.save")}
-                            >
-                              <Check className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={cancelEdit}
-                              className="p-1 text-muted-foreground hover:bg-muted rounded transition-colors"
-                              title={t("watchlist.cancel")}
-                            >
-                              <X className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-center gap-1">
-                            <button
-                              onClick={() => openSMC(item.code, item.name)}
-                              className="p-1 text-muted-foreground hover:text-purple-600 rounded transition-colors"
-                              title="SMC结构图"
-                            >
-                              <CandleIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => openCzsc(item.code, item.name)}
-                              className="p-1 text-muted-foreground hover:text-indigo-600 rounded transition-colors"
-                              title="缠论结构图（笔/中枢/买卖点）"
-                            >
-                              <NetworkIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => updateSR(item.code)}
-                              className="p-1 text-muted-foreground hover:text-purple-600 rounded transition-colors"
-                              title="计算支撑/压力位写入备注"
-                            >
-                              <CandleIcon className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => startEdit(item)}
-                              className="p-1 text-muted-foreground hover:text-blue-600 rounded transition-colors"
-                              title={t("watchlist.edit")}
-                            >
-                              <Edit2 className="h-4 w-4" />
-                            </button>
-                            <button
-                              onClick={() => removeStock(item.code)}
-                              className="p-1 text-muted-foreground hover:text-red-600 rounded transition-colors"
-                              title={t("watchlist.delete")}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      {renderObservationTable(t("watchlist.observationTitle"), observationItems)}
+      {renderStockTable(t("watchlist.holdingTitle"), "holding", holdingItems)}
 
       {/* 添加自选股弹窗 */}
       {showAddModal && (

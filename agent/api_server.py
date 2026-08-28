@@ -262,6 +262,22 @@ register_vibe_routes(app)
 from src.api.sentiment_routes import register_sentiment_routes  # noqa: E402
 register_sentiment_routes(app)
 
+# --- 竞价情绪四阶段判断（淘股吧「可爱苏酥」方法论） ---
+from src.api.auction_sentiment_routes import register_auction_sentiment_routes  # noqa: E402
+register_auction_sentiment_routes(app)
+
+# --- 短线全流程（盘前→竞价→盘中→持仓→盘后） ---
+from src.api.flow_routes import register_flow_routes  # noqa: E402
+register_flow_routes(app)
+
+# --- 淘股吧关注用户信号监控 ---
+from src.api.tgb_routes import register_tgb_routes  # noqa: E402
+register_tgb_routes(app)
+
+# --- 网页版 LLM 自动化（豆包/DeepSeek/Kimi，Playwright）---
+from src.api.llm_web_routes import register_llm_web_routes  # noqa: E402
+register_llm_web_routes(app)
+
 from src.api.channels_routes import (  # noqa: F401, E402
     ChannelPairingCommandRequest,
 )

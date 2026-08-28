@@ -222,7 +222,7 @@ def _load_industry_map() -> dict:
 
 @router.get("/expectations")
 def get_expectations() -> dict:
-    """Return expectation state for all positions, with live prev_close from DB."""
+    """Return expectation state for all positions, with live prev_close + MA from DB."""
     state = _read_json(_PAPER_DIR / "expectation_state.json")
     positions = state.get("positions", [])
     for p in positions:
@@ -240,7 +240,7 @@ def get_expectations() -> dict:
             code = p["code"]
             bare_code = code[2:] if code.startswith(("sh", "sz")) else code
 
-            # 优先从auction表获取prev_close（更及时）,表不存在则回退daily_kline
+            # 优先从auction表获取prev_close
             try:
                 auction_row = db.execute(
                     "SELECT prev_close FROM auction WHERE code=? ORDER BY date DESC LIMIT 1",
@@ -251,13 +251,28 @@ def get_expectations() -> dict:
             if auction_row and auction_row[0]:
                 p["prev_close"] = auction_row[0]
             else:
-                # 回退到daily_kline表
                 row = db.execute(
                     f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 1",
                     (code,)
                 ).fetchone()
                 if row and row[0]:
                     p["prev_close"] = row[0]
+
+            # MA5 / MA10 / MA20
+            try:
+                ma_rows = db.execute(
+                    f"SELECT close FROM daily_kline WHERE code=? ORDER BY {date_col} DESC LIMIT 20",
+                    (code,)
+                ).fetchall()
+                closes = [r[0] for r in ma_rows if r[0]]
+                if len(closes) >= 5:
+                    p["ma5"] = round(sum(closes[:5]) / 5, 2)
+                if len(closes) >= 10:
+                    p["ma10"] = round(sum(closes[:10]) / 10, 2)
+                if len(closes) >= 20:
+                    p["ma20"] = round(sum(closes[:20]) / 20, 2)
+            except Exception:
+                pass
     finally:
         db.close()
     return state
@@ -377,7 +392,7 @@ def add_expectation(data: dict):
 
 @router.post("/expectations/update-prices")
 def update_expectation_prices(data: dict):
-    """Update E price, X price, runaway price, name, and suggestion for a stock."""
+    """Update cost_price, name, note for a stock."""
     code = data.get("code", "").strip().lower()
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
@@ -387,16 +402,10 @@ def update_expectation_prices(data: dict):
 
     for p in positions:
         if p.get("code") == code:
-            if "e_price" in data:
-                p["e_price"] = data.get("e_price", 0)
-            if "x_price" in data:
-                p["x_price"] = data.get("x_price", 0)
-            if "runaway_price" in data:
-                p["runaway_price"] = data.get("runaway_price", 0)
+            if "cost_price" in data:
+                p["cost_price"] = data.get("cost_price", 0)
             if "name" in data:
                 p["name"] = data.get("name", "")
-            if "suggestion" in data:
-                p["suggestion"] = data.get("suggestion", "")
             if "note" in data:
                 p["note"] = data.get("note", "")
             break
@@ -2383,10 +2392,63 @@ def get_watchlist_auction(codes: str = "") -> dict:
         auction_placeholders = ",".join("?" * len(search_codes))
 
         today_rows = db.execute(
-            f"SELECT code, auction_vol, auction_price FROM auction WHERE date=? AND code IN ({auction_placeholders})",
+            f"SELECT code, auction_vol, auction_price, prev_close FROM auction WHERE date=? AND code IN ({auction_placeholders})",
             [today_date] + search_codes,
         ).fetchall()
-        today_map = {r[0]: {"today_vol": r[1], "auction_price": r[2]} for r in today_rows}
+        today_map = {r[0]: {"today_vol": r[1], "auction_price": r[2], "prev_close": r[3]} for r in today_rows}
+
+        # 同花顺二级行业（stock_ths_industry 使用带前缀代码）
+        def _to_prefixed_ths(c: str) -> str:
+            if c.startswith(("sh", "sz", "bj")):
+                return c
+            if c.startswith("6"):
+                return "sh" + c
+            if c.startswith(("0", "3")):
+                return "sz" + c
+            return "bj" + c
+        ind_search = list(dict.fromkeys([_to_prefixed_ths(c) for c in code_list] + code_list))
+        ip_ph = ",".join("?" * len(ind_search))
+        ind_by_prefixed: dict = {}
+        ind_by_bare: dict = {}
+        try:
+            ind_rows = db.execute(
+                f"SELECT code, industry_l2 FROM stock_ths_industry WHERE code IN ({ip_ph})",
+                ind_search,
+            ).fetchall()
+            for r in ind_rows:
+                if r[1]:
+                    ind_by_prefixed[r[0]] = r[1]
+                    bare = r[0][2:] if r[0].startswith(("sh", "sz", "bj")) else r[0]
+                    ind_by_bare[bare] = r[1]
+        except sqlite3.OperationalError:
+            pass
+
+        # 同花顺概念（concept_count 使用裸 6 位代码，ths_concepts 为 JSON 数组）
+        def _parse_ths_concepts(ths: object) -> list:
+            if not ths:
+                return []
+            if isinstance(ths, (list, tuple)):
+                return [str(x) for x in ths if x]
+            try:
+                obj = json.loads(ths)
+                return [str(x) for x in obj if x] if isinstance(obj, (list, tuple)) else []
+            except Exception:
+                return []
+        concepts_by_bare: dict = {}
+        try:
+            cc_search = list(dict.fromkeys(bare_codes + code_list))
+            cc_ph = ",".join("?" * len(cc_search))
+            cc_rows = db.execute(
+                f"SELECT code, ths_concepts FROM concept_count WHERE code IN ({cc_ph})",
+                cc_search,
+            ).fetchall()
+            for r in cc_rows:
+                if r[1]:
+                    lst = _parse_ths_concepts(r[1])
+                    if lst:
+                        concepts_by_bare[r[0]] = lst
+        except sqlite3.OperationalError:
+            pass
 
         prev_map = {}
         if prev_date:
@@ -2414,12 +2476,19 @@ def get_watchlist_auction(codes: str = "") -> dict:
         result = {}
         for i, code in enumerate(code_list):
             bare = bare_codes[i]
+            pref = _to_prefixed_ths(code)
             t = today_map.get(bare) or today_map.get(code) or {}
+            industry = (ind_by_prefixed.get(code) or ind_by_prefixed.get(pref)
+                        or ind_by_bare.get(bare) or ind_by_bare.get(code) or "")
+            concepts = concepts_by_bare.get(bare) or concepts_by_bare.get(code) or []
             result[code] = {
                 "today_vol": t.get("today_vol", 0),
                 "prev_vol": prev_map.get(bare) or prev_map.get(code) or 0,
                 "auction_price": t.get("auction_price", 0),
                 "prev_volume": prev_vol_map.get(code, 0),
+                "prev_close": t.get("prev_close", 0),
+                "industry": industry,
+                "concepts": concepts,
             }
 
         return {"auction": result}
@@ -3290,6 +3359,32 @@ def get_auction_concept_analysis(date: str = "", source: str = "industry"):
         return {"date": date, "concepts": [], "error": str(e)}
 
 
+@router.get("/auction/sector-strength")
+def get_auction_sector_strength(
+    date: str = "",
+    top_sectors: int = 15,
+    top_stocks: int = 5,
+    source: str = "ths_industry",
+) -> dict:
+    """竞价板块强度：按同花顺行业分组排名，并从最强板块挑可交易最强个股。
+
+    Args:
+        date: 日期 YYYY-MM-DD，默认取最近一个竞价价完整的交易日
+        top_sectors: 返回最强板块数量
+        top_stocks: 每个板块返回的个股数量
+        source: 目前仅 'ths_industry'（同花顺行业）；预留扩展
+    """
+    try:
+        from data.auction_sector_strength import sector_strength
+
+        return sector_strength(
+            date=date, top_sectors=top_sectors, top_stocks=top_stocks, source=source
+        )
+    except Exception as e:
+        _log.warning("[sector-strength] FAILED: %s", e, exc_info=True)
+        return {"date": date, "source": source, "sectors": [], "error": str(e)}
+
+
 @router.get("/auction/gap-up")
 def get_auction_gap_up(
     date: str = "",
@@ -3454,21 +3549,11 @@ def get_auction_gap_up(
                 "gap_break_prev_high": gap_break_prev_high,
             })
 
-        # 给每只股票匹配同花顺行业板块（L2），并按行业板块当日涨幅倒序
+        # 给每只股票匹配同花顺行业板块（L2），按行业竞价平均涨幅倒序
         try:
-            import csv as _csv
-            from pathlib import Path as _Path
-            # 1) 加载同花顺行业列表（L2 名称 -> 881xxx 代码）
-            ths_csv = _Path(__file__).resolve().parents[4] / "data" / "market_sentiment" / "ths_industry_codes.csv"
-            name_to_code: dict[str, str] = {}
-            if ths_csv.exists():
-                with ths_csv.open(encoding="utf-8-sig", newline="") as f:
-                    for row in _csv.DictReader(f):
-                        nm, cd = (row.get("name") or "").strip(), (row.get("code") or "").strip()
-                        if nm and cd:
-                            name_to_code[nm] = cd
+            from collections import defaultdict as _dd
 
-            # 2) 裸代码 -> 带前缀代码（用于 stock_ths_industry 查询）
+            # 1) 裸代码 -> 带前缀代码（用于 stock_ths_industry 查询）
             def _to_prefixed(bare: str) -> str:
                 if bare.startswith(("sh", "sz", "bj")):
                     return bare
@@ -3480,56 +3565,22 @@ def get_auction_gap_up(
 
             prefixed = [_to_prefixed(c) for c in codes]
             placeholders = ",".join("?" * len(prefixed))
-            # 3) 查询每只股票的同花顺行业 L2
+            # 2) 查询每只股票的同花顺行业 L2
             ind_rows = cur.execute(
                 f"SELECT code, industry_l2 FROM stock_ths_industry WHERE code IN ({placeholders})",
                 prefixed,
             ).fetchall()
             code_to_l2 = {r[0]: r[1] for r in ind_rows if r[1]}
 
-            # 4) 查询当日所有 sh881xxx 行业指数的涨跌幅；当日缺失则回退最近交易日
-            today_val = int(date.replace("-", "")) if is_int else date
-            ind_idx_rows = cur.execute(
-                f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
-                (today_val,),
-            ).fetchall()
-            if not ind_idx_rows:
-                fb = cur.execute(
-                    f"SELECT MAX({date_col}) FROM daily_kline WHERE code LIKE 'sh881%'"
-                ).fetchone()
-                if fb and fb[0]:
-                    today_val = fb[0]
-                    ind_idx_rows = cur.execute(
-                        f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
-                        (today_val,),
-                    ).fetchall()
-            today_close = {r[0]: r[1] for r in ind_idx_rows}
-            # 前一交易日
-            prev_td_val = int(prev_date.replace("-", "")) if (prev_date and is_int) else prev_date
-            if not prev_td_val:
-                # 当 prev_date 缺失，回退 today_val 的前一交易日
-                pv = cur.execute(
-                    f"SELECT MAX({date_col}) FROM daily_kline WHERE code LIKE 'sh881%' AND {date_col} < ?",
-                    (today_val,),
-                ).fetchone()
-                if pv and pv[0]:
-                    prev_td_val = pv[0]
-            prev_close = {}
-            if prev_td_val:
-                prev_rows = cur.execute(
-                    f"SELECT code, close FROM daily_kline WHERE {date_col}=? AND code LIKE 'sh881%'",
-                    (prev_td_val,),
-                ).fetchall()
-                prev_close = {r[0]: r[1] for r in prev_rows}
+            # 3) 按行业分组，计算每组竞价平均涨幅
+            ind_stocks: dict[str, list[float]] = _dd(list)
+            for s in stocks:
+                l2 = code_to_l2.get(_to_prefixed(s["code"]))
+                if l2:
+                    ind_stocks[l2].append(s["chg_pct"])
+            industry_chg = {nm: round(sum(vs) / len(vs), 2) for nm, vs in ind_stocks.items() if vs}
 
-            # 5) 行业 L2 名称 -> 当日涨幅
-            industry_chg: dict[str, float] = {}
-            for nm, cd in name_to_code.items():
-                tc, pc = today_close.get(f"sh{cd}"), prev_close.get(f"sh{cd}")
-                if tc and pc and pc > 0:
-                    industry_chg[nm] = round((tc / pc - 1) * 100, 2)
-
-            # 6) 给每只股票挂 top_industry / top_industry_chg
+            # 4) 给每只股票挂 top_industry / top_industry_chg
             for s in stocks:
                 l2 = code_to_l2.get(_to_prefixed(s["code"]))
                 s["top_industry"] = l2
@@ -3550,7 +3601,9 @@ def get_auction_gap_up(
 def auction_ai_analysis(data: dict) -> dict:
     """AI 竞价分析：汇总当日竞价数据，调用 LLM 生成分析报告。
 
-    Body: { "date": "YYYY-MM-DD", "concept_source": "industry|concept" }
+    Body: { "date": "YYYY-MM-DD", "concept_source": "industry|concept",
+            "web_answers": [{target,label,answer}...] }
+    web_answers 非空时，把已收到的豆包/DeepSeek 多源回答交给项目 LLM 交叉验证并追加最终结论。
     """
     date_str = data.get("date", "")
     source = data.get("concept_source", "industry")
@@ -3808,6 +3861,38 @@ def auction_ai_analysis(data: dict) -> dict:
             "注意：只做客观数据分析与多视角推演，不保证结果，不构成投资建议。"
         )
         report = call_llm(prompt, model="mimo-v2.5-pro", system_prompt=auction_system)
+
+        # 3) 多源综合：把已收到的豆包/DeepSeek 回答交给项目 LLM 交叉验证，输出最终结论
+        web_answers = data.get("web_answers") or []
+        blocks = []
+        if web_answers:
+            for w in web_answers:
+                if not isinstance(w, dict):
+                    continue
+                label = (w.get("label") or w.get("target") or "AI")
+                ans = (w.get("answer") or "").strip()
+                if ans:
+                    blocks.append(f"### {label} 的回答\n{ans[:2000]}")
+        if blocks:
+            try:
+                synth_sys = (
+                    "你是 A 股短线竞价多源分析师。你的任务：综合豆包与 DeepSeek 两个 AI 模型对同一份竞价数据的分析回答，"
+                    "结合下方本地竞价数据摘要交叉验证，给出最终判断。\n"
+                    "要求：\n"
+                    "1. 观点对比：提炼各家核心判断，指出方向一致处与分歧点\n"
+                    "2. 数据验证：哪些观点与本地数据（板块强度/涨停数/量能/竞价涨幅）吻合，哪些缺乏支持\n"
+                    "3. 结论明确：给出今日资金主攻方向、重点板块与个股、风险点、建议动作，拒绝和稀泥\n"
+                    "只基于给定材料，禁止编造数字。"
+                )
+                synth_prompt = (
+                    f"### 本地竞价数据摘要\n{summary[:4000]}\n\n"
+                    + "\n\n".join(blocks)
+                    + "\n\n请按上述要求输出多源综合分析结论（含最终操作建议）。"
+                )
+                synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys)
+                report = f"{report}\n\n---\n\n## 📊 多源 LLM 综合结论（豆包 + DeepSeek）\n\n{synthesis}"
+            except Exception as exc:
+                _log.warning("auction AI: multi-source synthesis failed: %s", str(exc)[:200])
         return {"report": report, "date": date_str, "summary": summary}
     except Exception as e:
         detail = str(e)

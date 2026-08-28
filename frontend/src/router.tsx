@@ -64,6 +64,15 @@ const VibeReview = lazy(() =>
 const SentimentIndex = lazy(() =>
   import("@/pages/tools/SentimentIndex").then((m) => ({ default: m.SentimentIndex })),
 );
+const AuctionSentiment = lazy(() =>
+  import("@/pages/tools/AuctionSentiment").then((m) => ({ default: m.AuctionSentiment })),
+);
+const TgbSignals = lazy(() =>
+  import("@/pages/tools/TgbSignals").then((m) => ({ default: m.TgbSignals })),
+);
+const ShortTermFlow = lazy(() =>
+  import("@/pages/tools/ShortTermFlow").then((m) => ({ default: m.ShortTermFlow })),
+);
 const ScheduledTasks = lazy(() =>
   import("@/pages/ScheduledTasks").then((m) => ({ default: m.ScheduledTasks })),
 );
@@ -129,6 +138,9 @@ export const router = createBrowserRouter([
       { path: "/sentiment-index", element: wrap(SentimentIndex) },
       { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
       { path: "/auction-board", element: wrap(AuctionBoard) },
+      { path: "/auction-sentiment", element: wrap(AuctionSentiment) },
+      { path: "/short-term-flow", element: wrap(ShortTermFlow) },
+      { path: "/tgb-signals", element: wrap(TgbSignals) },
       { path: "/stock-analysis", element: wrap(StockAnalysis) },
       { path: "/czsc-analysis", element: wrap(CzscAnalysis) },
       { path: "/market-ladder", element: wrap(MarketLadder) },

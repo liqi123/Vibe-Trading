@@ -1,7 +1,21 @@
 import { Link } from "react-router-dom";
-import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network } from "lucide-react";
+import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network, Crosshair, Eye } from "lucide-react";
 
 const TOOLS = [
+  {
+    to: "/short-term-flow",
+    icon: Crosshair,
+    title: "短线全流程",
+    desc: "盘前→竞价→盘中→持仓→盘后 贯穿一天：竞价情绪四阶段、持仓止盈止损企业微信告警、复盘闭环",
+    color: "text-violet-500",
+  },
+  {
+    to: "/tgb-signals",
+    icon: Eye,
+    title: "淘股吧信号监控",
+    desc: "关注用户动态轮询，提取买卖/持有/计划信号与仓位限定词，空仓口径对账",
+    color: "text-orange-500",
+  },
   {
     to: "/auction-board",
     icon: BarChart3,
