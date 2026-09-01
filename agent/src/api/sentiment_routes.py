@@ -68,9 +68,21 @@ def sentiment_series(start: str = "", end: str = ""):
     from analysis.market_sentiment.core import latest_indicator_table
     from analysis.market_sentiment.explanation import generate_explanation
 
+    today = datetime.now().date()
+    from data.trading_calendar import is_trading_day, prev_trading_day
+    last_td = today if is_trading_day(today) else prev_trading_day(today)
+    latest_str = str(latest["date"])
+    expected_str = last_td.strftime("%Y%m%d") if last_td else ""
+    freshness = {
+        "latest_date": latest_str,
+        "last_trade_day": expected_str,
+        "is_current": bool(expected_str) and latest_str == expected_str,
+    }
+
     latest_row_data = df.iloc[-1]
     return {
         "latest": latest,
+        "freshness": freshness,
         "components": [{"key": k, "label": v} for k, v in _COMPONENT_LABELS],
         "indexes": [
             {"key": k, "label": label}

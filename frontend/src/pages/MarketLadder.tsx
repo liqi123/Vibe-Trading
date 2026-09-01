@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 interface LadderStock {
   code: string; name: string; price: number; chg_pct: number;
   board: number; amount: number; volume: number; concepts: string[];
+  first_seal_time?: string; seal_amount?: number; open_times?: number;
 }
 
 interface LadderStats {
@@ -40,6 +41,22 @@ export function MarketLadder() {
     if (v >= 1e8) return (v / 1e8).toFixed(2) + "亿";
     if (v >= 1e4) return (v / 1e4).toFixed(0) + "万";
     return String(v);
+  };
+
+  // 封板时间转可比较数值（"09:35" → 575 分钟），无数据排最后
+  const sealTimeKey = (t?: string): number => {
+    if (!t) return 999999;
+    const m = t.match(/(\d{1,2}):(\d{2})/);
+    return m ? parseInt(m[1]) * 60 + parseInt(m[2]) : 999999;
+  };
+  const cmpSealTime = (a: LadderStock, b: LadderStock) =>
+    sealTimeKey(a.first_seal_time) - sealTimeKey(b.first_seal_time);
+
+  // 封板时间展示：从 "2026-09-01 09:25:00" 提取 "09:25"，无数据返回 "—"
+  const fmtSealTime = (t?: string): string => {
+    if (!t) return "—";
+    const m = t.match(/(\d{1,2}):(\d{2})/);
+    return m ? `${m[1].padStart(2, "0")}:${m[2]}` : t;
   };
 
   const boardColors: Record<number, string> = {
@@ -139,7 +156,9 @@ export function MarketLadder() {
       ) : view === "board" ? (
         /* Board view */
         <div className="space-y-4">
-          {Object.entries(byBoard).sort(([a], [b]) => +b - +a).map(([board, stocks]) => (
+          {Object.entries(byBoard).sort(([a], [b]) => +b - +a).map(([board, rawStocks]) => {
+            const stocks = [...rawStocks].sort(cmpSealTime);
+            return (
             <div key={board} className="border rounded-lg bg-card overflow-hidden">
               <div className="px-4 py-2 border-b bg-muted/30 flex items-center gap-2">
                 {boardBadge(+board)}
@@ -153,6 +172,9 @@ export function MarketLadder() {
                       <th className="px-3 py-2 text-left font-medium">名称</th>
                       <th className="px-3 py-2 text-right font-medium">现价</th>
                       <th className="px-3 py-2 text-right font-medium">涨幅</th>
+                      <th className="px-3 py-2 text-right font-medium">封板时间</th>
+                      <th className="px-3 py-2 text-right font-medium">封单额</th>
+                      <th className="px-3 py-2 text-right font-medium">炸板</th>
                       <th className="px-3 py-2 text-right font-medium">成交额</th>
                       <th className="px-3 py-2 text-left font-medium">概念</th>
                     </tr>
@@ -164,6 +186,9 @@ export function MarketLadder() {
                         <td className="px-3 py-2">{s.name}</td>
                         <td className="px-3 py-2 text-right font-mono">{s.price.toFixed(2)}</td>
                         <td className="px-3 py-2 text-right text-red-600 font-medium">{s.chg_pct >= 0 ? "+" : ""}{s.chg_pct.toFixed(1)}%</td>
+                        <td className="px-3 py-2 text-right font-mono text-xs">{fmtSealTime(s.first_seal_time)}</td>
+                        <td className="px-3 py-2 text-right">{formatAmount(s.seal_amount || 0)}</td>
+                        <td className="px-3 py-2 text-right">{s.open_times && s.open_times > 0 ? <span className="text-orange-600 font-medium">{s.open_times}</span> : <span className="text-muted-foreground">—</span>}</td>
                         <td className="px-3 py-2 text-right">{formatAmount(s.amount)}</td>
                         <td className="px-3 py-2 text-xs text-muted-foreground">{(s.concepts || []).slice(0, 2).join(", ")}{(s.concepts || []).length > 2 ? "..." : ""}</td>
                       </tr>
@@ -172,12 +197,15 @@ export function MarketLadder() {
                 </table>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         /* Concept view */
         <div className="space-y-6">
-          {Object.entries(byConcept).sort(([, a], [, b]) => b.length - a.length).map(([concept, stocks]) => (
+          {Object.entries(byConcept).sort(([, a], [, b]) => b.length - a.length).map(([concept, rawStocks]) => {
+            const stocks = [...rawStocks].sort(cmpSealTime);
+            return (
             <div key={concept} className="border-2 border-blue-100 rounded-xl bg-card overflow-hidden shadow-md">
               <div className="px-5 py-3 border-b bg-gradient-to-r from-blue-50 to-white flex items-center gap-2">
                 <TrendingUp className="h-4 w-4 text-red-500" />
@@ -192,7 +220,9 @@ export function MarketLadder() {
                       <th className="px-3 py-2 text-left font-medium">名称</th>
                       <th className="px-3 py-2 text-right font-medium">现价</th>
                       <th className="px-3 py-2 text-center font-medium">板数</th>
+                      <th className="px-3 py-2 text-right font-medium">封板时间</th>
                       <th className="px-3 py-2 text-right font-medium">成交额</th>
+                      <th className="px-3 py-2 text-right font-medium">炸板</th>
                       <th className="px-3 py-2 text-left font-medium">概念</th>
                     </tr>
                   </thead>
@@ -203,7 +233,9 @@ export function MarketLadder() {
                         <td className="px-3 py-2">{s.name}</td>
                         <td className="px-3 py-2 text-right font-mono">{s.price.toFixed(2)}</td>
                         <td className="px-3 py-2 text-center">{boardBadge(s.board)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-xs">{fmtSealTime(s.first_seal_time)}</td>
                         <td className="px-3 py-2 text-right">{formatAmount(s.amount)}</td>
+                        <td className="px-3 py-2 text-right">{s.open_times && s.open_times > 0 ? <span className="text-orange-600 font-medium">{s.open_times}</span> : <span className="text-muted-foreground">—</span>}</td>
                         <td className="px-3 py-2 text-xs text-muted-foreground">{(s.concepts || []).slice(0, 3).join(", ")}{(s.concepts || []).length > 3 ? "..." : ""}</td>
                       </tr>
                     ))}
@@ -211,7 +243,8 @@ export function MarketLadder() {
                 </table>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

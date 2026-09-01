@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Sparkles, Loader2, AlertCircle, RefreshCw, Gauge, ArrowDownUp, TrendingUp, TrendingDown, Flame, BarChart3, Globe, LineChart, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -65,6 +66,10 @@ export function MarketReview() {
   const [turnover, setTurnover] = useState<TurnoverTop | null>(null);
   const [globalIdx, setGlobalIdx] = useState<GlobalIndex[]>([]);
 
+  // 复盘日期：优先取 URL ?date= （来自短线流程页跳转），否则用本地今天
+  const [searchParams] = useSearchParams();
+  const reportDate = searchParams.get("date") || localDate();
+
   const [ovDone, setOvDone] = useState(false);
   const [emoDone, setEmoDone] = useState(false);
   const [toDone, setToDone] = useState(false);
@@ -83,9 +88,9 @@ export function MarketReview() {
 
   useEffect(() => { loadAll(); }, []);
 
-  // 已有复盘报告（当天，优先后端、回退 localStorage）
+  // 已有复盘报告（指定日期，优先后端、回退 localStorage）
   useEffect(() => {
-    const today = localDate();
+    const today = reportDate;
     const ctrl = new AbortController();
     api.tools.get<any>(`/review-report?date=${today}`, ctrl.signal)
       .then((d) => { if (d?.content) setReport(d.content); })
@@ -100,7 +105,7 @@ export function MarketReview() {
 
   const loadExistingReport = async () => {
     try {
-      const today = localDate();
+      const today = reportDate;
       const d = await api.tools.get<any>(`/review-report?date=${today}`);
       if (d?.content) {
         setReport(d.content);
@@ -117,7 +122,7 @@ export function MarketReview() {
     setGenerating(true);
     setReport(null);
     try {
-      const { task_id } = await api.tools.post<any>("/run-script", { script: "review_v5", args: localDate() });
+      const { task_id } = await api.tools.post<any>("/run-script", { script: "review_v5", args: reportDate });
 
       let output = "";
       for (let i = 0; i < 120; i++) {
@@ -132,7 +137,7 @@ export function MarketReview() {
 
       if (result && !result.includes("Traceback")) {
         setReport(result);
-        localStorage.setItem(`review_report_${localDate()}`, result);
+        localStorage.setItem(`review_report_${reportDate}`, result);
       } else {
         await loadExistingReport();
       }
@@ -149,7 +154,7 @@ export function MarketReview() {
     </p>
   );
 
-  const today = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+  const today = reportDate.replace(/-/g, "/");
 
   // 组装喂给 AI 的完整客观语料（指数/全球/情绪/短线情绪/板块资金/成交额榜）
   const buildSummary = () => {

@@ -36,7 +36,8 @@ const actionCls = (a: string) =>
         : "bg-muted/40 text-muted-foreground border-border";
 
 export function TgbSignals() {
-  const today = new Date().toISOString().slice(0, 10);
+  const x = new Date();
+  const today = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
   const [date, setDate] = useState(today);
   const [payload, setPayload] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);

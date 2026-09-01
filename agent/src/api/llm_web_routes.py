@@ -30,6 +30,16 @@ router = APIRouter(prefix="/tools/llm-web", tags=["llm-web"])
 _JOBS: dict[str, dict] = {}
 _JOBS_MAX = 20  # 只保留最近 N 个任务，防内存膨胀
 
+# 同目标互斥锁：Playwright 持久化会话目录同一时间只允许一个浏览器进程，
+# 并发任务抢同一 profile 会互相卡死导航。锁让后到任务排队而非同时抢。
+_TARGET_LOCK_GUARD = threading.Lock()
+_TARGET_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _target_lock(target: str) -> threading.Lock:
+    with _TARGET_LOCK_GUARD:
+        return _TARGET_LOCKS.setdefault(target, threading.Lock())
+
 _SESSION_ROOT = Path.home() / ".llm-web-session"
 
 # 集合竞价问询模板（按时间选段发送）。文件在仓库根目录，由后端读取（前端无权访问磁盘）。
@@ -141,8 +151,8 @@ def _format_analyzer_payload(payload: dict) -> str:
             lines.append(f"- {name}：{data}")
 
         # --- 阶段级详细数据 ---
-        # 阶段①：高开聚焦的全行业分布 + 代表股（让 LLM 据此判主攻方向）
-        if st.get("stage") == 1:
+        # 阶段②(09:25 竞价结束)：高开聚焦的全行业分布 + 代表股
+        if st.get("stage") == 2:
             inds = st.get("top_industries", [])
             if inds:
                 lines.append(
@@ -155,8 +165,8 @@ def _format_analyzer_payload(payload: dict) -> str:
                 )
                 lines.append(f"- 高开行业 {ind['industry']}：{ind['count']}只 -> {stocks_str}")
 
-        # 阶段②：昨日涨停溢价细节
-        if st.get("stage") == 2:
+        # 阶段③(09:35 验证资金态度)：昨日涨停溢价细节
+        if st.get("stage") == 3:
             pr = st.get("premium_ratio")
             if pr is not None:
                 lines.append(f"- 昨日涨停今日溢价率：{pr:.0%}")
@@ -167,8 +177,8 @@ def _format_analyzer_payload(payload: dict) -> str:
                     f"（{st.get('now_negative', 0)}/{st.get('total_lu', 0)} 只已翻绿）"
                 )
 
-        # 阶段③：主线板块 + 涨幅榜TOP20 + 涨跌家数
-        if st.get("stage") == 3:
+        # 阶段④(09:45 确认主线合力)：主线板块 + 涨幅榜TOP20 + 涨跌家数
+        if st.get("stage") == 4:
             ml = st.get("mainline_industry")
             if ml:
                 lines.append(f"- 确认主线：{ml}")
@@ -180,17 +190,6 @@ def _format_analyzer_payload(payload: dict) -> str:
             lines.append(f"- 涨停：{st.get('limit_up', 0)} | "
                          f"跌停：{st.get('limit_down', 0)} | "
                          f"上涨：{st.get('up', 0)} / 下跌：{st.get('down', 0)}")
-
-        # 阶段④：中位数 + 指数
-        if st.get("stage") == 4:
-            med = st.get("median_chg")
-            if med is not None:
-                lines.append(f"- 全市场中位数涨幅：{med:+.2f}%")
-            idx_data = st.get("indices", {})
-            if idx_data:
-                parts = [f"{k} {v:+.2f}%" for k, v in idx_data.items() if v is not None]
-                if parts:
-                    lines.append(f"- 指数：{' | '.join(parts)}")
 
     return "\n".join(lines)
 
@@ -211,9 +210,9 @@ def _inject_local_signals(prompt: str, idx: int, stage: str, date_str: str | Non
     if not mod:
         return prompt
     try:
-        # ②~④ 对应本地阶段 1~4；run 是累积执行（含前一阶段数据），
+        # AI 模板②~④ 对应本地阶段 2~4（①=盘前无本地信号，不注入）；run 累积执行，
         # 但每个 prompt 只注入「当前阶段」的数据，不把 09:25 带进 09:35/09:45
-        payload = mod.run(date_str=date_str, stage=idx, verbose=False)
+        payload = mod.run(date_str=date_str, stage=min(idx + 1, 4), verbose=False)
         stages = [s for s in payload.get("stages", []) if not s.get("skip")]
         if stages:
             payload = {**payload, "stages": [stages[-1]]}
@@ -279,17 +278,17 @@ _TARGETS: dict[str, dict] = {
             '[class*="md-box-root"]',
             '[class*="message-list"] [class*="container-"] > div',
         ],
-        # 发送按钮：输入框有内容后，输入栏内唯一的「高亮主按钮」（bg-dbx-fill-highlight）
-        # 即为发送（箭头）按钮；旧版 #flow-end-msg-send 已失效。
-        # 2026-08-27 实测：当前豆包渲染为圆形箭头按钮 <button data-dbx-name="button" disabled>，
-        # 且可见 textarea 是镜像（内容不进真实输入引擎 → 按钮恒 disabled）。selector 仅作
-        # 兜底，真正可发送需豆包恢复可自动化（textarea 内容能被引擎识别）。
+        # 发送按钮：输入栏内唯一的「高亮主按钮」（bg-dbx-fill-highlight）。今日（08-29）
+        # 豆包 v3.33.13 DOM 实测：底部输入栏为圆形箭头按钮，带 id="flow-end-msg-send"、
+        # 类 bg-dbx-fill-highlight，编辑内容是 ProseMirror（可正常写入），按钮非 disabled。
+        # 注意新版 DOM 里 toolbar/技能等大量按钮也带 data-dbx-name="button"，不能用该
+        # 选择器定位发送按钮（.first 会命中工具栏图标而非发送箭头），必须优先 id/高亮类。
         "send_button_selectors": [
-            'button[data-dbx-name="button"]:not([disabled])',
-            'button.rounded-full:not([disabled])',
+            "#flow-end-msg-send",
             'div.guidance-input-actions [class*="bg-dbx-fill-highlight"]',
             '[class*="bg-dbx-fill-highlight"]',
-            "#flow-end-msg-send",
+            'button[data-dbx-name="button"]:not([disabled])',
+            'button.rounded-full:not([disabled])',
             'button[aria-label*="发送"]',
             'button[type="submit"]',
         ],
@@ -401,7 +400,8 @@ def _wait_answer_stable(page, baseline_len: int, timeout_s: int, job_log=None) -
 # 豆包 / 各站点对自动化访问的拦截页常见文案（导航成功后检测，命中即明确报错）
 _BLOCK_MARKERS = [
     "安全验证", "人机验证", "验证码", "verify you are human", "verify yourself",
-    "请登录后", "请先登录", "登录豆包", "登录后", "访问过于频繁", "操作过于频繁",
+    "请完成下列验证", "请完成验证", "拖动完成", "完成上方拼图",
+    "请登录后", "请先登录", "登录豆包", "登录以解锁更多功能", "登录后", "访问过于频繁", "操作过于频繁",
     "网络异常", "请稍后再试",
     "扫码登录", "微信扫码", "手机号码登录", "登录 Kimi", "获取验证码", "手机号登录",
     # Kimi 登录墙专属文案（SPA 异步弹出，初次检测常漏掉）
@@ -755,6 +755,46 @@ def _try_send(page, cfg: dict, prompt: str, job_log=None) -> bool:
         except Exception:  # noqa: BLE001 元素失效
             return ""
 
+    def _insert_into_prosemirror() -> bool:
+        """直接向 ProseMirror 的 EditorView 派发 insertText 事务，写进真实文档模型。
+
+        豆包（2026-08 起）的可见 contenteditable 是"镜像"：Playwright 的键盘事件/insert_text
+        正确触发 input 事件、DOM 里也看得到文字，但 tiptap 的 doc 模型始终为空 → 发送按钮
+        状态不更新、真正发出去的是空消息。ProseMirror 会把 EditorView 实例挂到 DOM 节点
+        `el.view` 上，绕过事件注入直接派发事务即可把内容写进模型（view dispatch 会触发
+        onUpdate → 按钮 enable → 发送真实内容）。返回 False 表示非 ProseMirror/取不到 view，
+        交由调用方走原键盘兜底。
+        """
+        JS = """(promptText) => {
+            const el = document.querySelector('.tiptap.ProseMirror[contenteditable="true"]')
+                || document.querySelector('.ProseMirror[contenteditable="true"]');
+            if (!el) return {ok:false};
+            let view = el.view || el.editorView || (el.tiptapEditor && el.tiptapEditor.view);
+            if (!(view && view.state && view.state.tr)) {
+                for (const k of Object.keys(el)) {
+                    const v = el[k];
+                    if (v && v.state && v.state.tr && typeof v.dispatch === 'function') { view = v; break; }
+                }
+            }
+            if (!(view && view.state && view.state.tr)) return {ok:false};
+            try {
+                view.dispatch(view.state.tr.insertText(promptText));
+                const got = view.state.doc.textContent;
+                return {ok: true, model: got};
+            } catch (e) { return {ok:false}; }
+        }"""
+        try:
+            res = box.evaluate(JS, prompt)
+            if res and res.get("ok"):
+                page.wait_for_timeout(250)
+                got = _read_back()
+                lg(f"ProseMirror 直接写入模型 {len(res.get('model') or '')} 字符，DOM 校验 {len(got)} 字符")
+                if got.strip():
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            lg(f"ProseMirror 写入口径异常: {str(exc)[:100]}")
+        return False
+
     def _write_into_editable() -> bool:
         """针对 contenteditable / ProseMirror 的稳健写入。返回是否成功。"""
         try:
@@ -765,7 +805,10 @@ def _try_send(page, cfg: dict, prompt: str, job_log=None) -> bool:
             page.wait_for_timeout(80)
             page.keyboard.press("Delete")
             page.wait_for_timeout(120)
-            # 先试 insert_text（快）；若校验失败再退回逐字 type（慢但稳）。
+            # 1) ProseMirror（豆包/tipTap）：直接派发事务写进真实模型，最稳。
+            if _insert_into_prosemirror():
+                return True
+            # 2) 先试 insert_text（快）；若校验失败再退回逐字 type（慢但稳）。
             # prefer_key_type 的站点（kimi）跳过 insert_text，直接逐字输入。
             if not cfg.get("prefer_key_type"):
                 page.keyboard.insert_text(prompt)
@@ -839,6 +882,27 @@ def _try_send(page, cfg: dict, prompt: str, job_log=None) -> bool:
             page.wait_for_timeout(500)
         return False
 
+    def _deliver_verify() -> bool:
+        """投递确认：轮询页面正文出现用户 prompt 原文。
+
+        豆包空主页也有个大型输入框，点击其「发送」会清空输入框（_confirm_sent 误判为
+        成功），但消息根本没投递、页面停在空主页——随后傻等 90s + 提取为空。只有正文
+        里真的出现用户气泡，才确认本轮投递成功；prompt 过短无法锚定时视为已通过。
+        """
+        if len(prompt) < 6:
+            return True
+        anchor = prompt.strip()[:6]
+        for _ in range(6):
+            try:
+                txt = page.inner_text("body") or ""
+            except Exception:  # noqa: BLE001 页面瞬态
+                txt = ""
+            if anchor in txt:
+                lg("✓ 已投递（页面出现用户消息锚点）")
+                return True
+            page.wait_for_timeout(500)
+        return False
+
     page.wait_for_timeout(800)
     # 优先点击发送按钮（豆包 2026-08 改版后 Enter 不再可靠提交）
     for sel in cfg.get("send_button_selectors", []):
@@ -855,7 +919,9 @@ def _try_send(page, cfg: dict, prompt: str, job_log=None) -> bool:
             btn.click()
             page.wait_for_timeout(1000)
             if _confirm_sent(f"按钮 {sel}"):
-                return True
+                if _deliver_verify():
+                    return True
+                lg("按钮点击后输入框已清空但未见投递（疑似空主页假发送），换下一种方式")
         except Exception:  # noqa: BLE001 选择器失效等
             continue
 
@@ -865,9 +931,21 @@ def _try_send(page, cfg: dict, prompt: str, job_log=None) -> bool:
         box.click()
     except Exception:  # noqa: BLE001
         pass
+    # 输入框可能已被按钮路径误清空（假发送），重新写入再 Enter
+    if _fresh_read() is None or len(_fresh_read() or "") < max(0, len(got.strip()) - 2):
+        lg("输入框内容已被清空（假发送），重新写入...")
+        if not _write_into_editable():
+            lg("✗ 重新写入失败")
+            return False
+        box = _find_first(page, cfg["input_selectors"], timeout_ms=3000)
+        if box is not None:
+            try:
+                box.click()
+            except Exception:  # noqa: BLE001
+                pass
     page.keyboard.press("Enter")
     page.wait_for_timeout(1500)
-    if _confirm_sent("Enter"):
+    if _confirm_sent("Enter") and _deliver_verify():
         return True
 
     lg("✗ 所有发送方式均失败")
@@ -992,7 +1070,14 @@ def _run_ask(target: str, prompt: str, timeout_s: int, job_log=None, file_path: 
                 pass
 
             if not _try_send(page, cfg, prompt, job_log=lg):
+                # 发送失败可能是发送后弹出的登录墙/验证框导致，补一次拦截检测
+                block = _detect_block(page, job_log=lg)
                 _debug_dump(page, target, "send_fail", job_log=lg)
+                if block:
+                    return "", (
+                        f"{target} 发送后触发拦截/登录（{block}），登录态可能已失效。"
+                        f"请手动重新登录后重试：POST /tools/llm-web/login"
+                    )
                 return "", "消息发送失败：写入/Enter/发送按钮均未生效（详见调试截图 ~/.llm-web-session/debug/）"
 
             lg("已发送，等待回答开始生成...")
@@ -1040,17 +1125,28 @@ def llm_web_login(data: dict):
         page.goto(_TARGETS[target]["url"])
         _log.info("%s 登录窗口已打开，等待用户完成登录并关闭浏览器...", target)
         try:
-            while True:
-                if not ctx.browser or not ctx.pages:
-                    break
-                # 用户关闭最后一个标签页即退出
+            # 用户关闭浏览器 / 最后一个标签页即退出；带硬超时防挂死。
+            # 必须等浏览器完全断开后再 ctx.close()，cookie 才会落盘写回 profile。
+            deadline = time.time() + 900
+            while time.time() < deadline:
+                try:
+                    connected = bool(ctx.browser and ctx.browser.is_connected())
+                except Exception:  # noqa: BLE001 浏览器进程已退出
+                    connected = False
                 alive = [p for p in ctx.pages if not p.is_closed()]
-                if not alive:
+                if not connected or not alive:
                     break
                 time.sleep(2)
         except Exception:  # noqa: BLE001 浏览器被用户直接杀掉
             pass
+        # 浏览器已断开：再次确认后才优雅关闭，确保登录 cookie 写入磁盘
         try:
+            if ctx.browser:
+                try:
+                    if not ctx.browser.is_connected():
+                        time.sleep(1)
+                except Exception:  # noqa: BLE001
+                    pass
             ctx.close()
         except Exception:  # noqa: BLE001
             pass
@@ -1121,10 +1217,11 @@ def llm_web_ask(data: dict):
     def worker():
         t0 = time.monotonic()
         try:
-            answer, err = _run_ask(
-                target, prompt, timeout_s, job_log=job_log,
-                file_path=data.get("_file_path"),
-            )
+            with _target_lock(target):
+                answer, err = _run_ask(
+                    target, prompt, timeout_s, job_log=job_log,
+                    file_path=data.get("_file_path"),
+                )
             elapsed = round(time.monotonic() - t0, 1)
             job["elapsed_s"] = elapsed
             if err:
@@ -1164,6 +1261,81 @@ def llm_web_progress(job_id: str):
         "elapsed_s": job["elapsed_s"],
         "target": job["target"],
     }
+
+
+# 集合竞价多源回答存档：data/auction_web_answers/{date}/stage{N}.md
+_STAGE_LABELS = {
+    0: "盘前",
+    1: "09:25 情绪总开关",
+    2: "09:35 验证资金态度",
+    3: "09:45 确认主线合力",
+}
+
+
+def _save_web_answer(date: str, stage, target: str, label: str, answer: str) -> Path:
+    """把某阶段某信源的回答 upsert 进该阶段的 md（每阶段一个文件，含豆包+DeepSeek 双源）。
+
+    用 ``<!-- ANSWER:target=X --> ... <!-- /ANSWER -->`` 标记块，同名 target 自动覆盖更新。
+    """
+    try:
+        stage_int = int(stage)
+    except (TypeError, ValueError):
+        stage_int = stage
+    stage_label = _STAGE_LABELS.get(stage_int, str(stage))
+    base = _REPO_ROOT / "data" / "auction_web_answers" / date
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"stage{stage_int}.md"
+
+    block = (
+        f"<!-- ANSWER:target={target} -->\n"
+        f"## {label} ({target})\n\n{answer}\n"
+        f"<!-- /ANSWER -->"
+    )
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+    else:
+        text = (
+            f"# 集合竞价多源回答存档\n\n"
+            f"- 日期: {date}\n"
+            f"- 阶段: {stage_int}（{stage_label}）\n"
+            f"- 保存时间: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+    pattern = re.compile(
+        r"<!-- ANSWER:target=" + re.escape(target) + r" -->.*?<!-- /ANSWER -->", re.DOTALL
+    )
+    if pattern.search(text):
+        text = pattern.sub(block, text, count=1)
+    else:
+        text = text.rstrip() + "\n\n" + block + "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@router.post("/save-web-answer")
+def llm_web_save_web_answer(data: dict):
+    """保存某阶段豆包/DeepSeek 的回答到 md（每阶段一个文件，含双源）。
+
+    Body: {date, stage, target, label, answer}
+    - date: YYYY-MM-DD
+    - stage: 0~3（①盘前 ~ ④09:45）
+    - target: doubao / deepseek / pasted / ...
+    - label: 展示名（豆包 / DeepSeek / 手动粘贴）
+    - answer: 回答文本
+    落盘到 data/auction_web_answers/{date}/stage{stage}.md，同名 target 自动覆盖更新。
+    """
+    data = data or {}
+    date = (data.get("date") or "").strip()
+    stage = data.get("stage")
+    target = (data.get("target") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    if not date or stage is None or not str(stage).strip() or not target or not answer:
+        return {"ok": False, "detail": "date / stage / target / answer 均为必填"}
+    try:
+        path = _save_web_answer(date, stage, target, data.get("label") or target, answer)
+        return {"ok": True, "path": str(path)}
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("save-web-answer failed: %s", exc)
+        return {"ok": False, "detail": str(exc)}
 
 
 @router.get("/status")

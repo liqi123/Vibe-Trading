@@ -19,16 +19,23 @@ export function isAuthRequiredError(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 401 || error.status === 403);
 }
 
-async function errorFromResponse(res: Response): Promise<ApiError> {
-  let detail = `HTTP ${res.status}`;
+async function errorFromResponse(res: Response, method?: string, path?: string): Promise<ApiError> {
+  let detail = "";
+  let raw = "";
   try {
-    const body = await res.json();
-    detail = body.detail || body.message || detail;
-  } catch { /* ignore */ }
-  if (res.status === 401 || res.status === 403) {
-    detail = AUTH_REQUIRED_MESSAGE;
+    raw = await res.text();
+    const body = JSON.parse(raw);
+    detail = body.detail || body.message || body.error || "";
+  } catch { /* ignore: raw may be HTML or empty */ }
+  if (!detail && raw) {
+    detail = raw.trim().replace(/\s+/g, " ").slice(0, 200);
   }
-  return new ApiError(detail, res.status);
+  const prefix = `${method || "GET"} ${path || ""} → HTTP ${res.status}`;
+  const msg = detail ? `${prefix}: ${detail}` : prefix;
+  if (res.status === 401 || res.status === 403) {
+    return new ApiError(AUTH_REQUIRED_MESSAGE, res.status);
+  }
+  return new ApiError(msg, res.status);
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -47,7 +54,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   console.log(`[api] ← ${res.status} ${res.headers.get("content-type")} for ${url}`);
   if (!res.ok) {
-    throw await errorFromResponse(res);
+    throw await errorFromResponse(res, options?.method, url);
   }
   const text = await res.text();
   if (!text) return {} as T;
@@ -76,7 +83,7 @@ async function uploadFile(file: File): Promise<UploadResult> {
   form.append("file", file);
   const res = await fetch(`${BASE}/upload`, { method: "POST", headers: authHeaders(), body: form });
   if (!res.ok) {
-    throw await errorFromResponse(res);
+    throw await errorFromResponse(res, "POST", "/upload");
   }
   return res.json();
 }

@@ -826,6 +826,11 @@
     "thResistance": "Resistance",
     "thSuggestion": "Suggestion",
     "thAction": "Action",
+    "thAuctionChange": "Auction %",
+    "thAuctionVol": "Auction Vol",
+    "thAuctionRatio": "Vol Ratio",
+    "thIndustry": "THS Industry",
+    "thConcept": "THS Concept",
     "suggestionNone": "--",
     "suggestionBuy": "Buy",
     "suggestionConsiderSell": "Consider Sell",
@@ -837,6 +842,10 @@
     "editName": "Double-click to edit name",
     "delete": "Delete",
     "addStockTitle": "Add Stock",
-    "searchPlaceholder": "Search by code or name..."
+    "searchPlaceholder": "Search by code or name...",
+    "observationTitle": "Observation",
+    "holdingTitle": "Holdings",
+    "observationEmpty": "No observation stocks. Click + to add.",
+    "holdingEmpty": "No holdings. Click + to add."
   }
 }

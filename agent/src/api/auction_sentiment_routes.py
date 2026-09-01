@@ -22,6 +22,17 @@ if str(_TREE_ROOT) not in sys.path:
 
 router = APIRouter(prefix="/tools/auction-sentiment", tags=["auction-sentiment"])
 
+_AI_REPORT_DIR = _TREE_ROOT / "reports" / "output" / "auction_ai"
+
+
+def _read_ai_report(date_str: str, card: int) -> str:
+    """读取 /auction/ai-analysis 落盘的阶段报告 md（stage{card}.md），找不到返回空串。"""
+    path = _AI_REPORT_DIR / date_str / f"stage{card}.md"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
 
 @router.get("/check")
 def auction_sentiment_check(date: str = "", stage: int = 0):
@@ -38,6 +49,9 @@ def auction_sentiment_check(date: str = "", stage: int = 0):
             "trace": traceback.format_exc(limit=3),
             "date": date_str,
         }
+    # 把已落盘的本地 LLM 阶段报告挂到对应卡片（stage{card}.md，card=①~④）
+    for s in payload.get("stages", []):
+        s["ai_report"] = _read_ai_report(date_str, int(s.get("stage") or 0))
     return {"ok": True, **payload}
 
 
