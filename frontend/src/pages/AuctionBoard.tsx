@@ -2,51 +2,8 @@ import { useEffect, useState, useCallback, Fragment, useRef } from "react";
 import { toast } from "sonner";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera, Search, Bot, ArrowUpRight, ChevronDown, ExternalLink } from "lucide-react";
 import { api } from "@/lib/api";
-
-const SENTIMENT_PROMPT = `# A股早盘情绪分析框架
-
-## 分析方法
-请用以下三个信号判断当日市场情绪，并给出操作建议。
-
-### 信号1：连板高标竞价反馈（情绪风向标）
-请搜索今日A股集合竞价情况：
-- 竞价涨停家数、跌停家数
-- 昨日连板高标（最高板、次高板）今日竞价表现（一字板/高开/低开/核按钮）
-- 竞价红绿比
-
-判断标准：
-- 高标普遍高开+封单足 → 情绪上升
-- 高标集体低开或核按钮 → 情绪退潮
-- 竞价跌停 > 5 家 → 恐慌蔓延，宜收缩仓位
-
-### 信号2：主线板块分化（资金主攻方向）
-请搜索今日A股板块涨幅排名：
-- 哪个板块批量高开、涨停最多？是否形成首板→二板→三板梯队？
-- 板块间是否有明确主线，还是混沌轮动？
-
-判断标准：
-- 某板块一枝独秀 → 主线清晰，容错率高
-- 多板块零星表现 → 混沌轮动，操作难度大
-
-### 信号3：开盘量能（如已开盘）
-请搜索今日A股成交额与昨日对比：
-- 放量上涨 → 多头发力
-- 缩量反弹 → 无持续性
-- 放量下跌 → 空头兑现
-
-## 请输出
-1. 综合评级：强 / 中 / 弱
-2. 情绪定性：上升 / 分歧 / 退潮 / 冰点
-3. 操作建议：进攻（6-8成）/ 防守（3-5成）/ 空仓（0-2成）
-4. 重点关注：主线板块 + 核心标的
-5. 风险提示：今日需注意的信号
-
-[粘贴后你可以继续追问：今天XX板块为什么涨？有什么消息面？XX股能追吗？]`;
-
-const LLM_OPTIONS = [
-  { key: "doubao", label: "豆包", url: "https://www.doubao.com/chat" },
-  { key: "deepseek", label: "DeepSeek", url: "https://chat.deepseek.com" },
-];
+import { useLLMWebAsk } from "@/hooks/useLLMWebAsk";
+import { SENTIMENT_PROMPT, LLM_OPTIONS } from "@/lib/auctionAi";
 
 interface DateInfo {
   date: string; count: number; total_vol: number;
@@ -88,6 +45,7 @@ function auctionChgCell(v: number | null) {
 }
 
 export function AuctionBoard() {
+  const { askOne, askMany } = useLLMWebAsk();
   const [dates, setDates] = useState<DateInfo[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
   const [loading, setLoading] = useState(true);
@@ -223,37 +181,20 @@ export function AuctionBoard() {
     const stage = await fetchAuctionStage(selectedStage);
     setAskLogs([`[${new Date().toLocaleTimeString()}] 提交任务到 ${label}${stage ? `（${stage}）` : ""}...`]);
     fetchAuctionPreview(selectedStage);
-    let detail = "";
     try {
-      const start = await api.tools.post<any>("/llm-web/ask", {
-        target: key,
-        use_template: true,
-        use_file: useFile,
-        timeout_s: 120,
-        stage: selectedStage !== "auto" ? Number(selectedStage) : undefined,
-        date: selectedDate,
-      });
-      if (!start.ok || !start.job_id) {
-        throw new Error(start.detail || "任务提交失败");
-      }
-      // 轮询进度
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 1500));
-        const p = await api.tools.get<any>(`/llm-web/progress/${start.job_id}`);
-        if (p.ok) {
-          setAskLogs(p.logs || []);
-          if (p.done) {
-            if (p.success) {
-              setPastedAnswer(p.answer || "");
-              toast.success(`${label} 回答已获取（${p.elapsed_s ?? "?"}s）`);
-            } else {
-              detail = p.detail || "自动化失败";
-              throw new Error(detail);
-            }
-            return;
-          }
-        }
-      }
+      const r = await askOne(
+        {
+          target: key,
+          use_template: true,
+          use_file: useFile,
+          timeout_s: 120,
+          stage: selectedStage !== "auto" ? Number(selectedStage) : undefined,
+          date: selectedDate,
+        },
+        { pollMs: 1500, onLogs: (_t, logs) => setAskLogs(logs) },
+      );
+      setPastedAnswer(r.answer);
+      toast.success(`${label} 回答已获取（${r.elapsed_s ?? "?"}s）`);
     } catch (e: any) {
       const msg = e?.message || String(e);
       setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ✗ ${msg}`]);
@@ -282,43 +223,31 @@ export function AuctionBoard() {
     const stage = await fetchAuctionStage(selectedStage);
     setAskLogs([`[${new Date().toLocaleTimeString()}] 开始一键发送 ${targets.map((t) => t.label).join(" + ")}${stage ? `（${stage}）` : ""}...`]);
     fetchAuctionPreview(selectedStage);
-    await Promise.all(
-      targets.map(async (opt) => {
-        try {
-          const start = await api.tools.post<any>("/llm-web/ask", {
-            target: opt.key,
-            use_template: true,
-            use_file: useFile,
-            timeout_s: 120,
-            stage: selectedStage !== "auto" ? Number(selectedStage) : undefined,
-            date: selectedDate,
-          });
-          if (!start.ok || !start.job_id) {
-            throw new Error(start.detail || "任务提交失败");
+    await askMany(
+      targets.map((opt) => ({
+        target: opt.key,
+        label: opt.label,
+        use_template: true,
+        use_file: useFile,
+        timeout_s: 120,
+        stage: selectedStage !== "auto" ? Number(selectedStage) : undefined,
+        date: selectedDate,
+      })),
+      {
+        pollMs: 1500,
+        onDone: (r) => {
+          const label = targets.find((o) => o.key === r.target)?.label ?? r.target;
+          if (r.error) {
+            setWebAnswers((prev) => [...prev, { target: r.target, label, answer: `✗ ${label} 失败: ${r.error}` }]);
+            setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ✗ ${label}: ${r.error}`]);
+            toast.warning(`${label} 自动获取失败`);
+          } else {
+            setWebAnswers((prev) => [...prev, { target: r.target, label, answer: r.answer }]);
+            setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ✓ ${label} 完成（${r.answer.length} 字）`]);
+            toast.success(`${label} 回答已获取`);
           }
-          let answer = "";
-          for (;;) {
-            await new Promise((r) => setTimeout(r, 1500));
-            const p = await api.tools.get<any>(`/llm-web/progress/${start.job_id}`);
-            if (p?.done) {
-              if (p.success) {
-                answer = p.answer || "";
-              } else {
-                throw new Error(p.detail || "自动化失败");
-              }
-              break;
-            }
-          }
-          setWebAnswers((prev) => [...prev, { target: opt.key, label: opt.label, answer }]);
-          setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ✓ ${opt.label} 完成（${answer.length} 字）`]);
-          toast.success(`${opt.label} 回答已获取`);
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          setWebAnswers((prev) => [...prev, { target: opt.key, label: opt.label, answer: `✗ ${opt.label} 失败: ${msg}` }]);
-          setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ✗ ${opt.label}: ${msg}`]);
-          toast.warning(`${opt.label} 自动获取失败`);
-        }
-      }),
+        },
+      },
     );
     setAskLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] 全部完成`]);
     setSendingAll(false);
@@ -1506,11 +1435,16 @@ export function AuctionBoard() {
                       <th className="px-3 py-2 text-left font-medium">概念</th>
                       <th className="px-3 py-2 text-right font-medium">今竞价量</th>
                       <th className="px-3 py-2 text-right font-medium">昨竞价量</th>
-                      <th className="px-3 py-2 text-right font-medium">量变化</th>
+                      <th className="px-3 py-2 text-right font-medium">{limitUpSubTab === "yesterday" ? "实时涨幅" : "量变化"}</th>
                       <th className="px-3 py-2 text-right font-medium">量比</th>
                       <th className="px-3 py-2 text-right font-medium">今竞价额</th>
                       <th className="px-3 py-2 text-right font-medium">昨竞价额</th>
                       <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
+                      <th className="px-3 py-2 text-center font-medium">连板</th>
+                      <th className="px-3 py-2 text-center font-medium">昨封板/预期</th>
+                      <th className="px-3 py-2 text-right font-medium">竞价量能</th>
+                      <th className="px-3 py-2 text-center font-medium">预期组合</th>
+                      <th className="px-3 py-2 text-left font-medium">操作</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1539,9 +1473,15 @@ export function AuctionBoard() {
                           </td>
                           <td className="px-3 py-2 text-right font-medium">{s.vol_today.toLocaleString()}</td>
                           <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev > 0 ? s.vol_prev.toLocaleString() : "-"}</td>
-                          <td className={`px-3 py-2 text-right font-medium ${s.vol_chg > 0 ? "text-red-600" : s.vol_chg < 0 ? "text-green-600" : ""}`}>
-                            {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
-                          </td>
+                          {limitUpSubTab === "yesterday" ? (
+                            <td className={`px-3 py-2 text-right font-medium ${(s.realtime_chg_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                              {s.realtime_chg_pct != null ? `${s.realtime_chg_pct >= 0 ? "+" : ""}${s.realtime_chg_pct.toFixed(2)}%` : "-"}
+                            </td>
+                          ) : (
+                            <td className={`px-3 py-2 text-right font-medium ${s.vol_chg > 0 ? "text-red-600" : s.vol_chg < 0 ? "text-green-600" : ""}`}>
+                              {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
+                            </td>
+                          )}
                           <td className={`px-3 py-2 text-right font-medium ${s.vol_pct >= 999 ? "" : s.vol_pct >= 100 ? "text-red-600" : "text-green-600"}`}>
                             {s.vol_pct >= 999 ? "新" : `${s.vol_pct.toFixed(0)}%`}
                           </td>
@@ -1550,10 +1490,55 @@ export function AuctionBoard() {
                           <td className={`px-3 py-2 text-right font-medium ${(s.auction_chg_today ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
                             {s.auction_chg_today != null ? `${s.auction_chg_today >= 0 ? "+" : ""}${s.auction_chg_today.toFixed(2)}%` : "-"}
                           </td>
+                          {(() => {
+                            const biz = s.auction_expectation || null;
+                            if (!biz) {
+                              return (
+                                <>
+                                  <td colSpan={5} className="px-3 py-2 text-center text-muted-foreground">—</td>
+                                </>
+                              );
+                            }
+                            const combo = biz.combo || {};
+                            const colorMap: Record<string, string> = {
+                              red: "bg-red-600/15 text-red-600 border-red-600/30",
+                              orange: "bg-orange-600/15 text-orange-600 border-orange-600/30",
+                              blue: "bg-blue-600/15 text-blue-600 border-blue-600/30",
+                              gray: "bg-muted text-muted-foreground border-muted",
+                              purple: "bg-purple-600/15 text-purple-600 border-purple-600/30",
+                              black: "bg-zinc-900 text-zinc-100 border-zinc-700",
+                            };
+                            const badgeCls = colorMap[combo.color] || colorMap.gray;
+                            return (
+                              <>
+                                <td className="px-3 py-2 text-center font-mono">{biz.consec_boards > 0 ? biz.consec_boards : "-"}</td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className="text-xs text-muted-foreground">{biz.band || "-"}</span>
+                                  <span className="block text-[10px] text-muted-foreground/70">{biz.first_seal ? `${biz.first_seal.slice(0, 2)}:${biz.first_seal.slice(2, 4)}` : ""}</span>
+                                </td>
+                                <td className="px-3 py-2 text-right font-medium">
+                                  {biz.vol_pct_auction != null ? (
+                                    <span className={biz.vol_level === "达标" ? "text-red-600" : "text-muted-foreground"}>
+                                      {biz.vol_pct_auction.toFixed(1)}%
+                                    </span>
+                                  ) : "-"}
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  {combo.combo ? (
+                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium ${badgeCls}`}>
+                                      {combo.combo} {combo.label}
+                                    </span>
+                                  ) : <span className="text-muted-foreground text-xs">—</span>}
+                                  <span className="block text-[10px] text-muted-foreground/70">{biz.price_level}</span>
+                                </td>
+                                <td className="px-3 py-2 text-left text-xs text-muted-foreground">{combo.action || "-"}</td>
+                              </>
+                            );
+                          })()}
                         </tr>
                       )) : (
                         <tr>
-                          <td colSpan={10} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                          <td colSpan={15} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
                         </tr>
                       );
                     })()}

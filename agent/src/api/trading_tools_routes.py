@@ -35,6 +35,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 _BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8899")
 _DB_PATH = _PROJECT_ROOT / "tdx_data.db"
 _PAPER_DIR = _PROJECT_ROOT / "paper"
+_AI_REPORT_DIR = _PROJECT_ROOT / "reports" / "output" / "auction_ai"
 
 # Make utils importable for load_state (real-time price updates)
 if str(_PROJECT_ROOT) not in sys.path:
@@ -2724,7 +2725,12 @@ def delete_scheduled_run(job_id: str) -> dict:
 
 @router.get("/review-report")
 def get_review_report(date: str = "") -> dict:
-    """Return the generated review report markdown content."""
+    """Return the generated review report markdown content.
+
+    When no report exists for the requested date (e.g. weekends /
+    non-trading days), falls back to the most recent existing review
+    report on or before that date so the page is never blank.
+    """
     report_date = date if date else datetime.now().strftime("%Y-%m-%d")
     safe_name = Path(report_date).name
     for report_dir in (_PROJECT_ROOT / "reports" / "output", _PROJECT_ROOT / "reports"):
@@ -2733,8 +2739,788 @@ def get_review_report(date: str = "") -> dict:
         for pattern in (f"{safe_name}.md", f"review_{safe_name}.md", f"{safe_name}_review.md"):
             report_file = report_dir / pattern
             if report_file.exists() and report_file.parent == report_dir:
-                return {"content": report_file.read_text(encoding="utf-8")}
-    return {"content": ""}
+                return {"content": report_file.read_text(encoding="utf-8"), "date": report_date}
+    # fallback: most recent review file on/before requested date
+    best_file = None
+    best_date = None
+    for report_dir in (_PROJECT_ROOT / "reports" / "output", _PROJECT_ROOT / "reports"):
+        if not report_dir.exists():
+            continue
+        for f in report_dir.glob("review_*.md"):
+            name = f.name
+            if not name.startswith("review_") or not name.endswith(".md"):
+                continue
+            fd = name[len("review_"):-len(".md")]
+            if len(fd) == 10 and fd <= report_date and (best_date is None or fd > best_date):
+                best_date, best_file = fd, f
+    if best_file is not None:
+        return {"content": best_file.read_text(encoding="utf-8"), "date": best_date, "fallback": True}
+    return {"content": "", "date": report_date}
+
+
+# ---------------------------------------------------------------------------
+# Review AI (复盘 AI 多源分析：豆包 + DeepSeek + 综合)
+# ---------------------------------------------------------------------------
+
+def _norm_compact(s: str) -> str:
+    """Normalize a date string to 8-digit compact form (YYYYMMDD)."""
+    return "".join(ch for ch in (s or "")) if False else "".join(ch for ch in (s or "") if ch.isdigit())[:8]
+
+
+def _norm_dashed(s: str) -> str:
+    """Normalize a date string to YYYY-MM-DD form."""
+    c = _norm_compact(s)
+    return f"{c[:4]}-{c[4:6]}-{c[6:8]}" if len(c) == 8 else (s or "")
+
+
+def _build_review_summary(date_str: str):
+    """Build a structured yesterday-market summary text from the local DB.
+
+    Returns (summary_text, normalized_compact_date). Relies on daily_kline
+    (compact trade_date) for indices / breadth / limit-up-down / turnover and
+    fund_daily (dashed date) for per-stock main-net-flow when available.
+    """
+    dc = _norm_compact(date_str)
+    db = _get_db()
+    if not db:
+        return "（本地行情数据库不可用）", dc
+    try:
+        cur = db.cursor()
+        # 确认日期存在（daily_kline 用紧凑格式，兼容带杠传入）
+        row = cur.execute("SELECT 1 FROM daily_kline WHERE trade_date=? LIMIT 1", (dc,)).fetchone()
+        if not row:
+            dd = _norm_dashed(date_str)
+            row = cur.execute("SELECT 1 FROM daily_kline WHERE trade_date=? LIMIT 1", (dd,)).fetchone()
+            if row:
+                dc = dd
+        prev = cur.execute("SELECT MAX(trade_date) FROM daily_kline WHERE trade_date < ?", (dc,)).fetchone()
+        prev_dc = prev[0] if prev and prev[0] else None
+
+        lines = [f"## 交易日：{_norm_dashed(dc)}"]
+
+        # 1) 主要指数
+        idx_codes = [("sh000001", "上证指数"), ("sz399001", "深证成指"),
+                     ("sz399006", "创业板指"), ("sh000688", "科创50")]
+        idx_lines = ["### 主要指数"]
+        for code, name in idx_codes:
+            r = cur.execute("SELECT close FROM daily_kline WHERE code=? AND trade_date=? LIMIT 1", (code, dc)).fetchone()
+            if not r:
+                continue
+            close = r[0]
+            chg = ""
+            if prev_dc:
+                p = cur.execute("SELECT close FROM daily_kline WHERE code=? AND trade_date=? LIMIT 1", (code, prev_dc)).fetchone()
+                if p and p[0]:
+                    chg = f"（{(close / p[0] - 1) * 100:+.2f}%）"
+            idx_lines.append(f"- {name}：{close}{chg}")
+        lines.append("\n".join(idx_lines))
+
+        # 2) 市场宽度 + 涨停/跌停（与上一交易日 self-join）
+        if prev_dc:
+            b = cur.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN t.close > p.close THEN 1 ELSE 0 END) up,
+                  SUM(CASE WHEN t.close < p.close THEN 1 ELSE 0 END) down,
+                  SUM(CASE WHEN t.close = p.close THEN 1 ELSE 0 END) flat,
+                  SUM(CASE WHEN t.close >= p.close * 1.095 THEN 1 ELSE 0 END) lu,
+                  SUM(CASE WHEN t.close <= p.close * 0.905 THEN 1 ELSE 0 END) ld
+                FROM daily_kline t
+                JOIN daily_kline p ON t.code = p.code AND t.market = p.market
+                WHERE t.trade_date = ? AND p.trade_date = ?
+                  AND t.code NOT IN ('sh000001','sz399001','sz399006','sh000688')
+                """,
+                (dc, prev_dc),
+            ).fetchone()
+            if b:
+                up, down, flat, lu, ld = b
+                tot = (up or 0) + (down or 0) + (flat or 0)
+                lines.append(
+                    "### 市场宽度\n"
+                    f"- 上涨 {up or 0} 家 / 下跌 {down or 0} 家 / 平盘 {flat or 0} 家（共 {tot} 只）\n"
+                    f"- 涨停约 {lu or 0} 只 / 跌停约 {ld or 0} 只"
+                )
+
+        # 3) 成交额 TOP10（daily_kline.amount 在本库多为 NULL，仅在可用时输出）
+        name_map = {c: n for c, n in cur.execute("SELECT code, name FROM stock_names").fetchall()}
+        amount_rows = cur.execute(
+            "SELECT COUNT(*) FROM daily_kline WHERE trade_date=? AND amount IS NOT NULL AND amount > 0 "
+            "AND code NOT IN ('sh000001','sz399001','sz399006','sh000688')",
+            (dc,),
+        ).fetchone()[0]
+        if amount_rows:
+            top = cur.execute(
+                "SELECT code, amount, close FROM daily_kline "
+                "WHERE trade_date=? AND amount IS NOT NULL AND amount > 0 "
+                "AND code NOT IN ('sh000001','sz399001','sz399006','sh000688') "
+                "ORDER BY amount DESC LIMIT 10",
+                (dc,),
+            ).fetchall()
+            tl = ["### 成交额 TOP10"]
+            for i, (code, amt, close) in enumerate(top, 1):
+                nm = name_map.get(code, code)
+                amt_yi = (amt or 0) / 1e8
+                tl.append(f"{i}. {nm}({code})：成交额 {amt_yi:.1f}亿，收盘 {close}")
+            lines.append("\n".join(tl))
+        else:
+            lines.append("### 成交额\n- （该日 daily_kline 未提供成交额字段，未列出成交额榜）")
+
+        # 4) 主力净流入 TOP10（fund_daily 为带杠日期，且数据可能稀疏）
+        dd = _norm_dashed(dc)
+        frows = cur.execute(
+            "SELECT code, main_net_flow FROM fund_daily WHERE date=? ORDER BY main_net_flow DESC LIMIT 10",
+            (dd,),
+        ).fetchall()
+        if frows:
+            fl = ["### 主力净流入 TOP10（个股）"]
+            for i, (code, net) in enumerate(frows, 1):
+                nm = name_map.get(code, code)
+                net_yi = (net or 0) / 1e8
+                fl.append(f"{i}. {nm}({code})：主力净流入 {net_yi:+.2f}亿")
+            lines.append("\n".join(fl))
+        else:
+            lines.append("### 主力资金\n- （该日 fund_daily 无数据，未提供个股主力净流入）")
+    except Exception as e:
+        _log.warning("review summary failed: %s", e)
+        lines = [f"（本地数据汇总失败：{e}）"]
+    finally:
+        db.close()
+    return "\n\n".join(lines), dc
+
+
+# 复盘分析框架 = 提示词合集《六、综合实战版》原文 + 《七、通用增强要求》原文，严格照搬，不自行发挥
+_REVIEW_FRAMEWORK = """请对昨日 A 股市场做一份综合行情分析，兼顾指数、情绪、热点、资金、风险和应对思路，要求结构化输出，逻辑清晰，避免空话。
+
+请按以下结构展开：
+
+一、指数与市场结构
+- 上证指数、深证成指、创业板指等主要指数表现
+- 市场整体是普涨普跌还是结构分化
+- 指数强弱与个股赚钱效应是否一致
+
+二、情绪周期
+- 当前市场情绪属于修复、分歧、高潮、退潮还是混沌阶段
+- 高标股、连板股、核心题材股反馈如何
+- 当前短线生态是改善还是恶化
+
+三、热点与主线
+- 当前最强的 3 个方向是什么
+- 每个方向的催化逻辑、市场认可度、持续性如何
+- 是否已经形成主线，还是快速轮动
+
+四、资金风格
+- 资金更偏权重、防御、红利、科技成长还是小盘题材
+- 资金风格是否稳定
+- 市场是增量推动还是存量博弈
+
+五、风险评估
+- 当前市场最大的风险点是什么
+- 哪些板块或风格最容易出现回撤
+- 哪些信号会破坏当前行情结构
+
+六、应对思路
+- 当前更适合进攻、控制仓位、等待确认还是偏防守
+- 短线和波段投资者分别应关注什么
+- 后续最重要的观察变量是什么
+
+七、总结
+- 用"市场状态、主线方向、风险提示、后续观察点"做简要总结
+
+要求：
+- 每个结论尽量给出依据
+- 区分事实、判断、推演
+- 不做绝对化预测
+- 输出风格偏专业复盘和交易研判
+
+补充要求：
+- 不要只复述指数涨跌，要解释市场结构
+- 不要只罗列热点名称，要说明热点逻辑与持续性
+- 不要只说情绪好或差，要给出判断依据
+- 明确区分：事实、判断、推演
+- 如果出现数据不确定或无法确认，请直接说明
+- 输出尽量偏交易复盘，而不是新闻摘要
+- 如果数据不确定，请明确说明；不要自行编造。"""
+
+
+# 明日预演框架 = 提示词合集《二、盘前版：盘前研判》原文 + 《七、通用增强要求》原文，严格照搬，不自行发挥
+_PREVIEW_FRAMEWORK = """请对今日 A 股市场做一份盘前分析，目标是判断今天大盘可能的运行节奏、热点方向和风险点。
+
+请按以下框架输出：
+
+1. 外围与宏观影响
+- 隔夜海外市场表现对 A 股可能有哪些影响
+- 宏观政策、消息面、行业新闻中，哪些最可能影响今日开盘情绪
+- 富时 A50 期货夜盘、纳斯达克中国金龙指数、费城半导体指数 SOX
+- 每项给出涨跌幅，并用一句话说明对今日 A 股开盘意味着什么（偏多 / 偏空 / 中性）
+- 美股：道指、纳指、标普，以及特斯拉、英伟达、苹果等重点个股，涨跌幅超过 ±2% 的请标注
+- 商品与汇率：原油、黄金、铜、美元指数、离岸人民币、美债收益率，并注明各自对应 A 股哪条线
+- 美联储表态、地缘政治、海外政策（关税 / 出口管制）、海外大公司事件
+- 每条注明重要程度（高 / 中 / 低）和发布时间
+- 外围明显利空、但 A50 期货没跟跌 → 请单独指出，这可能是 A 股走独立行情的信号
+- 列出本期外围中"看似重要但对 A 股基本无效"的项，并说明原因
+
+2. 大盘预期
+- 今日大盘更可能高开、低开还是震荡开盘
+- 市场整体偏进攻、偏防守还是偏观望
+- 影响今日市场节奏的关键变量是什么
+
+3. 重点方向
+- 今日最值得关注的 3 个方向或板块
+- 每个方向的逻辑是什么
+- 哪些方向只是消息刺激，哪些方向可能具备持续性
+- 最有预期差的方向是什么，并说明逻辑
+
+4. 情绪与短线接力
+- 今日短线情绪更可能修复、延续、分歧还是退潮
+- 昨日连板股、高标股、强势板块是否有参考意义
+- 今日短线博弈要重点防什么
+
+5. 风险提示
+- 哪些方向可能高开低走
+- 哪些板块已经透支预期
+- 哪些信号出现后要转为谨慎
+
+6. 盘前结论
+- 用简洁语言概括今日市场可能的主基调
+- 说明今天更适合观察什么，而不是盲目追什么
+
+要求：
+- 明确区分"已知事实"和"盘前推演"
+- 不做绝对化预测
+- 尽量写出条件判断，而不是单向结论
+
+补充要求：
+- 不要只复述指数涨跌，要解释市场结构
+- 不要只罗列热点名称，要说明热点逻辑与持续性
+- 不要只说情绪好或差，要给出判断依据
+- 明确区分：事实、判断、推演
+- 如果出现数据不确定或无法确认，请直接说明
+- 输出尽量偏交易复盘，而不是新闻摘要
+- 如果数据不确定，请明确说明；不要自行编造。"""
+
+
+def _prev_bizday(dashed: str) -> str:
+    """dashed 日期的前一交易日（仅跳过周末，不判断节假日）。"""
+    from datetime import date as _d, timedelta as _td
+
+    d = _d(int(dashed[:4]), int(dashed[5:7]), int(dashed[8:10]))
+    d -= _td(days=1)
+    while d.weekday() >= 5:  # 5=周六 6=周日
+        d -= _td(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+@router.get("/review/preview-prompt")
+def review_preview_prompt(date: str = "") -> dict:
+    """返回发给豆包/DeepSeek 的今日预演 prompt（盘前研判当日）。
+
+    date = 研判对象日（盘前触发传当天）；基础数据日 = 其前一交易日。
+    用户要求：只发「提示词合集」第二节（盘前版）+ 第七节（通用增强要求）的**原文**，
+    不附加本地数据（本地数据仅由后端 /review/preview-analysis 在综合阶段用于交叉验证）。
+    """
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    dd = _norm_dashed(date)
+    pd_ = _prev_bizday(dd)
+    # 框架原文以「今日」指代研判对象、「昨日」指代前一交易日，需锚定具体日期避免歧义
+    prompt = (
+        f"（本次盘前研判对象为 {dd}，即 {pd_}（前一交易日）之后的交易日；"
+        f"下文「今日」均指 {dd}，「昨日」均指 {pd_}。）\n\n{_PREVIEW_FRAMEWORK}"
+    )
+    return {"prompt": prompt, "date": dd, "prev_bizday": pd_}
+
+
+@router.get("/review/report")
+def review_report(date: str = "", kind: str = "preview") -> dict:
+    """读取已导出的 AI 复盘/预演 md 文件内容（reports/output/ai_review/{date}_{kind}.md）。
+
+    kind: "preview"(今日预演) | "review"(昨日复盘)。文件不存在返回 exists=False。
+    前端以此为当日结果的权威来源：有文件直接回显，避免每次重跑分析。
+    """
+    if kind not in ("preview", "review"):
+        kind = "preview"
+    dd = _norm_dashed(date) if date else datetime.now().strftime("%Y-%m-%d")
+    path = _PROJECT_ROOT / "reports" / "output" / "ai_review" / f"{dd}_{kind}.md"
+    if not path.exists():
+        return {"exists": False, "date": dd, "kind": kind}
+    try:
+        content = path.read_text(encoding="utf-8")
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return {"exists": False, "date": dd, "kind": kind}
+    return {"exists": True, "date": dd, "kind": kind, "content": content, "mtime": mtime}
+
+
+@router.get("/review/ai-prompt")
+def review_ai_prompt(date: str = "") -> dict:
+    """返回发给豆包/DeepSeek 的昨日复盘 prompt。
+
+    用户要求：只发「提示词合集」第六节（综合实战版）+ 第七节（通用增强要求）的**原文**，
+    不附加本地数据摘要（本地数据仅由后端 /review/ai-analysis 在综合阶段用于交叉验证）。
+    因此这里不再调用 _build_review_summary（该查询约 9s），接口可即时返回。
+    """
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    dd = _norm_dashed(date)
+    # 框架原文以「昨日」指代复盘对象；按钮已改为盘后分析当天，需一行日期锚定避免差一天
+    prompt = f"（本次复盘交易日为 {dd}，下文「昨日」均指 {dd}。）\n\n{_REVIEW_FRAMEWORK}"
+    return {"prompt": prompt, "date": dd, "summary": ""}
+
+
+def _extract_conclusion(report: str) -> str:
+    """从 MiMo 综合结果中提取浓缩结论（「【最终结论】」标记之后到文末），无则返回空串。"""
+    if not report:
+        return ""
+    marker = "【最终结论】"
+    idx = report.rfind(marker)
+    if idx < 0:
+        return ""
+    seg = report[idx + len(marker):].strip().lstrip("：:。 ")
+    return seg[:2000]
+
+
+def _save_ai_report(
+    kind: str, date: str, report: str, sources: list[tuple[str, str]] | None = None
+) -> str:
+    """把 AI 复盘/预演导出为 md：含豆包/DeepSeek 各来源原始回答 + 项目 LLM 综合结论。
+
+    kind: "review"(复盘) | "preview"(预演)
+    sources: [(label, answer), ...] 各路 LLM 原始回答；report: MiMo 综合结论。
+    返回文件路径；写入失败返回空串。原子写入（tmp+replace）。
+    """
+    if not report:
+        return ""
+    out = _PROJECT_ROOT / "reports" / "output" / "ai_review"
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{date}_{kind}.md"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        title = "AI 多源复盘" if kind == "review" else "AI 今日预演"
+        lines = [f"# {title}（{date}）", "", f"> 生成于 {now}", ""]
+        if sources:
+            lines += ["## 各来源原始回答", ""]
+            for label, ans in sources:
+                lines += [f"### {label}", "", ans.strip(), ""]
+        lines += ["---", "", f"## {title}综合结论（项目 LLM）", "", report.strip(), ""]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines), encoding="utf-8")
+        tmp.replace(path)
+        return str(path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("保存 AI%s(%s) 失败：%s", kind, date, str(exc)[:200])
+        return ""
+
+
+@router.post("/review/ai-analysis")
+def review_ai_analysis(data: dict) -> dict:
+    """复盘多源 AI 分析：综合豆包+DeepSeek 的回答，结合本地数据交叉验证输出最终复盘。
+
+    Body: { "date": "YYYY-MM-DD", "web_answers": [{target,label,answer}...] }
+    项目 LLM 只综合 web_answers，不自己独立分析；无回答时返回 error 提示先获取/粘贴。
+    """
+    # 与本项目其他 LLM 调用保持一致：函数内局部导入，并显式加载根项目 .env。
+    # （agent/.env 里的 LANGCHAIN_MODEL_NAME 等 openrouter 配置会污染 call_llm 的模型/密钥选择）
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_PROJECT_ROOT / ".env")
+    except ImportError:
+        pass
+
+    from analysis.llm_analyzer import call_llm
+
+    date_str = data.get("date", "") or datetime.now().strftime("%Y-%m-%d")
+    dd = _norm_dashed(date_str)
+
+    web_answers = data.get("web_answers") or []
+    blocks = []
+    labels: list[str] = []
+    src_pairs: list[tuple[str, str]] = []
+    for w in web_answers:
+        if not isinstance(w, dict):
+            continue
+        label = (w.get("label") or w.get("target") or "AI")
+        ans = (w.get("answer") or "").strip()
+        if ans:
+            blocks.append(f"### {label} 的回答\n{ans[:3000]}")
+            labels.append(label)
+            src_pairs.append((label, ans[:3000]))
+
+    if not blocks:
+        # 项目 LLM 只综合豆包/DeepSeek 的回答，不自己独立分析本地数据
+        return {
+            "report": "",
+            "error": "没有可综合的回答：请先一键发送或手动粘贴豆包/DeepSeek 的回答，再做多源综合复盘",
+            "date": dd,
+            "synthesized": False,
+        }
+
+    summary, _dc = _build_review_summary(dd)
+
+    if blocks:
+        # 来源数量按实际传入动态生成：若某路（如豆包）失败只剩一路，
+        # 写死「豆包与 DeepSeek 两个模型」会让 LLM 凭空编造未提供的那一方的观点。
+        src_desc = "、".join(labels)
+        synth_sys = (
+            f"你是 A 股复盘多源分析师。任务：综合 {src_desc} 对昨日 A 股的复盘分析，"
+            "结合下方本地客观数据交叉验证，输出最终复盘。\n"
+            "要求：\n"
+            f"1. 观点对比：提炼各家核心判断（实际来源共 {len(labels)} 个：{src_desc}），指出方向一致处与分歧点\n"
+            "2. 数据验证：哪些观点与本地数据（指数涨跌/市场宽度/涨停跌停/成交额/主力资金）吻合，哪些缺乏支持\n"
+            "3. 按【指数与市场结构 / 情绪周期 / 热点与主线 / 资金风格 / 风险评估 / 应对思路 / 总结】七段输出最终复盘\n"
+            "4. 结论明确，拒绝和稀泥；区分事实、判断、推演；禁止编造数字。\n"
+            f"5. 严格限制：只依据下方实际给出的 {len(labels)} 个来源作答；"
+            "若只有一个来源，就如实说明「仅单一来源，缺少交叉验证」，"
+            "**严禁虚构任何未提供来源的名称或观点**。\n"
+            f"6. 最后单独以一行「【最终结论】」开头，按上面各段（指数与市场结构/情绪周期/热点与主线/资金风格/风险评估/应对思路/总结）**逐维度写出详细结论**，"
+            "每个维度 2~4 句（明确的判断 + 核心理由 + 关键数据支撑），并对比 {src_desc} 各来源在该维度上观点的一致处与分歧点、给出你的裁决依据；"
+            "用「1. 2. 3. …」分条列出。复盘时间充裕，结论要求完整详实、可独立成文，**不要**压缩成一句话或省略论证。"
+        )
+        synth_prompt = (
+            f"### 本地客观数据（{dd}）\n{summary[:5000]}\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n请按上述要求输出多源综合最终复盘。"
+        )
+        try:
+            synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("review synthesis failed: %s", str(exc)[:200])
+            synthesis = f"（LLM 综合失败：{str(exc)[:200]}）"
+        _save_ai_report("review", dd, synthesis, src_pairs or None)
+        return {"report": synthesis, "conclusion": _extract_conclusion(synthesis), "date": dd, "sources": len(blocks), "synthesized": True}
+
+
+@router.post("/review/preview-analysis")
+def review_preview_analysis(data: dict) -> dict:
+    """今日预演多源 AI 分析：综合豆包+DeepSeek 的回答，结合前一交易日本地收盘数据输出当日预演。
+
+    Body: { "date": "YYYY-MM-DD", "web_answers": [{target,label,answer}...] }
+    date = 研判对象日（盘前触发传当天）；web_answers 非空时做多源综合；
+    为空时退化为仅本地数据的 AI 预演。
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_PROJECT_ROOT / ".env")
+    except ImportError:
+        pass
+
+    from analysis.llm_analyzer import call_llm
+
+    date_str = data.get("date", "") or datetime.now().strftime("%Y-%m-%d")
+    target = _norm_dashed(date_str)  # 研判对象日（今日）
+    base = _prev_bizday(target)  # 基础数据日（前一交易日）
+    summary, dc = _build_review_summary(base)
+    logs: list[str] = []
+    logs.append(f"本地数据摘要就绪（base={dc} · summary={len(summary)} 字符）")
+
+    web_answers = data.get("web_answers") or []
+    blocks = []
+    labels: list[str] = []
+    src_pairs: list[tuple[str, str]] = []
+    for w in web_answers:
+        if not isinstance(w, dict):
+            continue
+        label = (w.get("label") or w.get("target") or "AI")
+        ans = (w.get("answer") or "").strip()
+        if ans:
+            blocks.append(f"### {label} 的回答\n{ans[:3000]}")
+            labels.append(label)
+            src_pairs.append((label, ans[:3000]))
+    logs.append(f"收到 {len(blocks)} 路外部回答：{('、'.join(labels) or '无')}")
+
+    if blocks:
+        # 来源数量按实际传入动态生成，严禁让 LLM 虚构未提供的来源观点
+        src_desc = "、".join(labels)
+        synth_sys = (
+            f"你是 A 股盘前研判多源分析师。任务：综合 {src_desc} 对 {target}（今日）的盘前研判，"
+            f"结合 {dc}（前一交易日）本地收盘数据交叉验证，输出对 {target} 的最终预演。\n"
+            "要求：\n"
+            f"1. 观点对比：提炼各家核心判断（实际来源共 {len(labels)} 个：{src_desc}），指出方向一致处与分歧点\n"
+            "2. 数据验证：哪些观点与前一交易日本地数据（指数涨跌/市场宽度/涨停跌停/成交额/主力资金）吻合，哪些缺乏支持\n"
+             "3. 按【外围与宏观影响 / 大盘预期 / 重点方向 / 情绪与短线接力 / 风险提示 / 盘前结论】六段输出最终预演\n"
+            "4. 结论明确，拒绝和稀泥；区分事实、判断、推演；禁止编造数字。\n"
+            f"5. 严格限制：只依据下方实际给出的 {len(labels)} 个来源作答；"
+            "若只有一个来源，就如实说明「仅单一来源，缺少交叉验证」，"
+            "**严禁虚构任何未提供来源的名称或观点**。\n"
+            "6. 最后单独以一行「【最终结论】」开头，把上面各段（外围与宏观影响/大盘预期/重点方向/情绪与短线接力/风险提示/盘前结论）的结论**每个维度各提炼一条**，"
+            "用「1. 2. 3. …」分条列出——每条覆盖一个维度，给出明确的判断和核心理由，保留各维度自己的结论（忽略完整分析的长篇论证与数据罗列）。"
+        )
+        synth_prompt = (
+            f"### 前一交易日本地客观数据（{dc}）\n{summary[:5000]}\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n请按上述要求输出多源综合最终预演。"
+        )
+        try:
+            synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys, timeout=180, log=logs.append)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("preview synthesis failed: %s", str(exc)[:200])
+            synthesis = f"（LLM 综合失败：{str(exc)[:200]}）"
+            logs.append(f"综合调用异常：{str(exc)[:200]}")
+        _save_ai_report("preview", target, synthesis, src_pairs or None)
+        logs.append(f"综合完成（{len(synthesis)} 字），md 已落盘 reports/output/ai_review/{target}_preview.md")
+        return {"report": synthesis, "conclusion": _extract_conclusion(synthesis), "date": target, "base_date": dc, "sources": len(blocks), "synthesized": True, "logs": logs}
+
+    # 退化：仅本地数据 AI 预演
+    logs.append("无外部回答，退化为仅本地数据 AI 预演")
+    base_sys = "你是 A 股盘前研判分析师，基于前一交易日收盘客观数据预判当日，结论明确、区分事实与推演、禁止编造数字。"
+    base_prompt = (
+        f"以下是 {dc}（前一交易日）A股本地收盘数据，请预判 {target}（今日），"
+        f"按【外围与宏观影响/大盘预期/重点方向/情绪与短线接力/风险提示/盘前结论】六段输出预演：\n\n{summary[:5000]}"
+    )
+    try:
+        report = call_llm(base_prompt, model="mimo-v2.5-pro", system_prompt=base_sys, timeout=180, log=logs.append)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("preview base analysis failed: %s", str(exc)[:200])
+        report = f"（AI 预演生成失败：{str(exc)[:200]}）"
+        logs.append(f"AI 预演调用异常：{str(exc)[:200]}")
+    _save_ai_report("preview", target, report)
+    return {"report": report, "conclusion": _extract_conclusion(report), "date": target, "base_date": dc, "sources": 0, "synthesized": False, "logs": logs}
+
+
+def _read_vibe_review(date_str: str) -> dict:
+    """读取 ~/.duanxian-agents/reviews/{date}.json 当日复盘结论。"""
+    review = Path.home() / ".duanxian-agents" / "reviews" / f"{_norm_dashed(date_str)}.json"
+    try:
+        return json.loads(review.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+
+
+def _build_verify_context(target: str):
+    """组装盘后验证上下文：早晨预演（今日盘前 AI 预演）+ 今日收盘实况。
+
+    返回 (prompt 上下文文本, 结构 dict)。早晨预演来源：
+    ① reports/output/ai_review/{target}_preview.md（盘前 AI 预演六段）
+    ② 退化：vibe 复盘结论中的明日关注点+验证条件（自体面交代数据缺失）
+    """
+    preview_path = _PROJECT_ROOT / "reports" / "output" / "ai_review" / f"{target}_preview.md"
+    preview_text = ""
+    try:
+        if preview_path.exists() and preview_path.stat().st_size > 0:
+            preview_text = preview_path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    summary, _dc = _build_review_summary(target)
+
+    if preview_text:
+        blocks = [f"## 今日（{target}）早晨预演（盘前 AI 预演）\n{preview_text[:6000]}"]
+        ctx = {
+            "date": _norm_dashed(target),
+            "prev_date": _norm_dashed(_prev_bizday(target)),
+            "phase": "",
+            "directions": [],
+            "verification_items": [],
+            "oneliner": "",
+            "source": "preview",
+        }
+    else:
+        # 退化：无今日预演，回退读昨日 vibe 复盘结论（明日关注点）
+        prev = _prev_bizday(target)
+        review = _read_vibe_review(prev)
+        focus = review.get("focus") or {}
+        directions = focus.get("focus_directions") or []
+        vitems = focus.get("verification_items") or []
+        phase = focus.get("emotion_phase", "")
+        oneliner = focus.get("market_oneliner", "")
+        blocks = [f"## 昨日（{_norm_dashed(prev)}）复盘结论（无今日预演，退化来源）"]
+        blocks.append(f"- 情绪档位：{phase or '未知'}\n- 一句话判断：{oneliner or '（无）'}")
+        if directions:
+            d_lines = ["### 明日关注方向（昨日给出）"]
+            for i, d in enumerate(directions, 1):
+                d_lines.append(f"{i}. {d.get('direction','')}：{d.get('logic','')}（风险：{d.get('risk','')}）")
+            blocks.append("\n".join(d_lines))
+        else:
+            blocks.append("- 昨日未给明日方向")
+        if vitems:
+            v_lines = ["### 明日验证条件（昨日给出，待今日核验）"]
+            for i, v in enumerate(vitems, 1):
+                v_lines.append(f"{i}. {v.get('metric','')} 预期「{v.get('direction','')}」——{v.get('reason','')}")
+            blocks.append("\n".join(v_lines))
+        else:
+            blocks.append("- 昨日未给验证条件")
+        ctx = {
+            "date": _norm_dashed(target),
+            "prev_date": _norm_dashed(prev),
+            "phase": phase,
+            "directions": directions,
+            "verification_items": vitems,
+            "oneliner": oneliner,
+            "source": "vibe_fallback",
+        }
+
+    blocks.append(f"\n## 今日（{_norm_dashed(target)}）收盘实况\n{summary}")
+    return "\n\n".join(blocks), ctx
+
+
+_VERIFY_FRAMEWORK = """你是一名 A 股盘后验证分析师。任务：用【今日收盘实况】逐条核验【今日早晨预演（盘前 AI 预演）】给出的六段预判，输出一份"早晨预判兑现了吗"的核验报告。
+
+要求：
+1. 逐条判定：从早晨预演中提炼各维度核心判断（大盘方向、重点方向、情绪节奏、风险点等），结合今日收盘数据逐一评分。
+2. 判定口径：每个维度判「兑现 / 部分兑现 / 未兑现 / 数据不足」，并给出数据依据。
+3. 数据说话：引用今日具体的指数涨跌、涨停跌停、连板、封板/炸板率、成交额、资金流读数来支撑判定。数据缺失或不足以判定的，如实说明，禁止编造。
+4. 输出结构：
+   - 一、结论总览：早晨预演总体兑现情况（兑现 / 部分兑现 / 证伪 / 无法判断），一句话总结
+   - 二、逐维度核验：按预演六段分别核验（含评分与依据）
+   - 三、含金量评估：对早晨预演质量做一个复盘式点评
+   - 四、修正意见：若判断有误，明日应如何修正，明日关注什么
+5. 结论明确，拒绝和稀泥；区分事实、判断、推演；禁止编造数字。"""
+
+
+@router.get("/review/verify-prompt")
+def review_verify_prompt(date: str = "") -> dict:
+    """返回发给豆包/DeepSeek 的盘后验证 prompt（早晨预演 vs 今日收盘核验）。
+
+    date = 待验证的交易日本身（盘后触发传当天）。早晨预演取
+    reports/output/ai_review/{date}_preview.md（盘前 AI 预演完整 md）；
+    若无预演文件则回退 vibe 复盘结论。
+今日收盘实况由 verify-analysis 综合阶段用于交叉验证，故 prompt 只发预判骨架，
+    不在接口内拼接重量级本地数据（保持即时返回）。
+    """
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    dd = _norm_dashed(date)
+    preview_path = _PROJECT_ROOT / "reports" / "output" / "ai_review" / f"{dd}_preview.md"
+    preview_text = ""
+    try:
+        if preview_path.exists() and preview_path.stat().st_size > 0:
+            preview_text = preview_path.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    lines = [f"（本次盘后验证对象：{dd}，下文「今日」均指 {dd}。）", _VERIFY_FRAMEWORK]
+    if preview_text:
+        lines.append(f"\n## 今日（{dd}）早晨预演（盘前 AI 预演）\n{preview_text[:5000]}")
+    else:
+        prev = _prev_bizday(dd)
+        review = _read_vibe_review(prev)
+        focus = review.get("focus") or {}
+        directions = focus.get("focus_directions") or []
+        vitems = focus.get("verification_items") or []
+        lines.append(
+            f"\n## 昨日（{prev}）给出的预判（无今日预演时的退化来源）\n"
+            f"- 情绪档位：{focus.get('emotion_phase','未知')}"
+        )
+        if directions:
+            lines.append("\n### 明日方向")
+            for i, d in enumerate(directions, 1):
+                lines.append(f"{i}. {d.get('direction','')}：{d.get('logic','')}")
+        if vitems:
+            lines.append("\n### 明日验证条件（今日待核验）")
+            for i, v in enumerate(vitems, 1):
+                lines.append(f"{i}. {v.get('metric','')} 预期「{v.get('direction','')}」——{v.get('reason','')}")
+    return {"prompt": "\n\n".join(lines), "date": dd, "prev_date": dd, "summary": ""}
+
+
+def _save_verify_narrative(report: str, ctx: dict) -> None:
+    """把 MiMo 盘后验证结论写进 vibe reflection（prediction_date=昨日）。
+
+    reflection 由 vibe 次日回评自动生成 keyed by prediction_date；这里合并写入一个
+    llm_narrative 字段，与结构化 per-item 核验并存，随次日复盘展示。文件不存在则创建。
+    """
+    import uuid as _uuid
+
+    pred = ctx.get("prev_date") or ""
+    eval_date = ctx.get("date") or ""
+    if not pred or not report:
+        return
+    refl_dir = Path.home() / ".duanxian-agents" / "reflections"
+    path = refl_dir / f"{pred}.json"
+    env: dict = {}
+    try:
+        if path.is_file():
+            env = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 坏文件则重建
+        env = {}
+    env["llm_narrative"] = {
+        "eval_date": eval_date,
+        "prev_date": pred,
+        "report": report,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "phase": ctx.get("phase", ""),
+        "directions": ctx.get("directions", []),
+        "verification_items": ctx.get("verification_items", []),
+        "oneliner": ctx.get("oneliner", ""),
+    }
+    try:
+        refl_dir.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{_uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(json.dumps(env, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("保存验证 narrative 失败(%s)：%s", pred, str(exc)[:200])
+
+
+@router.post("/review/verify-analysis")
+def review_verify_analysis(data: dict) -> dict:
+    """盘后验证多源 AI 分析：综合豆包+DeepSeek 的回答，结合今日收盘数据输出核验结论。
+
+    Body: { "date": "YYYY-MM-DD", "web_answers": [{target,label,answer}...] }
+    web_answers 非空做多源综合；为空退化为仅本地数据的验证。
+    结论落盘到 vibe reflection（~/.duanxian-agents/reflections/{prev_date}.json）的 llm_narrative 字段，
+    与结构化 per-item 核验并存，随次日复盘自动展示。
+    """
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_PROJECT_ROOT / ".env")
+    except ImportError:
+        pass
+
+    from analysis.llm_analyzer import call_llm
+
+    date_str = data.get("date", "") or datetime.now().strftime("%Y-%m-%d")
+    target = _norm_dashed(date_str)
+    context, ctx = _build_verify_context(target)
+
+    web_answers = data.get("web_answers") or []
+    blocks = []
+    labels: list[str] = []
+    for w in web_answers:
+        if not isinstance(w, dict):
+            continue
+        label = (w.get("label") or w.get("target") or "AI")
+        ans = (w.get("answer") or "").strip()
+        if ans:
+            blocks.append(f"### {label} 的回答\n{ans[:3000]}")
+            labels.append(label)
+
+    if blocks:
+        src_desc = "、".join(labels)
+        synth_sys = (
+            f"你是 A 股盘后验证多源分析师。任务：综合 {src_desc} 对今日核验的判断，"
+            "结合下方本地收盘数据交叉验证，输出最终核验报告。\n"
+            "要求：\n"
+            f"1. 观点对比：提炼各家核验结论（实际来源共 {len(labels)} 个：{src_desc}），指出一致处与分歧点\n"
+            "2. 数据验证：哪些核验与本地数据（指数/宽度/涨停跌停/成交额/资金流）吻合，哪些缺乏支持\n"
+            "3. 按【方向核验 / 条件核验 / 含金量评估 / 修正意见 / 总结】五段输出最终核验报告\n"
+            "4. 结论明确，拒绝和稀泥；区分事实、判断、推演；禁止编造数字。\n"
+            f"5. 严格限制：只依据下方实际给出的 {len(labels)} 个来源作答；"
+            "若只有一个来源，就如实说明「仅单一来源，缺少交叉验证」，"
+            "**严禁虚构任何未提供来源的名称或观点**。"
+        )
+        synth_prompt = f"### 本次待核验预判与今日收盘实况\n{context[:6000]}\n\n" + "\n\n".join(blocks) + "\n\n请按上述要求输出多源综合最终核验报告。"
+        try:
+            synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("verify synthesis failed: %s", str(exc)[:200])
+            synthesis = f"（LLM 综合失败：{str(exc)[:200]}）"
+        _save_verify_narrative(synthesis, ctx)
+        return {"report": synthesis, "date": target, "sources": len(blocks), "synthesized": True, **ctx}
+
+    # 退化：仅本地数据盘后验证
+    try:
+        report = call_llm(
+            f"{_VERIFY_FRAMEWORK}\n\n以下为待核验上下文与今日收盘实况：\n\n{context[:7000]}",
+            model="mimo-v2.5-pro",
+            system_prompt="你是 A 股盘后验证分析师，基于本地客观数据逐条核验昨日预判，结论明确、区分事实与推演、禁止编造数字。",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("verify base analysis failed: %s", str(exc)[:200])
+        report = f"（盘后验证生成失败：{str(exc)[:200]}）"
+    _save_verify_narrative(report, ctx)
+    return {"report": report, "date": target, "sources": 0, "synthesized": False, **ctx}
 
 
 # ---------------------------------------------------------------------------
@@ -2760,8 +3546,8 @@ def _import_auction_excel(db, today_str: str) -> int:
             if not code:
                 continue
             name = str(row.get('名称', ''))
-            vol = int(row.get('竞价量(手)', 0)) * 100  # 手→股
-            amount = float(row.get('竞价额(万元)', 0)) * 10000  # 万元→元
+            vol = int(row.get('竞价量(手)', 0))  # 单位=手（与DB一致）
+            amount = float(row.get('竞价额(万元)', 0))  # 单位=万元（与DB一致）
             open_px = float(row.get('开盘价', 0))
             prev_close = float(row.get('昨收', 0))
             collect_time = str(row.get('采集时间', ''))
@@ -2821,6 +3607,10 @@ def collect_auction_data():
     if minute_of_day < 9 * 60 + 15:
         return _err(f"竞价尚未开始（当前{now.strftime('%H:%M')}，09:15后才能采集）", status="too_early")
 
+    from data.trading_calendar import is_trading_day
+    if not is_trading_day(now):
+        return _err("当前为非交易日（周末/节假日），不采集竞价数据", status="not_trading_day")
+
     blocked, resp = _check_auction_time()
     if blocked:
         return resp
@@ -2861,8 +3651,8 @@ def collect_auction_data():
             vol = int(basic["volume"])
             if vol <= 0:
                 continue
-            # 竞价时段腾讯 fields[37]=amount 单位是"万元"；统一存储为"元"
-            amount = round(basic["amount"] * 10000, 2)
+            # 腾讯 fields[37]=amount 单位是"万元"；统一存"万元"
+            amount = round(basic["amount"], 2)
             # 竞价期间 price(fields[3]) 经常为 0，用 open(fields[5]) 作为竞价价兜底
             price = basic["price"] if basic["price"] > 0 else basic["open"]
             open_px = basic["open"]
@@ -2896,9 +3686,7 @@ def collect_auction_data():
                 (today_str,)
             ).fetchall()
             if rows:
-                df = pd.DataFrame(rows, columns=['日期', '代码', '名称', '竞价量(手)', '竞价额(元)', '竞价价', '开盘价', '采集时间', '昨收'])
-                df['竞价额(元)'] = (df['竞价额(元)'] / 10000).round(2)
-                df = df.rename(columns={'竞价额(元)': '竞价额(万元)'})
+                df = pd.DataFrame(rows, columns=['日期', '代码', '名称', '竞价量(手)', '竞价额(万元)', '竞价价', '开盘价', '采集时间', '昨收'])
                 df = df.drop(columns=['竞价价'])
                 out = _PROJECT_ROOT / f'竞价数据_{today_str}.xlsx'
                 df.to_excel(str(out), index=False, sheet_name='竞价数据')
@@ -2994,7 +3782,7 @@ def get_auction_latest(date: str = "", limit: int = 100):
         }
     except Exception as e:
         _log.warning("auction latest failed", exc_info=True)
-        return {"stocks": [], "leaders": [], "stats": None}
+        return {"stocks": [], "leaders": [], "stats": None, "error": str(e)}
     finally:
         db.close()
 
@@ -3017,9 +3805,6 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         d2_map = {}
         for r in cur.fetchall():
             d2_map[r[0]] = {"name": r[1], "vol": r[2], "price": r[3], "prev_close": r[4] or 0}
-        _log.warning("compare d1=%d d2=%d db=%s", len(d1_map), len(d2_map), db)
-        if "002607" in d1_map:
-            _log.warning("002607 d1: %s", d1_map["002607"])
 
         all_codes = set(d1_map) | set(d2_map)
         if not all_codes:
@@ -3027,17 +3812,18 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
                     "increase": 0, "decrease": 0, "total": 0}
 
         # Compute diff list first (no DB needed)
+        # date1 = 今日, date2 = 昨日；vol_today 应为今天的量，vol_prev 为昨天的量
         diff = []
         for code in all_codes:
             v1 = d1_map.get(code, {}).get("vol", 0) or 0
             v2 = d2_map.get(code, {}).get("vol", 0) or 0
             name = d1_map.get(code, d2_map.get(code, {})).get("name", "")
-            chg = v2 - v1
-            pct = round((v2 - v1) / v1 * 100, 2) if v1 else 0
+            chg = v1 - v2
+            pct = round((v1 - v2) / v2 * 100, 2) if v2 else 0
             info = d1_map.get(code) or d2_map.get(code) or {}
             diff.append({
                 "code": code, "name": name,
-                "vol_today": v2, "vol_prev": v1,
+                "vol_today": v1, "vol_prev": v2,
                 "vol_chg": chg, "vol_pct": pct,
                 "price_today": info.get("price", 0) or 0,
             })
@@ -3068,25 +3854,136 @@ def get_auction_compare(date1: str = "", date2: str = "", top: int = 30):
         db.close()
 
 
-def _is_limit_up(code: str, price: float, prev_close: float) -> bool:
-    """Check if price is at limit-up (涨停) for the given stock."""
-    if prev_close <= 0 or price <= 0:
-        return False
-    ratio = price / prev_close
-    if code.startswith("300") or code.startswith("301") or code.startswith("688"):
-        return ratio >= 1.198
-    if code.startswith("8"):
-        return ratio >= 1.298
-    return ratio >= 1.098
+def _board_max_pct(code: str, name: str = "") -> float:
+    """涨跌停比例（统一口径，见 data/board.py）。"""
+    from data.board import board_limit_pct
+    return board_limit_pct(code, name) * 100
 
 
-def _limit_pct(code: str) -> float:
-    """Return the limit-up percentage for the given stock code."""
-    if code.startswith("300") or code.startswith("301") or code.startswith("688"):
-        return 19.8
-    if code.startswith("8"):
-        return 29.8
-    return 9.8
+def _is_limit_up(code: str, price: float, prev_close: float, name: str = "") -> bool:
+    """Check if price is at limit-up (涨停) for the given stock. 统一口径见 data/board.py."""
+    from data.board import is_limit_up
+    return is_limit_up(code, price, prev_close, name)
+
+
+def _limit_pct(code: str, name: str = "") -> float:
+    """Return the limit-up percentage threshold for the given stock code. 统一口径见 data/board.py."""
+    from data.board import limit_up_ratio
+    return (limit_up_ratio(code, name) - 1.0) * 100
+
+
+# ----------------------------------------------------------------------------
+# 涨停次日竞价预期（「明礼队长」淘股吧方法论）
+# 昨日涨停股的今日竞价，用「价（高开幅度）+ 量（竞价量能）」两变量打预期等级，
+# 分 C1~C6 六种组合，直接对应次日操作。封板时间决定高开预期带。
+# ----------------------------------------------------------------------------
+# 封板时间 → 高开预期带（(不及下限, 符合下限, 超预期下限)，单位 %）
+_SEAL_BANDS = {
+    "一字":   (6, 9, 9),
+    "9:45前": (4, 6, 6),
+    "午前板": (2, 4, 4),
+    "午后板": (0, 2, 2),
+    "尾盘板": (0, 0, 0),
+}
+
+
+def _seal_band(first_seal: str, last_seal: str) -> str:
+    """按昨日「首次封板时间」归类到 5 档预期带。
+
+    first_seal/last_seal 形如 '092500'/'145027'（东财涨停池首次/最后封板时间 HHMMSS）。
+    """
+    if not first_seal:
+        return "午前板"  # 拿不到时给中性档（2-4%）
+    t = int(first_seal[:4]) if first_seal[:4].isdigit() else 9999
+    last = int(last_seal[:4]) if last_seal and last_seal[:4].isdigit() else 9999
+    if t <= 925 and last <= 925:
+        return "一字"      # 竞价即封死且全天未开
+    if t <= 945:
+        return "9:45前"
+    if t <= 1130:
+        return "午前板"
+    if t <= 1400:
+        return "午后板"
+    return "尾盘板"
+
+
+def _price_level(band: str, open_pct) -> str:
+    """价预期：按预期带把今日竞价高开%分为 超预期/符合/不及预期。"""
+    if open_pct is None or band not in _SEAL_BANDS:
+        return "未知"
+    bad, ok, strong = _SEAL_BANDS[band]
+    if open_pct > strong and strong > bad:
+        return "超预期"
+    if open_pct >= bad:
+        return "符合预期"
+    return "不及预期"
+
+
+def _vol_level(auction_amount_wan, yest_amount_yuan) -> str:
+    """量能：竞价量能 = 今竞价额 ÷ 昨日总成交额。
+
+    简化标准（文章）：昨日成交额 <10 亿 → 达标需 ≥10%；≥10 亿 → 达标需 ≥8%。
+    返回值 (level, pct)：(达标/不足, 竞价量能百分比)。
+    """
+    if auction_amount_wan is None or not yest_amount_yuan or yest_amount_yuan <= 0:
+        return "未知", None
+    pct = auction_amount_wan * 1e4 / yest_amount_yuan * 100
+    need = 8 if yest_amount_yuan >= 1e9 else 10
+    return ("达标" if pct >= need else "不足"), round(pct, 2)
+
+
+# 6 组合标签/操作（含颜色含义，前端可据 colour 上色）
+_COMBOS = {
+    ("超预期", "达标"): ("C1", "价超量足", "资金抢筹·敢加仓", "red"),
+    ("超预期", "不足"): ("C2", "价超量少", "诱多陷阱·别追", "orange"),
+    ("符合预期", "达标"): ("C3", "价合量足", "看开盘承接", "blue"),
+    ("符合预期", "不足"): ("C4", "价合量少", "弱分歧·先落袋", "gray"),
+    ("不及预期", "达标"): ("C5", "价不及量足", "分歧洗盘·看修复", "purple"),
+    ("不及预期", "不足"): ("C6", "价不及量少", "最危险·核按钮", "black"),
+}
+
+
+def _combo(price_level: str, vol_level: str) -> dict:
+    """价×量 → C1~C6 组合标签、标题、操作建议、颜色。"""
+    key = (price_level, vol_level)
+    if key not in _COMBOS:
+        return {"combo": None, "label": "未知", "action": "", "color": "gray"}
+    combo, label, action, color = _COMBOS[key]
+    return {"combo": combo, "label": label, "action": action, "color": color}
+
+
+def _fetch_zt_pool_map(date_yyyymmdd: str) -> dict:
+    """东财涨停池 → {6位代码: {seal_time, last_seal, consec, turnover_amount}}。
+
+    用「首次/最后封板时间」定预期带、用昨日成交额定量能。
+    拿不到（非 akshare / 网络失败）返回空 dict，调用方降级为只有价预期。
+    """
+    try:
+        import akshare as ak
+        zt = ak.stock_zt_pool_em(date=date_yyyymmdd)
+        if zt is None or getattr(zt, "empty", True):
+            return {}
+    except Exception as e:
+        _log.warning("zt_pool fetch failed %s: %s", date_yyyymmdd, e)
+        return {}
+    out = {}
+    for _, r in zt.iterrows():
+        code = str(r.get("代码", "")).zfill(6)
+        try:
+            consec = int(r.get("连板数") or 0)
+        except (TypeError, ValueError):
+            consec = 0
+        try:
+            t_amt = float(r.get("成交额") or 0)  # 元
+        except (TypeError, ValueError):
+            t_amt = 0
+        out[code] = {
+            "seal_time": str(r.get("首次封板时间", "") or ""),
+            "last_seal": str(r.get("最后封板时间", "") or ""),
+            "consec": consec,
+            "turnover_amount": t_amt,
+        }
+    return out
 
 
 @router.get("/auction/limit-up-compare")
@@ -3107,13 +4004,15 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
         return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
     try:
         cur = db.cursor()
-        # date2 → integer format for daily_kline
-        d2_int = int(date2.replace("-", ""))
-        
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        dc = "trade_date" if "trade_date" in cols else "date"
+        # date2 → 与 daily_kline 日期列一致的类型
+        d2_bound = int(date2.replace("-", "")) if dc == "trade_date" else date2
+
         # Find previous trading day before date2
         cur.execute(
-            "SELECT MAX(trade_date) FROM daily_kline WHERE trade_date < ?",
-            (d2_int,),
+            f"SELECT MAX({dc}) FROM daily_kline WHERE {dc} < ?",
+            (d2_bound,),
         )
         prev_trade_date = cur.fetchone()[0]
         if not prev_trade_date:
@@ -3125,9 +4024,9 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
         cur.execute(
             "SELECT c.code, c.close, p.close as prev_close "
             "FROM daily_kline c "
-            "JOIN daily_kline p ON c.code = p.code AND p.trade_date = ? "
-            "WHERE c.trade_date = ? AND p.close > 0",
-            (prev_trade_date, d2_int),
+            f"JOIN daily_kline p ON c.code = p.code AND p.{dc} = ? "
+            f"WHERE c.{dc} = ? AND p.close > 0",
+            (prev_trade_date, d2_bound),
         )
         prev_limitup_codes = set()
         prev_limitup_close = {}  # code_no_prefix → close
@@ -3176,8 +4075,11 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
         # Classify today's auction limit-up stocks
         today_limitup_codes = set()
         for code, info in today_auction.items():
-            if _is_limit_up(code, info["price"], info["prev_close"]):
+            if _is_limit_up(code, info["price"], info["prev_close"], info.get("name", "")):
                 today_limitup_codes.add(code)
+
+        # 昨日东财涨停池（封板时间/连板数/成交额）→ 涨停次日竞价预期（「明礼队长」方法论）
+        zt_map = _fetch_zt_pool_map(str(date2).replace("-", ""))
 
         def build_stock(code):
             p = prev_auction.get(code)
@@ -3197,6 +4099,23 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
             auction_chg = round((t_price - prev_close) / prev_close * 100, 2) if prev_close and t_price else None
             is_prev = code in prev_limitup_codes
             is_today = code in today_limitup_codes
+            # 涨停次日竞价预期：仅对「昨日涨停」股算（价+量 → C1~C6）
+            biz = {}
+            if is_prev:
+                zt = zt_map.get(code) or {}
+                band = _seal_band(zt.get("seal_time", ""), zt.get("last_seal", ""))
+                plev = _price_level(band, auction_chg)
+                vlev, vpct = _vol_level(t_amt, zt.get("turnover_amount"))
+                biz = {
+                    "band": band,
+                    "first_seal": zt.get("seal_time", ""),
+                    "consec_boards": zt.get("consec", 0),
+                    "yest_amount": zt.get("turnover_amount", 0),
+                    "price_level": plev,
+                    "vol_level": vlev,
+                    "vol_pct_auction": vpct,
+                    "combo": _combo(plev, vlev),
+                }
             return {
                 "code": code, "name": name,
                 "is_prev_limitup": is_prev,
@@ -3208,6 +4127,7 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
                 "prev_close": prev_close,
                 "auction_chg_today": auction_chg,
                 "concepts": concepts_map.get(code, []),
+                "auction_expectation": biz,
             }
 
         all_codes = prev_limitup_codes | today_limitup_codes
@@ -3218,6 +4138,27 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
         both.sort(key=lambda x: x["vol_today"], reverse=True)
         prev_only.sort(key=lambda x: x["vol_today"], reverse=True)
         today_only.sort(key=lambda x: x["vol_today"], reverse=True)
+
+        # 昨日涨停股实时涨跌幅（腾讯接口，用于「昨日涨停」表替换量变化列）
+        try:
+            from data.tencent_quotes import add_prefix, fetch_detail
+            prev_codes = [s["code"] for s in prev_only + both]
+            _rt = {}
+            for i in range(0, len(prev_codes), 50):
+                batch = [add_prefix(c) for c in prev_codes[i:i + 50]]
+                if not batch:
+                    continue
+                quotes = fetch_detail(batch)
+                for full_code, q in quotes.items():
+                    bare = full_code[2:] if full_code[:2] in ("sh", "sz", "bj") else full_code
+                    _rt[bare] = q.get("change_pct")
+            for s in prev_only + both:
+                s["realtime_chg_pct"] = _rt.get(s["code"])
+        except Exception:
+            _log.warning("auction prev_limitup realtime fetch failed", exc_info=True)
+            for s in prev_only + both:
+                s["realtime_chg_pct"] = None
+
         return {
             "prev_limitup": prev_only,
             "today_limitup": today_only,
@@ -3439,8 +4380,8 @@ def get_auction_gap_up(
         is_int = date_col == "trade_date"
 
         cur = db.cursor()
-        # 先按最宽门槛拉候选（创业板/科创板上限10%），Python层按板块二次过滤
-        sql_max = max(max_chg, 10.0)
+        # 先按最宽门槛拉候选（覆盖 30cm 北交所上限），Python层按板块二次过滤
+        sql_max = max(max_chg, 30.0)
         cur.execute(
             """
             SELECT code, name, auction_price, prev_close, auction_vol, auction_amount
@@ -3458,11 +4399,13 @@ def get_auction_gap_up(
         if not today_rows:
             return {"date": date, "stocks": []}
 
-        # 板块区分：创业板(300/301)、科创板(688) 20cm 上限 10%；主板(其他) 10cm 上限 9%
+        # 板块区分：创业板/科创板/北交所用真实涨跌停上限，主板用调用方 max_chg（排除一字涨停/微涨）
+        from data.board import board_limit_pct as _board_limit_pct
+
         def _board_max_chg(code: str) -> float:
             bare = code[2:] if code.startswith(("sh", "sz", "bj")) else code
-            if bare.startswith(("300", "301", "688")):
-                return 10.0
+            if bare.startswith(("300", "301", "302", "688", "689", "8", "4")):
+                return _board_limit_pct(bare) * 100
             return max_chg  # 默认 9%（主板）
 
         filtered = []
@@ -3542,7 +4485,7 @@ def get_auction_gap_up(
                 "prev_close": prev_close,
                 "chg_pct": round(chg_pct, 2),
                 "auction_vol": auction_vol,
-                "auction_amount_wan": round(auction_amount / 10000, 0) if auction_amount else 0,
+                "auction_amount_wan": round(auction_amount, 0) if auction_amount else 0,
                 "prev_auction_vol": prev_vol,
                 "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
                 "prev_high": prev_high,
@@ -3597,14 +4540,22 @@ def get_auction_gap_up(
         db.close()
 
 
-@router.post("/auction/ai-analysis")
-def auction_ai_analysis(data: dict) -> dict:
-    """AI 竞价分析：汇总当日竞价数据，调用 LLM 生成分析报告。
+def _auction_ai_analysis(data: dict, log=None) -> dict:
+    """AI 竞价分析核心：汇总当日竞价数据，调用 LLM 生成分析报告。
 
+    log 回调时，把各阶段进度写入日志（供 /auction/ai-analysis/run 后台任务实时回显）。
     Body: { "date": "YYYY-MM-DD", "concept_source": "industry|concept",
             "web_answers": [{target,label,answer}...] }
     web_answers 非空时，把已收到的豆包/DeepSeek 多源回答交给项目 LLM 交叉验证并追加最终结论。
     """
+
+    def log_line(msg: str) -> None:
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+        if log:
+            log(line)
+        else:
+            _log.info("auction AI: %s", line)
+
     date_str = data.get("date", "")
     source = data.get("concept_source", "industry")
 
@@ -3621,6 +4572,8 @@ def auction_ai_analysis(data: dict) -> dict:
                 db.close()
     if not date_str:
         return {"error": "无法确定竞价日期"}
+
+    log_line(f"开始分析：{date_str}（板块源：{source}）")
 
     # 1) 汇总竞价数据
     sections: list[str] = [f"## 竞价日期: {date_str}"]
@@ -3658,12 +4611,12 @@ def auction_ai_analysis(data: dict) -> dict:
         db = _get_db()
         if db:
             cur = db.cursor()
-            # 今日竞价涨停数
+            # 今日竞价涨停数（宽查候选，Python按板块口径过滤）
             cur.execute(
-                "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price/prev_close >= 1.095",
+                "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price > prev_close*1.02",
                 (date_str,),
             )
-            today_lu = cur.fetchall()
+            today_lu = [r for r in cur.fetchall() if _is_limit_up(r[0], r[2], r[3], r[1])]
             # 昨日涨停今日竞价
             cur.execute("SELECT DISTINCT date FROM auction WHERE date < ? ORDER BY date DESC LIMIT 1", (date_str,))
             prev_row = cur.fetchone()
@@ -3671,10 +4624,10 @@ def auction_ai_analysis(data: dict) -> dict:
             if prev_row:
                 prev_date = prev_row[0]
                 cur.execute(
-                    "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price/prev_close >= 1.095",
+                    "SELECT code, name, auction_price, prev_close FROM auction WHERE date=? AND prev_close>0 AND auction_price > prev_close*1.02",
                     (prev_date,),
                 )
-                prev_lu = cur.fetchall()
+                prev_lu = [r for r in cur.fetchall() if _is_limit_up(r[0], r[2], r[3], r[1])]
             db.close()
 
             lu_lines = ["### 涨停竞价分析"]
@@ -3808,7 +4761,7 @@ def auction_ai_analysis(data: dict) -> dict:
                 if t.get("vol"):
                     vol_str = f", 竞价量{(t.get('vol') or 0)/10000:.2f}万手"
                 if vol_amount:
-                    # auction_amount 单位为万元（DB中值≈万级别）
+                    # auction_amount 单位为万元，转亿元/万元展示
                     vol_str += f", 额{vol_amount/10000:.2f}亿" if vol_amount >= 10000 else f", 额{vol_amount:.0f}万"
                 if vol_ratio:
                     vol_str += f", 量较昨日{vol_ratio:.1f}倍"
@@ -3823,12 +4776,26 @@ def auction_ai_analysis(data: dict) -> dict:
     except Exception as e:
         _log.warning("auction AI: watchlist analysis failed: %s", e)
 
+    log_line("✓ 竞价数据汇总完成（板块 / 涨停对比 / 量排行 / 自选股）")
+
     if len(sections) <= 1:
         return {"error": f"日期 {date_str} 无竞价数据可分析"}
 
     summary = "\n\n".join(sections)
 
-    # 2) 调用 LLM
+    # 2) 只综合豆包/DeepSeek 的回答：项目 LLM 不做自己的数据分析（不参与对提示词的解读）
+    web_answers = data.get("web_answers") or []
+    blocks = []
+    for w in web_answers or []:
+        if not isinstance(w, dict):
+            continue
+        label = (w.get("label") or w.get("target") or "AI")
+        ans = (w.get("answer") or "").strip()
+        if ans:
+            blocks.append(f"### {label} 的回答\n{ans[:2000]}")
+    if not blocks:
+        return {"error": "没有可综合的回答：请先一键发送或手动粘贴豆包/DeepSeek 的回答，再做多源综合分析"}
+
     try:
         try:
             from dotenv import load_dotenv
@@ -3838,62 +4805,42 @@ def auction_ai_analysis(data: dict) -> dict:
 
         from analysis.llm_analyzer import call_llm
 
-        auction_system = (
-            "你是 A 股短线竞价分析师，擅长从集合竞价数据中捕捉情绪、板块联动和量能异动。\n"
-            "分析要求：\n"
-            "1. 横向对比：把多只股票放一起看，找出谁超预期、谁低于预期、谁在异动，不要逐只孤立点评\n"
-            "2. 模式识别：竞价涨幅+量比+位置标签的组合要结合起来解读，例如『放量突破压力』和『缩量贴近支撑』是两种完全不同的信号\n"
-            "3. 具体到数字：点评要引用具体数据（如『竞价+7%且量较昨日2.9倍』），不要空泛地说『量能放大』\n"
-            "4. 给出判断而非复述：不要重复语料里已有的标签，要给出你的独立判断（是否符合预期、是机会还是风险、建议动作）\n"
-            "5. 简洁有重点：每只股票1-2句话点透，避免套话模板\n"
-            "6. 风险第一：高位放量、跌破支撑等危险信号要明确提示"
+        log_line(f"对 {len(blocks)} 个来源（豆包/DeepSeek）的回答做 LLM 多源综合…")
+        synth_sys = (
+            "你是 A 股短线竞价多源分析师。你的任务：只综合豆包与 DeepSeek 两个 AI 模型对同一份竞价数据的分析回答，"
+            "结合下方本地竞价数据摘要做交叉验证，给出唯一最终判断。不要自行从本地数据摘要重新生成独立分析。\n"
+            "要求：\n"
+            "1. 观点对比：提炼各家核心判断，指出方向一致处与分歧点\n"
+            "2. 数据验证：哪些观点与本地数据（板块强度/涨停数/量能/竞价涨幅）吻合，哪些缺乏支持\n"
+            "3. 结论明确：给出今日资金主攻方向、重点板块与个股、风险点、建议动作，拒绝和稀泥\n"
+            "只基于给定材料，禁止编造数字。"
         )
-
-        prompt = (
-            f"以下是今天 A 股集合竞价的数据摘要：\n\n{summary}\n\n"
-            "请用中文做一段竞价分析报告，结构如下：\n"
-            "1. **竞价整体情绪**（红盘率/涨停数/量能变化，一句话定性）\n"
-            "2. **热点板块解读**（最强板块的锚点/中军/弹性标的，结合竞价数据判断强度）\n"
-            "3. **重点个股关注**（竞价量异常/连续涨停/超预期标的，从全市场角度挑）\n"
-            "4. **自选股诊断**（重点：不要逐只复述数据，要做横向对比——谁最强、谁最弱、谁超预期、谁需要警惕；"
-            "每只结合『竞价涨幅+量比+支撑压力位置』给出独立判断和具体操作建议）\n"
-            "5. **操作思路**（接力方向/回避方向/风险提示）\n\n"
-            "注意：只做客观数据分析与多视角推演，不保证结果，不构成投资建议。"
+        synth_prompt = (
+            f"### 本地竞价数据摘要（仅用于交叉验证，不要求你分析它）\n{summary[:4000]}\n\n"
+            + "\n\n".join(blocks)
+            + "\n\n请综合以上各家的回答，输出唯一的多源综合分析结论（含最终操作建议）。"
         )
-        report = call_llm(prompt, model="mimo-v2.5-pro", system_prompt=auction_system)
+        synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys)
+        log_line(f"✓ 多源 LLM 综合完成（{len(synthesis)} 字）")
+        report = f"## 📊 多源 LLM 综合结论（豆包 + DeepSeek）\n\n{synthesis}"
 
-        # 3) 多源综合：把已收到的豆包/DeepSeek 回答交给项目 LLM 交叉验证，输出最终结论
-        web_answers = data.get("web_answers") or []
-        blocks = []
-        if web_answers:
-            for w in web_answers:
-                if not isinstance(w, dict):
-                    continue
-                label = (w.get("label") or w.get("target") or "AI")
-                ans = (w.get("answer") or "").strip()
-                if ans:
-                    blocks.append(f"### {label} 的回答\n{ans[:2000]}")
-        if blocks:
-            try:
-                synth_sys = (
-                    "你是 A 股短线竞价多源分析师。你的任务：综合豆包与 DeepSeek 两个 AI 模型对同一份竞价数据的分析回答，"
-                    "结合下方本地竞价数据摘要交叉验证，给出最终判断。\n"
-                    "要求：\n"
-                    "1. 观点对比：提炼各家核心判断，指出方向一致处与分歧点\n"
-                    "2. 数据验证：哪些观点与本地数据（板块强度/涨停数/量能/竞价涨幅）吻合，哪些缺乏支持\n"
-                    "3. 结论明确：给出今日资金主攻方向、重点板块与个股、风险点、建议动作，拒绝和稀泥\n"
-                    "只基于给定材料，禁止编造数字。"
+        # 4) 落盘 md：按 AI 下拉阶段位置对应卡片 ①~④（stage=0→stage1.md, 1→stage2.md, ...）
+        saved = ""
+        stage_arg = data.get("stage")
+        try:
+            if stage_arg not in (None, "", "auto", "null", "None"):
+                card = max(0, min(int(stage_arg), 3)) + 1
+                path = _AI_REPORT_DIR / date_str / f"stage{card}.md"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    f"# 竞价情绪 AI 分析 · {date_str} · 阶段{card}\n\n{report}",
+                    encoding="utf-8",
                 )
-                synth_prompt = (
-                    f"### 本地竞价数据摘要\n{summary[:4000]}\n\n"
-                    + "\n\n".join(blocks)
-                    + "\n\n请按上述要求输出多源综合分析结论（含最终操作建议）。"
-                )
-                synthesis = call_llm(synth_prompt, model="mimo-v2.5-pro", system_prompt=synth_sys)
-                report = f"{report}\n\n---\n\n## 📊 多源 LLM 综合结论（豆包 + DeepSeek）\n\n{synthesis}"
-            except Exception as exc:
-                _log.warning("auction AI: multi-source synthesis failed: %s", str(exc)[:200])
-        return {"report": report, "date": date_str, "summary": summary}
+                saved = str(path.relative_to(_PROJECT_ROOT))
+                log_line(f"✓ 结果已保存：{saved}")
+        except Exception as exc:
+            _log.warning("auction AI: save report failed: %s", exc)
+        return {"report": report, "date": date_str, "summary": summary, "saved": saved}
     except Exception as e:
         detail = str(e)
         resp = getattr(e, "response", None)
@@ -3903,17 +4850,94 @@ def auction_ai_analysis(data: dict) -> dict:
             except Exception:
                 pass
         _log.warning("auction AI analysis failed: %s", detail)
+        try:
+            log_line(f"✗ 分析失败：{detail[:200]}")
+        except Exception:
+            pass
         return {"error": detail}
 
 
-# ---------------------------------------------------------------------------
-# Market Ladder (连板梯队)
-# ---------------------------------------------------------------------------
+_AUCTION_AI_JOBS: dict[str, dict] = {}
+
+@router.post("/auction/ai-analysis")
+def auction_ai_analysis(data: dict) -> dict:
+    """同步版：直接返回报告（竞价看板 AI tab 等旧调用方使用）。"""
+    return _auction_ai_analysis(data)
+
+
+@router.post("/auction/ai-analysis/run")
+def auction_ai_analysis_run(data: dict) -> dict:
+    """异步版：后台线程跑分析，实时日志写入内存 job，前端轮询 status 展示进度。"""
+    task_id = uuid.uuid4().hex[:8]
+    job = {"logs": [], "done": False, "result": None}
+    _AUCTION_AI_JOBS[task_id] = job
+
+    def _run():
+        try:
+            job["result"] = _auction_ai_analysis(data, log=job["logs"].append)
+        except Exception as exc:  # noqa: BLE001
+            job["logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] ✗ 后台任务异常：{str(exc)[:200]}")
+            job["result"] = {"error": str(exc)[:500]}
+        finally:
+            job["done"] = True
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id}
+
+
+@router.get("/auction/ai-analysis/status/{task_id}")
+def auction_ai_analysis_status(task_id: str):
+    """读取后台分析任务的实时日志；done=True 时附最终 result。"""
+    job = _AUCTION_AI_JOBS.get(task_id)
+    if not job:
+        return {"done": False, "logs": [], "error": "任务不存在或已过期"}
+    return {"done": job["done"], "logs": job["logs"], "result": job["result"]}
 
 _LADDER_CACHE_DIR = _PAPER_DIR
 
 def _ladder_cache_path(today_compact: str) -> Path:
     return _LADDER_CACHE_DIR / f"ladder_cache_{today_compact}.json"
+
+
+def _parse_cn_amount(s) -> float:
+    """问财金额字段可能是 '1.23亿' / '4567万' / 纯数字(元)，统一转成元(float)。"""
+    if s is None:
+        return 0.0
+    s = str(s).strip()
+    if not s:
+        return 0.0
+    mult = 1.0
+    if s.endswith("亿"):
+        mult = 1e8
+        s = s[:-1]
+    elif s.endswith("万"):
+        mult = 1e4
+        s = s[:-1]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return 0.0
+
+
+def _iwencai_first_match(row: dict, *names):
+    """问财返回列名常带变动后缀(如 [20260901] 或 [20260819-20260901])，
+    且语义相似的列名会变(封单额→隔夜单额、炸板次数→涨停开板次数、首次封板时间→最新首次涨停时间)。
+    先做精确匹配，再按前缀匹配，兼容不同日期后缀与别名。"""
+    for n in names:
+        if n in row and row[n] not in (None, ""):
+            return row[n]
+    for n in names:
+        for k, v in row.items():
+            if k.startswith(n) and v not in (None, ""):
+                return v
+    for n in names:
+        if n in row:
+            return row[n]
+    for n in names:
+        for k, v in row.items():
+            if k.startswith(n):
+                return v
+    return None
 
 
 @router.get("/market/ladder")
@@ -3946,7 +4970,8 @@ def get_market_ladder():
         from analysis.external.iwencai import query_data
 
         raw = query_data(
-            "今日涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 连续涨停天数 涨停原因 成交额"
+            "今日涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 连续涨停天数 "
+            "首次封板时间 封单额 炸板次数 涨停原因 成交额"
         )
         if not raw:
             result = {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": "暂无数据"}
@@ -3979,6 +5004,10 @@ def get_market_ladder():
             board_raw = row.get(f"连续涨停天数[{today_compact}]") or row.get("连续涨停天数", 1)
             amount_str = row.get(f"成交额[{today_compact}]") or row.get("成交额", "0")
             reason = row.get(f"涨停原因[{today_compact}]") or row.get("涨停原因", "")
+            # 问财列名存在别名且不带/带变动后缀，用健壮匹配
+            first_time = _iwencai_first_match(row, "首次封板时间", "最新首次涨停时间")
+            seal_amt_str = _iwencai_first_match(row, "封单额", "隔夜单额")
+            open_times_str = _iwencai_first_match(row, "炸板次数", "涨停开板次数")
 
             concepts = (
                 [c.strip() for c in reason.split("+") if c.strip() and not _is_generic_concept(c.strip())]
@@ -3999,6 +5028,14 @@ def get_market_ladder():
             except (ValueError, TypeError):
                 amount = 0
             try:
+                seal_amount = _parse_cn_amount(seal_amt_str)
+            except (ValueError, TypeError):
+                seal_amount = 0
+            try:
+                open_times = int(float(open_times_str))
+            except (ValueError, TypeError):
+                open_times = 0
+            try:
                 chg = float(chg)
             except (ValueError, TypeError):
                 chg = 0
@@ -4011,6 +5048,9 @@ def get_market_ladder():
                 "board": board,
                 "amount": amount,
                 "volume": 0,
+                "first_seal_time": first_time,
+                "seal_amount": seal_amount,
+                "open_times": open_times,
                 "concepts": concepts,
             })
 
