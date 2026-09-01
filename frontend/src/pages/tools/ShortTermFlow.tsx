@@ -527,7 +527,9 @@ function ReviewAIModal({
           <h3 className="font-semibold">
             {isPreview
               ? `AI 今日预演（${date} · ${TARGET_LABELS} 综合）`
-              : `AI 多源复盘（${date} · ${TARGET_LABELS} 综合）`}
+              : isVerify
+                ? `AI 盘后验证（${date} · 早晨预演 vs 收盘核验）`
+                : `AI 多源复盘（${date} · ${TARGET_LABELS} 综合）`}
           </h3>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-xl leading-none">
             ×
@@ -541,7 +543,7 @@ function ReviewAIModal({
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md hover:bg-muted disabled:opacity-50"
             >
               {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Brain className="h-3.5 w-3.5" />}
-              {running ? "分析中…" : cachedAt ? "重新分析" : isPreview ? "开始 AI 预演" : "开始 AI 复盘"}
+              {running ? "分析中…" : cachedAt ? "重新分析" : isPreview ? "开始 AI 预演" : isVerify ? "开始 AI 验证" : "开始 AI 复盘"}
             </button>
             <span className="text-xs text-muted-foreground">{stage}</span>
             {cachedAt && !running && (
@@ -551,6 +553,8 @@ function ReviewAIModal({
             )}
           </div>
 
+          {!isVerify && (
+            <>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setManualOpen((v) => !v)}
@@ -586,10 +590,14 @@ function ReviewAIModal({
               )}
             </div>
           )}
+            </>
+          )}
 
           {(running || halted) && (
             <>
-              {/* 实际发给各路 LLM 的提示词原文（各路内容相同） */}
+              {/* 实际发给各路 LLM 的提示词原文（各路内容相同）；验证只走 MiMo，不显示豆包/DeepSeek 路 */}
+              {!isVerify && (
+                <>
               {promptText && (
                 <details open className="rounded border bg-muted/20">
                   <summary className="cursor-pointer select-none text-xs font-medium px-2 py-1.5">
@@ -657,6 +665,8 @@ function ReviewAIModal({
                   })}
                 </div>
               )}
+                </>
+              )}
 
               {/* 主流程日志（带时间戳） */}
               {flowLogs.length > 0 && (
@@ -674,7 +684,7 @@ function ReviewAIModal({
           {!running && !halted && report && (
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">
-                {isPreview ? "最终综合预演" : "最终综合复盘"} · 结论
+                {isPreview ? "最终综合预演" : isVerify ? "最终盘后验证" : "最终综合复盘"} · 结论
               </p>
               {(() => {
                 const conclusion = extractConclusion(report);
@@ -719,7 +729,7 @@ function ReviewAIModal({
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between p-4 border-b">
-            <h3 className="font-semibold">{isPreview ? "AI 今日预演" : "AI 复盘"} · 完整结论</h3>
+            <h3 className="font-semibold">{isPreview ? "AI 今日预演" : isVerify ? "AI 盘后验证" : "AI 复盘"} · 完整结论</h3>
             <button
               onClick={() => setShowFullConclusion(false)}
               className="text-muted-foreground hover:text-foreground text-xl leading-none"
