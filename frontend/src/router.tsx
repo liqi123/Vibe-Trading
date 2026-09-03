@@ -85,6 +85,9 @@ const StockAnalysis = lazy(() =>
 const CzscAnalysis = lazy(() =>
   import("@/pages/tools/CzscAnalysis").then((m) => ({ default: m.CzscAnalysis })),
 );
+const Gainers = lazy(() =>
+  import("@/pages/tools/Gainers").then((m) => ({ default: m.Gainers })),
+);
 const MarketLadder = lazy(() =>
   import("@/pages/MarketLadder").then((m) => ({ default: m.MarketLadder })),
 );
@@ -145,6 +148,7 @@ export const router = createBrowserRouter([
       { path: "/czsc-analysis", element: wrap(CzscAnalysis) },
       { path: "/market-ladder", element: wrap(MarketLadder) },
       { path: "/volume-rank", element: wrap(VolumeRank) },
+      { path: "/gainers", element: wrap(Gainers) },
     ],
   },
 ]);

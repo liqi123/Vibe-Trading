@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network, Crosshair, Eye } from "lucide-react";
+import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network, Crosshair, Eye, Flame } from "lucide-react";
 
 const TOOLS = [
   {
@@ -15,6 +15,13 @@ const TOOLS = [
     title: "淘股吧信号监控",
     desc: "关注用户动态轮询，提取买卖/持有/计划信号与仓位限定词，空仓口径对账",
     color: "text-orange-500",
+  },
+  {
+    to: "/gainers",
+    icon: Flame,
+    title: "实时涨幅猎手",
+    desc: "筛选当前涨幅超过阈值（默认5%）的股票，昨日涨停绿色标注",
+    color: "text-red-500",
   },
   {
     to: "/auction-board",

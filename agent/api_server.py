@@ -274,6 +274,10 @@ register_flow_routes(app)
 from src.api.tgb_routes import register_tgb_routes  # noqa: E402
 register_tgb_routes(app)
 
+# --- 实时涨幅猎手 ---
+from src.api.gainers_routes import register_gainers_routes  # noqa: E402
+register_gainers_routes(app)
+
 # --- 网页版 LLM 自动化（豆包/DeepSeek/Kimi，Playwright）---
 from src.api.llm_web_routes import register_llm_web_routes  # noqa: E402
 register_llm_web_routes(app)
@@ -419,6 +423,16 @@ def serve_main(argv: list[str] | None = None) -> int:
     # request line including the query string). Installed before run() so the
     # filter is attached when Uvicorn configures its loggers.
     install_access_log_redaction_filter()
+
+    # AI 分析过程日志（默认 WARNING 看不到 INFO；uvicorn 只配置自己的 logger，
+    # 不影响 root，所以给这两个 logger 各加一个 StreamHandler 直接输出到 stderr）
+    import sys as _sys
+    _ai_handler = logging.StreamHandler(_sys.stderr)
+    _ai_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
+    for _name in ("trading_tools", "strategies.common.llm_client"):
+        _lg = logging.getLogger(_name)
+        _lg.setLevel(logging.INFO)
+        _lg.addHandler(_ai_handler)
 
     try:
         uvicorn.run("api_server:app", host=args.host, port=args.port, log_level="info", reload=args.reload)

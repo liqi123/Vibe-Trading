@@ -1009,7 +1009,7 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
         if datetime.now().hour < 13:
             from datetime import timedelta
             date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-    prefix = "v1" if strategy == "fibonacci" else "trend" if strategy == "trend" else "ict"
+    prefix = "v1" if strategy == "fibonacci" else "trend" if strategy == "trend" else "ict" if strategy == "ict" else "sentiment"
 
     def _load(cache_date: str) -> dict | None:
         p = _PAPER_DIR / f"{prefix}_screening_cache_{cache_date}.json"
@@ -1038,6 +1038,162 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
         pass
 
     return {"date": date, "candidates": [], "message": "no cache found"}
+
+
+# ---------- 情绪选股 AI 阶段分析 ----------
+
+_SENT_STEP_PROMPTS = {
+    1: (
+        "你是A股短线情绪周期分析师。根据市场广度数据判断当前情绪周期阶段。"
+        "阶段取值：冰点/启动/发酵/主升/分歧/退潮。"
+        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"判断依据(80字内)\", \"suggestion\": \"操作建议(60字内)\"}"
+    ),
+    2: (
+        "你是A股短线主线板块分析师。判断主线板块的强度阶段。"
+        "阶段取值：无主线/启动/加速/高潮/分歧/退潮。"
+        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"判断依据(80字内)\", \"suggestion\": \"关注主线与建议(60字内)\"}"
+    ),
+    3: (
+        "你是A股短线个股梯队分析师。分析候选股的地位结构和参与价值。"
+        "阶段取值：梯队完整/梯队断层/梯队稀疏/无梯队。"
+        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"梯队结构分析(80字内)\", \"suggestion\": \"值得关注与需回避的个股(80字内)\"}"
+    ),
+    4: (
+        "你是A股短线交易决策顾问。综合情绪周期、主线板块、个股梯队给出综合阶段判断和操作策略。"
+        "阶段取值：积极进攻/均衡配置/防守/空仓。"
+        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"综合判断(100字内)\", \"suggestion\": \"做不做/在哪做/做哪个(100字内)\"}"
+    ),
+}
+
+
+def _build_sentiment_user_prompt(step: int, header: dict, candidates: list) -> str:
+    """按 step 构造发给 LLM 的用户提示（精简数据避免 token 爆炸）。"""
+    if step == 1:
+        breadth = header.get("breadth") or {}
+        data = {
+            "cycle": header.get("cycle", ""),
+            "breadth": {
+                "limit_up": breadth.get("limit_up", 0),
+                "gainer": breadth.get("gainer", 0),
+                "max_streak": breadth.get("max_streak", 0),
+            },
+        }
+        return f"市场广度数据：\n{json.dumps(data, ensure_ascii=False)}\n请判断当前情绪周期阶段。"
+    if step == 2:
+        mainlines = [
+            {
+                "concept": m.get("concept", ""),
+                "score": m.get("score", 0),
+                "n": m.get("n", 0),
+                "zt_n": m.get("zt_n", 0),
+                "max_streak": m.get("max_streak", 0),
+                "avg_chg": m.get("avg_chg", 0),
+            }
+            for m in (header.get("mainlines") or [])[:12]
+        ]
+        return f"主线板块数据（共{len(header.get('mainlines') or [])}条，展示前12）：\n{json.dumps(mainlines, ensure_ascii=False)}\n请判断主线板块阶段。"
+    if step == 3:
+        stocks = []
+        for c in candidates[:20]:
+            s = c.get("stock") or {}
+            stocks.append({
+                "mainline": c.get("mainline", ""),
+                "role": s.get("role", ""),
+                "name": s.get("name", ""),
+                "chg": s.get("chg", 0),
+                "streak": s.get("streak", 0),
+                "is_zt": s.get("is_zt", False),
+            })
+        return f"个股精选数据（共{len(candidates)}只，展示前20）：\n{json.dumps(stocks, ensure_ascii=False)}\n请分析梯队结构与参与价值。"
+    # step 4 综合全部
+    breadth = header.get("breadth") or {}
+    summary = {
+        "cycle": header.get("cycle", ""),
+        "breadth": {k: breadth.get(k, 0) for k in ("limit_up", "gainer", "max_streak")},
+        "mainline_count": len(header.get("mainlines") or []),
+        "top_mainlines": [m.get("concept", "") for m in (header.get("mainlines") or [])[:5]],
+        "candidate_count": len(candidates),
+        "top_roles": [c.get("stock", {}).get("role", "") for c in candidates[:8]],
+    }
+    return f"综合数据：\n{json.dumps(summary, ensure_ascii=False)}\n请给出综合阶段判断和操作策略。"
+
+
+@router.post("/sentiment/ai-analyze")
+def sentiment_ai_analyze(body: dict) -> dict:
+    """情绪选股 AI 阶段分析：针对某一步，调用本地/已配置 LLM 判断当前阶段。
+
+    body: {step: 1|2|3|4, header: {...}, candidates: [...]}
+    返回: {ok, step, phase, analysis, suggestion} 或 {ok:false, error}
+    """
+    from strategies.common.llm_client import get_llm_client, is_llm_available, load_llm_config
+    from utils.logging_setup import get_run_logger
+    _run_logger = get_run_logger("sentiment_ai_analyze", "ai_analysis")
+
+    step_raw = body.get("step", 1)
+    header = body.get("header") or {}
+    candidates = body.get("candidates") or []
+    _run_logger.info(
+        "[sentiment-ai] 收到请求 step=%s header_keys=%s candidates=%d",
+        step_raw, list(header.keys()), len(candidates),
+    )
+
+    _cfg = load_llm_config()
+    import os as _os
+    _dbg = {
+        "provider": _cfg.provider, "model": _cfg.model,
+        "key_len": len(_cfg.api_key), "key_prefix": _cfg.api_key[:6] if _cfg.api_key else "EMPTY",
+        "base_url": _cfg.base_url,
+        "env_provider": _os.environ.get("LANGCHAIN_PROVIDER", "<unset>"),
+        "env_deepseek_key": bool(_os.environ.get("DEEPSEEK_API_KEY")),
+        "env_openai_key": bool(_os.environ.get("OPENAI_API_KEY")),
+        "env_openai_base": _os.environ.get("OPENAI_BASE_URL", "<unset>"),
+    }
+    _run_logger.info(
+        "[sentiment-ai] LLM 配置 provider=%s model=%s base=%s key_prefix=%s",
+        _cfg.provider, _cfg.model, _cfg.base_url, _dbg["key_prefix"],
+    )
+
+    if not is_llm_available():
+        _run_logger.warning("[sentiment-ai] LLM 不可用 (api_key 为空且非 ollama)")
+        return {"ok": False, "error": "LLM 未配置", "debug": _dbg}
+
+    try:
+        step = int(step_raw)
+    except (TypeError, ValueError):
+        _run_logger.warning("[sentiment-ai] step 参数非法: %r", step_raw)
+        return {"ok": False, "error": f"step 必须为整数 1-4，收到 {step_raw!r}"}
+
+    if step not in _SENT_STEP_PROMPTS:
+        _run_logger.warning("[sentiment-ai] step 超范围: %s", step)
+        return {"ok": False, "error": f"step 必须为 1-4，收到 {step}"}
+
+    system_prompt = _SENT_STEP_PROMPTS[step]
+    user_prompt = _build_sentiment_user_prompt(step, header, candidates)
+    _run_logger.info(
+        "[sentiment-ai] 调用 LLM step=%d sys_prompt_len=%d user_prompt_len=%d",
+        step, len(system_prompt), len(user_prompt),
+    )
+
+    try:
+        client = get_llm_client()
+        result = client.chat_json(system_prompt, user_prompt, temperature=0.1)
+        phase = str(result.get("phase", ""))
+        analysis = str(result.get("analysis", ""))
+        suggestion = str(result.get("suggestion", ""))
+        _run_logger.info(
+            "[sentiment-ai] LLM 成功 step=%d phase=%s analysis_len=%d suggestion_len=%d",
+            step, phase, len(analysis), len(suggestion),
+        )
+        return {
+            "ok": True,
+            "step": step,
+            "phase": phase,
+            "analysis": analysis,
+            "suggestion": suggestion,
+        }
+    except Exception as e:
+        _run_logger.error("[sentiment-ai] LLM 调用失败 step=%s 错误=%s", step, e, exc_info=True)
+        return {"ok": False, "error": f"LLM 调用失败：{e}", "debug": _dbg}
 
 
 @router.get("/runaway-price")
@@ -1745,6 +1901,7 @@ def get_short_term_emotion() -> dict:
     return _review_cached("emotion", build)
 
 
+
 _EM_ALL_A = "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23,m:0 t:81 s:2048"  # 沪深京 A 股
 
 
@@ -2259,6 +2416,8 @@ def run_script(data: dict):
         "fibonacci": "strategies/fibonacci/daily_check.py",
         "trend": "strategies/trend/daily_check_trend.py",
         "ict": "strategies/ict/ict_scan_fast.py",
+        "sentiment_leader": "-m strategies.sentiment_leader",
+        "sentiment": "-m strategies.sentiment_leader",
         "stops": "-m utils stops",
         "review": "analysis/reports/generate_review.py",
         "review_v5": "analysis/reports/generate_review.py",
@@ -2274,7 +2433,7 @@ def run_script(data: dict):
 
     # 安全处理参数
     if cmd.startswith("-m"):
-        args = ["python"] + cmd.split()[1:]
+        args = ["python", cmd]
     else:
         args = ["python", cmd]
 
@@ -2346,6 +2505,33 @@ def get_script_output(task_id: str):
     content = output_file.read_text(encoding="utf-8")
     is_running = "执行完成" not in content and "超时" not in content and "错误:" not in content
     return {"output": content, "status": "running" if is_running else "completed"}
+
+
+@router.get("/logs")
+def get_logs(subdir: str = "", name: str = "", tail: int = 200) -> dict:
+    """返回 logs/<subdir>/<name>_YYYYMMDD.log 的内容（默认今天，找不到则取最新同名日志）。
+
+    供前端「运行日志」面板读取情绪选股 / AI分析 的运行日志。
+    参数: subdir=stock_selection|ai_analysis, name=sentiment_leader|auction_ai_analysis, tail=行数
+    """
+    if not subdir or not name:
+        raise HTTPException(status_code=400, detail="subdir 和 name 必填")
+    log_dir = _PROJECT_ROOT / "logs" / subdir
+    if not log_dir.is_dir():
+        return {"ok": False, "error": f"未找到日志目录: {subdir}", "lines": [], "path": ""}
+    today = datetime.now().strftime("%Y%m%d")
+    cand = log_dir / f"{name}_{today}.log"
+    if not cand.exists():
+        matches = sorted(log_dir.glob(f"{name}_*.log"), reverse=True)
+        cand = matches[0] if matches else None
+    if not cand or not cand.exists():
+        return {"ok": False, "error": "暂无日志", "lines": [], "path": ""}
+    try:
+        lines = cand.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"读取失败: {e}", "lines": [], "path": str(cand)}
+    shown = lines[-tail:] if tail and tail > 0 else lines
+    return {"ok": True, "path": str(cand), "lines": shown, "total": len(lines)}
 
 
 @router.get("/trades")
@@ -3527,13 +3713,13 @@ def review_verify_analysis(data: dict) -> dict:
 # Auction Board (集合竞价看板)
 # ---------------------------------------------------------------------------
 
-def _import_auction_excel(db, today_str: str) -> int:
-    """Try to import auction data from Excel file in project root.
+def _import_auction_excel(db, date_str: str) -> int:
+    """Import auction data from Excel file in project root.
 
     Looks for 竞价数据_YYYY-MM-DD.xlsx, imports into auction table.
     Returns number of rows imported, or 0 if no file / import failed.
     """
-    xlsx = _PROJECT_ROOT / f'竞价数据_{today_str}.xlsx'
+    xlsx = _PROJECT_ROOT / f'竞价数据_{date_str}.xlsx'
     if not xlsx.exists():
         return 0
     try:
@@ -3555,7 +3741,7 @@ def _import_auction_excel(db, today_str: str) -> int:
             price = open_px
             cur.execute(
                 "INSERT OR REPLACE INTO auction (date, code, name, auction_vol, auction_amount, auction_price, open_price, collect_time, prev_close) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (today_str, code, name, vol, amount, price, open_px, collect_time, prev_close)
+                (date_str, code, name, vol, amount, price, open_px, collect_time, prev_close)
             )
             imported += 1
         db.commit()
@@ -3564,6 +3750,31 @@ def _import_auction_excel(db, today_str: str) -> int:
     except Exception as ex:
         _log.warning("auction Excel import failed: %s", ex)
         return 0
+
+
+@router.post("/auction/import-date")
+def import_auction_date(date: str = ""):
+    """从项目根的 竞价数据_YYYY-MM-DD.xlsx 手动导入指定日期的竞价数据到数据库。
+
+    用于 xlsx 已生成但未入库（如当日盘前补导历史数据）的情况。
+    """
+    if not date:
+        return _err("缺少 date 参数（YYYY-MM-DD）")
+    xlsx = _PROJECT_ROOT / f"竞价数据_{date}.xlsx"
+    if not xlsx.exists():
+        return _err(f"未找到 {xlsx.name}")
+    db = _get_db(writable=True)
+    if db is None:
+        return _err("no database")
+    try:
+        cur = db.cursor()
+        existing = cur.execute("SELECT COUNT(*) FROM auction WHERE date=?", (date,)).fetchone()[0]
+        imported = _import_auction_excel(db, date)
+        if imported == 0:
+            return _err(f"导入失败（{xlsx.name} 读取出错）")
+        return _ok(count=imported, date=date, existed=existing)
+    finally:
+        db.close()
 
 
 def _check_auction_time() -> tuple[bool, dict | None]:
@@ -4543,18 +4754,21 @@ def get_auction_gap_up(
 def _auction_ai_analysis(data: dict, log=None) -> dict:
     """AI 竞价分析核心：汇总当日竞价数据，调用 LLM 生成分析报告。
 
-    log 回调时，把各阶段进度写入日志（供 /auction/ai-analysis/run 后台任务实时回显）。
+    log 回调时，把各阶段进度写入日志（供 /auction/ai-analysis/run 后台任务实时回显）；
+    无回调时落到文件 logs/ai_analysis/auction_ai_analysis_YYYYMMDD.log。
     Body: { "date": "YYYY-MM-DD", "concept_source": "industry|concept",
             "web_answers": [{target,label,answer}...] }
     web_answers 非空时，把已收到的豆包/DeepSeek 多源回答交给项目 LLM 交叉验证并追加最终结论。
     """
+    from utils.logging_setup import get_run_logger
+    _run_logger = get_run_logger("auction_ai_analysis", "ai_analysis")
 
     def log_line(msg: str) -> None:
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
         if log:
             log(line)
         else:
-            _log.info("auction AI: %s", line)
+            _run_logger.info(msg)
 
     date_str = data.get("date", "")
     source = data.get("concept_source", "industry")
@@ -4899,6 +5113,35 @@ def _ladder_cache_path(today_compact: str) -> Path:
     return _LADDER_CACHE_DIR / f"ladder_cache_{today_compact}.json"
 
 
+def _fallback_ladder_date(today_compact: str) -> str | None:
+    """盘前回退：返回最近交易日（比今天早的最新交易日，'YYYY-MM-DD'），数据库不可用/异常返回 None。"""
+    try:
+        db = _get_db()
+        if db is None:
+            return None
+        try:
+            latest = _latest_trade_date(db)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+        if not latest:
+            return None
+        ds = str(latest).strip()
+        if "-" in ds:
+            compact = ds.replace("-", "")
+        elif ds.isdigit():
+            compact = ds
+        else:
+            return None
+        if compact >= today_compact:
+            return None
+        return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+    except Exception:
+        return None
+
+
 def _parse_cn_amount(s) -> float:
     """问财金额字段可能是 '1.23亿' / '4567万' / 纯数字(元)，统一转成元(float)。"""
     if s is None:
@@ -4942,9 +5185,13 @@ def _iwencai_first_match(row: dict, *names):
 
 @router.get("/market/ladder")
 def get_market_ladder():
-    """Get limit-up ladder analysis via iwencai, with daily file cache."""
+    """Get limit-up ladder analysis via iwencai, with daily file cache.
+
+    盘前回退：盘前（今日尚无涨停）时，以数据库最近交易日为回退日期展示（优先用该日缓存，否则在线查询）。
+    """
     today_compact = date.today().strftime("%Y%m%d")
     cache_path = _ladder_cache_path(today_compact)
+    from_path = "today"
 
     # Serve from cache if available
     try:
@@ -4954,7 +5201,7 @@ def get_market_ladder():
     except Exception:
         pass
 
-    # Cache miss — fetch from iwencai
+    # Cache miss — fetch from iwencai. 优先采集 IWENCAI_API_KEY（根项目 .env）。
     try:
         if not os.environ.get("IWENCAI_API_KEY"):
             root_env = _PROJECT_ROOT / ".env"
@@ -4969,10 +5216,30 @@ def get_market_ladder():
 
         from analysis.external.iwencai import query_data
 
-        raw = query_data(
+        today_query = (
             "今日涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 连续涨停天数 "
             "首次封板时间 封单额 炸板次数 涨停原因 成交额"
         )
+        raw = query_data(today_query)
+
+        # 盘前回退：今日无数据时，以数据库最近交易日为回退日期（优先用该日缓存，否则在线查询）。
+        if not raw:
+            fallback_date = _fallback_ladder_date(today_compact)
+            if not fallback_date:
+                return {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": "暂无数据（盘前）"}
+            fb_compact = fallback_date.replace("-", "")
+            fb_cache = _ladder_cache_path(fb_compact)
+            if fb_cache.exists():
+                cached = json.loads(fb_cache.read_text(encoding="utf-8"))
+                summary = cached.get("summary", "") + f"（回退至 {fb_compact}）"
+                return dict(cached, summary=summary)
+            raw = query_data(
+                f"{fallback_date} 涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 "
+                "连续涨停天数 首次封板时间 封单额 炸板次数 涨停原因 成交额"
+            )
+            from_path = f"fallback:{fb_compact}"
+            today_compact = fb_compact
+
         if not raw:
             result = {"ladder": [], "by_board": {}, "by_concept": {}, "stats": None, "summary": "暂无数据"}
             return result
@@ -5074,6 +5341,10 @@ def get_market_ladder():
             b = str(s["board"])
             dist[b] = dist.get(b, 0) + 1
 
+        summary = f"共 {total} 只涨停，首板 {first} 只，连板 {cont} 只，最高 {max_b} 板"
+        if from_path.startswith("fallback:"):
+            summary += f"（暂无今日数据，展示最近交易日 " + from_path.split(":")[1] + "）"
+
         result = {
             "ladder": ladder,
             "by_board": by_board,
@@ -5085,15 +5356,16 @@ def get_market_ladder():
                 "max_board": max_b,
                 "board_distribution": dist,
             },
-            "summary": f"共 {total} 只涨停，首板 {first} 只，连板 {cont} 只，最高 {max_b} 板",
+            "summary": summary,
         }
 
-        # Write cache
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        # Write cache（仅今日数据写缓存；回退数据不覆盖今天的缓存）
+        if not from_path.startswith("fallback:"):
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
         return result
     except Exception as e:

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, Fragment, useRef } from "react";
 import { toast } from "sonner";
 import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera, Search, Bot, ArrowUpRight, ChevronDown, ExternalLink } from "lucide-react";
 import { api } from "@/lib/api";
+import { RunLogPanel } from "@/components/RunLogPanel";
 import { useLLMWebAsk } from "@/hooks/useLLMWebAsk";
 import { SENTIMENT_PROMPT, LLM_OPTIONS } from "@/lib/auctionAi";
 
@@ -592,6 +593,91 @@ export function AuctionBoard() {
       else if (tab === "gapup") fetchGapUp();
     }
   }, [selectedDate, tab, analysisSource]);
+
+  const renderLimitUpRow = (s: any) => (
+    <tr key={s.code} className="border-t hover:bg-muted/30 transition-colors">
+      <td className="px-3 py-2 font-mono">{s.code}</td>
+      <td className="px-3 py-2">{s.name}</td>
+      <td className="px-3 py-2 max-w-[240px]">
+        {s.concepts && s.concepts.length > 0 ? (
+          <span className="flex flex-wrap gap-1">
+            {s.concepts.slice(0, 4).map((c: string) => (
+              <span key={c} className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground whitespace-nowrap">{c}</span>
+            ))}
+            {s.concepts.length > 4 && (
+              <span className="text-xs text-muted-foreground">+{s.concepts.length - 4}</span>
+            )}
+          </span>
+        ) : (
+          <span className="text-muted-foreground text-xs">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2 text-right font-medium">{s.vol_today.toLocaleString()}</td>
+      <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev > 0 ? s.vol_prev.toLocaleString() : "-"}</td>
+      {limitUpSubTab === "yesterday" ? (
+        <td className={`px-3 py-2 text-right font-medium ${(s.realtime_chg_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+          {s.realtime_chg_pct != null ? `${s.realtime_chg_pct >= 0 ? "+" : ""}${s.realtime_chg_pct.toFixed(2)}%` : "-"}
+        </td>
+      ) : (
+        <td className={`px-3 py-2 text-right font-medium ${s.vol_chg > 0 ? "text-red-600" : s.vol_chg < 0 ? "text-green-600" : ""}`}>
+          {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
+        </td>
+      )}
+      <td className={`px-3 py-2 text-right font-medium ${s.vol_pct >= 999 ? "" : s.vol_pct >= 100 ? "text-red-600" : "text-green-600"}`}>
+        {s.vol_pct >= 999 ? "新" : `${s.vol_pct.toFixed(0)}%`}
+      </td>
+      <td className="px-3 py-2 text-right">{s.amt_today > 0 ? s.amt_today.toLocaleString() : "-"}</td>
+      <td className="px-3 py-2 text-right text-muted-foreground">{s.amt_prev > 0 ? s.amt_prev.toLocaleString() : "-"}</td>
+      <td className={`px-3 py-2 text-right font-medium ${(s.auction_chg_today ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+        {s.auction_chg_today != null ? `${s.auction_chg_today >= 0 ? "+" : ""}${s.auction_chg_today.toFixed(2)}%` : "-"}
+      </td>
+      {(() => {
+        const biz = s.auction_expectation || null;
+        if (!biz) {
+          return (
+            <>
+              <td colSpan={5} className="px-3 py-2 text-center text-muted-foreground">—</td>
+            </>
+          );
+        }
+        const combo = biz.combo || {};
+        const colorMap: Record<string, string> = {
+          red: "bg-red-600/15 text-red-600 border-red-600/30",
+          orange: "bg-orange-600/15 text-orange-600 border-orange-600/30",
+          blue: "bg-blue-600/15 text-blue-600 border-blue-600/30",
+          gray: "bg-muted text-muted-foreground border-muted",
+          purple: "bg-purple-600/15 text-purple-600 border-purple-600/30",
+          black: "bg-zinc-900 text-zinc-100 border-zinc-700",
+        };
+        const badgeCls = colorMap[combo.color] || colorMap.gray;
+        return (
+          <>
+            <td className="px-3 py-2 text-center font-mono">{biz.consec_boards > 0 ? biz.consec_boards : "-"}</td>
+            <td className="px-3 py-2 text-center">
+              <span className="text-xs text-muted-foreground">{biz.band || "-"}</span>
+              <span className="block text-[10px] text-muted-foreground/70">{biz.first_seal ? `${biz.first_seal.slice(0, 2)}:${biz.first_seal.slice(2, 4)}` : ""}</span>
+            </td>
+            <td className="px-3 py-2 text-right font-medium">
+              {biz.vol_pct_auction != null ? (
+                <span className={biz.vol_level === "达标" ? "text-red-600" : "text-muted-foreground"}>
+                  {biz.vol_pct_auction.toFixed(1)}%
+                </span>
+              ) : "-"}
+            </td>
+            <td className="px-3 py-2 text-center">
+              {combo.combo ? (
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium ${badgeCls}`}>
+                  {combo.combo} {combo.label}
+                </span>
+              ) : <span className="text-muted-foreground text-xs">—</span>}
+              <span className="block text-[10px] text-muted-foreground/70">{biz.price_level}</span>
+            </td>
+            <td className="px-3 py-2 text-left text-xs text-muted-foreground">{combo.action || "-"}</td>
+          </>
+        );
+      })()}
+    </tr>
+  );
 
   return (
     <div className="p-6 space-y-6">
@@ -1242,6 +1328,7 @@ export function AuctionBoard() {
                 <Bot className={`h-4 w-4 ${aiLoading ? "animate-pulse" : ""}`} />
                 {aiLoading ? "AI分析中..." : "开始AI分析"}
               </button>
+              <RunLogPanel subdir="ai_analysis" name="auction_ai_analysis" title="AI分析运行日志" autoRefresh={15000} />
             </div>
           </div>
 
@@ -1400,7 +1487,7 @@ export function AuctionBoard() {
           <div className="flex items-center gap-2">
             {[
               { key: "both" as const, label: "双涨停", countKey: "both_count" as const },
-              { key: "yesterday" as const, label: "昨日涨停", countKey: "prev_count" as const },
+              { key: "yesterday" as const, label: "昨日连板梯队", countKey: "prev_count" as const },
               { key: "today" as const, label: "竞价涨停", countKey: "today_count" as const },
             ].map(({ key, label, countKey }) => (
               <button
@@ -1449,94 +1536,41 @@ export function AuctionBoard() {
                   </thead>
                   <tbody>
                     {(() => {
+                      if (limitUpSubTab === "yesterday") {
+                        // 昨日连板梯队：全部昨日涨停（含今日续板）按连板数分组，组内按竞价量排序
+                        const all = [...limitUpData.prev_limitup, ...limitUpData.both_limitup];
+                        const groups = new Map<number, any[]>();
+                        for (const s of all) {
+                          const b = s.auction_expectation?.consec_boards || 1;
+                          if (!groups.has(b)) groups.set(b, []);
+                          groups.get(b)!.push(s);
+                        }
+                        const sorted = [...groups.entries()]
+                          .sort((a, b) => b[0] - a[0])
+                          .map(([board, stocks]) => [board, [...stocks].sort((x, y) => y.vol_today - x.vol_today)] as const);
+                        if (sorted.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={15} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                            </tr>
+                          );
+                        }
+                        return sorted.map(([board, stocks]) => (
+                          <Fragment key={board}>
+                            <tr className="bg-muted/40">
+                              <td colSpan={15} className="px-3 py-1.5 text-xs font-bold">
+                                {board === 1 ? "首板" : `${board}板`}
+                                <span className="font-normal text-muted-foreground">（{stocks.length}只）</span>
+                              </td>
+                            </tr>
+                            {stocks.map((s) => renderLimitUpRow(s))}
+                          </Fragment>
+                        ));
+                      }
                       let items: any[] = [];
                       if (limitUpSubTab === "both") items = limitUpData.both_limitup;
-                      else if (limitUpSubTab === "yesterday") items = limitUpData.prev_limitup;
                       else items = [...limitUpData.both_limitup, ...limitUpData.today_limitup];
-                      return items.length > 0 ? items.map((s: any) => (
-                        <tr key={s.code} className="border-t hover:bg-muted/30 transition-colors">
-                          <td className="px-3 py-2 font-mono">{s.code}</td>
-                          <td className="px-3 py-2">{s.name}</td>
-                          <td className="px-3 py-2 max-w-[240px]">
-                            {s.concepts && s.concepts.length > 0 ? (
-                              <span className="flex flex-wrap gap-1">
-                                {s.concepts.slice(0, 4).map((c: string) => (
-                                  <span key={c} className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground whitespace-nowrap">{c}</span>
-                                ))}
-                                {s.concepts.length > 4 && (
-                                  <span className="text-xs text-muted-foreground">+{s.concepts.length - 4}</span>
-                                )}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground text-xs">—</span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2 text-right font-medium">{s.vol_today.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right text-muted-foreground">{s.vol_prev > 0 ? s.vol_prev.toLocaleString() : "-"}</td>
-                          {limitUpSubTab === "yesterday" ? (
-                            <td className={`px-3 py-2 text-right font-medium ${(s.realtime_chg_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
-                              {s.realtime_chg_pct != null ? `${s.realtime_chg_pct >= 0 ? "+" : ""}${s.realtime_chg_pct.toFixed(2)}%` : "-"}
-                            </td>
-                          ) : (
-                            <td className={`px-3 py-2 text-right font-medium ${s.vol_chg > 0 ? "text-red-600" : s.vol_chg < 0 ? "text-green-600" : ""}`}>
-                              {s.vol_chg > 0 ? "+" : ""}{s.vol_chg.toLocaleString()}
-                            </td>
-                          )}
-                          <td className={`px-3 py-2 text-right font-medium ${s.vol_pct >= 999 ? "" : s.vol_pct >= 100 ? "text-red-600" : "text-green-600"}`}>
-                            {s.vol_pct >= 999 ? "新" : `${s.vol_pct.toFixed(0)}%`}
-                          </td>
-                          <td className="px-3 py-2 text-right">{s.amt_today > 0 ? s.amt_today.toLocaleString() : "-"}</td>
-                          <td className="px-3 py-2 text-right text-muted-foreground">{s.amt_prev > 0 ? s.amt_prev.toLocaleString() : "-"}</td>
-                          <td className={`px-3 py-2 text-right font-medium ${(s.auction_chg_today ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
-                            {s.auction_chg_today != null ? `${s.auction_chg_today >= 0 ? "+" : ""}${s.auction_chg_today.toFixed(2)}%` : "-"}
-                          </td>
-                          {(() => {
-                            const biz = s.auction_expectation || null;
-                            if (!biz) {
-                              return (
-                                <>
-                                  <td colSpan={5} className="px-3 py-2 text-center text-muted-foreground">—</td>
-                                </>
-                              );
-                            }
-                            const combo = biz.combo || {};
-                            const colorMap: Record<string, string> = {
-                              red: "bg-red-600/15 text-red-600 border-red-600/30",
-                              orange: "bg-orange-600/15 text-orange-600 border-orange-600/30",
-                              blue: "bg-blue-600/15 text-blue-600 border-blue-600/30",
-                              gray: "bg-muted text-muted-foreground border-muted",
-                              purple: "bg-purple-600/15 text-purple-600 border-purple-600/30",
-                              black: "bg-zinc-900 text-zinc-100 border-zinc-700",
-                            };
-                            const badgeCls = colorMap[combo.color] || colorMap.gray;
-                            return (
-                              <>
-                                <td className="px-3 py-2 text-center font-mono">{biz.consec_boards > 0 ? biz.consec_boards : "-"}</td>
-                                <td className="px-3 py-2 text-center">
-                                  <span className="text-xs text-muted-foreground">{biz.band || "-"}</span>
-                                  <span className="block text-[10px] text-muted-foreground/70">{biz.first_seal ? `${biz.first_seal.slice(0, 2)}:${biz.first_seal.slice(2, 4)}` : ""}</span>
-                                </td>
-                                <td className="px-3 py-2 text-right font-medium">
-                                  {biz.vol_pct_auction != null ? (
-                                    <span className={biz.vol_level === "达标" ? "text-red-600" : "text-muted-foreground"}>
-                                      {biz.vol_pct_auction.toFixed(1)}%
-                                    </span>
-                                  ) : "-"}
-                                </td>
-                                <td className="px-3 py-2 text-center">
-                                  {combo.combo ? (
-                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium ${badgeCls}`}>
-                                      {combo.combo} {combo.label}
-                                    </span>
-                                  ) : <span className="text-muted-foreground text-xs">—</span>}
-                                  <span className="block text-[10px] text-muted-foreground/70">{biz.price_level}</span>
-                                </td>
-                                <td className="px-3 py-2 text-left text-xs text-muted-foreground">{combo.action || "-"}</td>
-                              </>
-                            );
-                          })()}
-                        </tr>
-                      )) : (
+                      return items.length > 0 ? items.map((s) => renderLimitUpRow(s)) : (
                         <tr>
                           <td colSpan={15} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
                         </tr>
@@ -1552,7 +1586,7 @@ export function AuctionBoard() {
           {limitUpData && (
             <div className="grid grid-cols-3 gap-4 text-sm">
               <div className="border rounded-lg bg-card p-3 text-center">
-                <div className="text-muted-foreground">昨日涨停</div>
+                <div className="text-muted-foreground">昨日连板</div>
                 <div className="text-xl font-bold">{limitUpData.prev_count}只</div>
               </div>
               <div className="border rounded-lg bg-card p-3 text-center">

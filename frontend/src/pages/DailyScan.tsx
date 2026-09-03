@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { Search, RefreshCw, TrendingUp, Download, BarChart3, CandlestickChart as CandleIcon, X } from "lucide-react";
+import { useEffect, useState, Fragment } from "react";
+import { Search, RefreshCw, TrendingUp, Download, BarChart3, CandlestickChart as CandleIcon, X, Activity, Brain, Loader2 } from "lucide-react";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
 import { SMCChart } from "@/components/charts/SMCChart";
 import { api } from "@/lib/api";
 import type { PriceBar } from "@/lib/api";
+import { RunLogPanel } from "@/components/RunLogPanel";
 
 interface MarketStats {
   total: number;
@@ -662,27 +663,107 @@ export function DailyScan() {
   const [fibCandidates, setFibCandidates] = useState<Candidate[]>([]);
   const [v5Candidates, setV5Candidates] = useState<Candidate[]>([]);
   const [ictCandidates, setIctCandidates] = useState<Candidate[]>([]);
+  const [sentHeader, setSentHeader] = useState<any>(null);
+  const [sentCandidates, setSentCandidates] = useState<any[]>([]);
   const [running, setRunning] = useState<string | null>(null);
   const [scriptOutput, setScriptOutput] = useState<string | null>(null);
   const [noCache, setNoCache] = useState(false);
   const [klineData, setKlineData] = useState<Record<string, PriceBar[]>>({});
   const [expandedKline, setExpandedKline] = useState<string | null>(null);
   const [selectedStock, setSelectedStock] = useState<Candidate | null>(null);
+  const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "sentiment">("fibonacci");
+  const [decisionNotes, setDecisionNotes] = useState("");
+  const [sentAi, setSentAi] = useState<Record<number, { phase: string; analysis: string; suggestion: string } | null>>({});
+  const [sentAiLoading, setSentAiLoading] = useState<number | null>(null);
+  const [sentAiError, setSentAiError] = useState<Record<number, string>>({});
+
+  const handleSentAiAnalyze = async (step: number) => {
+    setSentAiLoading(step);
+    setSentAiError((e) => ({ ...e, [step]: "" }));
+    try {
+      const res = await api.tools.post<any>("/sentiment/ai-analyze", {
+        step,
+        header: sentHeader ?? {},
+        candidates: sentCandidates,
+      });
+      if (res?.ok) {
+        setSentAi((p) => ({ ...p, [step]: { phase: res.phase, analysis: res.analysis, suggestion: res.suggestion } }));
+      } else {
+        setSentAiError((e) => ({ ...e, [step]: res?.error || "分析失败" }));
+      }
+    } catch (e: any) {
+      setSentAiError((er) => ({ ...er, [step]: e?.message || String(e) }));
+    } finally {
+      setSentAiLoading(null);
+    }
+  };
+
+  const renderSentAi = (step: number) => {
+    const data = sentAi[step];
+    const loading = sentAiLoading === step;
+    const err = sentAiError[step];
+    return (
+      <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50/40 p-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Brain className="h-4 w-4 text-violet-500" />
+            <span className="text-sm font-medium text-violet-700">AI 阶段分析</span>
+          </div>
+          <button
+            onClick={() => handleSentAiAnalyze(step)}
+            disabled={loading}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs bg-violet-600 text-white rounded-md hover:bg-violet-700 disabled:opacity-50 transition-colors"
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3" />}
+            {loading ? "分析中..." : data ? "重新分析" : "AI分析"}
+          </button>
+        </div>
+        {data && (
+          <div className="mt-2 space-y-1 text-sm">
+            <p className="font-medium">阶段：<span className="text-violet-700">{data.phase}</span></p>
+            <p className="text-muted-foreground leading-snug">{data.analysis}</p>
+            <p className="text-violet-700 leading-snug">建议：{data.suggestion}</p>
+          </div>
+        )}
+        {err && <p className="mt-1.5 text-xs text-red-500">{err}</p>}
+      </div>
+    );
+  };
+
+  const strategies = [
+    { key: "fibonacci" as const, label: "斐波那契", icon: Search, count: fibCandidates.length },
+    { key: "v5" as const, label: "V5趋势", icon: TrendingUp, count: v5Candidates.length },
+    { key: "ict" as const, label: "ICT/SMC", icon: BarChart3, count: ictCandidates.length },
+    { key: "sentiment" as const, label: "情绪选股", icon: Activity, count: sentCandidates.length },
+  ];
 
   const fetchScanResults = async () => {
     try {
-      const [fibData, v5Data, ictData] = await Promise.all([
+      const [fibData, v5Data, ictData, sentData] = await Promise.all([
         api.tools.get<any>("/scan-results?strategy=fibonacci"),
         api.tools.get<any>("/scan-results?strategy=v5"),
         api.tools.get<any>("/scan-results?strategy=ict"),
+        api.tools.get<any>("/scan-results?strategy=sentiment_leader"),
       ]);
       const fib = fibData?.candidates || [];
       const v5 = v5Data?.candidates || [];
       const ict = ictData?.candidates || [];
+      const sent = sentData?.candidates || [];
       setFibCandidates(fib);
       setV5Candidates(v5);
       setIctCandidates(ict);
-      setNoCache(fib.length === 0 && v5.length === 0 && ict.length === 0);
+      setSentCandidates(sent);
+      setSentHeader(sentData?.mainlines && sentData.mainlines.length ? sentData : null);
+      setNoCache(fib.length === 0 && v5.length === 0 && ict.length === 0 && sent.length === 0);
+      setActiveStrategy((cur) => {
+        const counts: Record<string, number> = { fibonacci: fib.length, v5: v5.length, ict: ict.length, sentiment: sent.length };
+        if (counts[cur] && counts[cur] > 0) return cur;
+        if (fib.length) return "fibonacci";
+        if (v5.length) return "v5";
+        if (ict.length) return "ict";
+        if (sent.length) return "sentiment";
+        return "fibonacci";
+      });
     } catch (e) {
       setNoCache(true);
     }
@@ -874,7 +955,7 @@ export function DailyScan() {
       {noCache && !running && !loading && (
         <div className="border rounded-lg p-8 bg-card">
           <h2 className="text-lg font-semibold mb-4 text-center">今日尚无选股结果</h2>
-          <div className="grid gap-3 md:grid-cols-3 max-w-2xl mx-auto">
+          <div className="grid gap-3 md:grid-cols-4 max-w-3xl mx-auto">
             <button
               onClick={() => handleRunScan("fibonacci")}
               className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
@@ -905,6 +986,16 @@ export function DailyScan() {
                 <p className="text-xs text-muted-foreground">约需4-5分钟</p>
               </div>
             </button>
+            <button
+              onClick={() => handleRunScan("sentiment_leader")}
+              className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
+            >
+              <TrendingUp className="h-5 w-5 text-primary" />
+              <div>
+                <p className="font-medium">短线情绪选股</p>
+                <p className="text-xs text-muted-foreground">约需1-2分钟</p>
+              </div>
+            </button>
           </div>
         </div>
       )}
@@ -914,7 +1005,7 @@ export function DailyScan() {
           <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2">
             <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full" />
             <span className="font-semibold text-sm">
-              {running === "fibonacci" ? "斐波那契" : running === "ict" ? "ICT/SMC" : "V5趋势"}选股执行中...
+              {running === "fibonacci" ? "斐波那契" : running === "ict" ? "ICT/SMC" : running === "v5" ? "V5趋势" : running === "sentiment_leader" ? "短线情绪" : ""}选股执行中...
             </span>
           </div>
           <pre className="p-4 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-[400px] text-muted-foreground">
@@ -923,106 +1014,279 @@ export function DailyScan() {
         </div>
       )}
 
-      {/* 斐波那契选股结果 */}
+      {/* 选股结果（并列 Tab 切换） */}
       <div className="border rounded-lg bg-card overflow-hidden">
-        <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-          <h2 className="font-semibold">斐波那契选股结果 {fibCandidates.length > 0 ? `(${fibCandidates.length} 只)` : ""}</h2>
+        <div className="flex items-center justify-between border-b px-4 py-3 bg-muted/30">
+          <h2 className="font-semibold">选股结果</h2>
+          <div className="flex items-center gap-1">
+            {strategies.map(({ key, label, icon: Icon, count }) => (
+              <button
+                key={key}
+                onClick={() => setActiveStrategy(key)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors ${
+                  activeStrategy === key
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground"
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {label}
+                <span className="text-xs opacity-70">{count > 0 ? `(${count})` : ""}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between">
+          <h3 className="text-sm font-medium">
+            {activeStrategy === "fibonacci" ? "斐波那契选股结果" : activeStrategy === "v5" ? "V5趋势选股结果" : activeStrategy === "sentiment" ? "短线情绪选股结果" : "ICT/SMC选股结果"}
+            {(() => {
+              const n = activeStrategy === "fibonacci" ? fibCandidates.length : activeStrategy === "v5" ? v5Candidates.length : activeStrategy === "sentiment" ? sentCandidates.length : ictCandidates.length;
+              return n > 0 ? `（${n} 只）` : "";
+            })()}
+          </h3>
           <button
-            onClick={() => handleRunScan("fibonacci")}
-            disabled={running === "fibonacci"}
+            onClick={() => handleRunScan(activeStrategy)}
+            disabled={running === activeStrategy}
             className="flex items-center gap-1 px-3 py-1 text-xs border rounded-md hover:bg-muted disabled:opacity-50"
           >
-            <RefreshCw className={`h-3 w-3 ${running === "fibonacci" ? "animate-spin" : ""}`} />
+            <RefreshCw className={`h-3 w-3 ${running === activeStrategy ? "animate-spin" : ""}`} />
             重新选股
           </button>
         </div>
-        <StrategyTable
-          candidates={fibCandidates}
-          columns={[
-            { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
-            { key: "name", label: "名称", render: c => c.name },
-            { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
-            { key: "E", label: "E价", align: "right", render: c => c.E?.toFixed(2) ?? "-" },
-            { key: "deviation", label: "偏差%", align: "right", render: c => <span className={(c.deviation ?? 0) >= 0 ? "text-red-600" : "text-green-600"}>{c.deviation?.toFixed(2) ?? "-"}%</span> },
-            { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
-            { key: "swing", label: "摆动%", align: "right", render: c => `${c.swing?.toFixed(1) ?? "-"}%` },
-            { key: "stop", label: "止损", align: "right", render: c => <span className="text-muted-foreground">{c.stop?.toFixed(2) ?? "-"}</span> },
-            { key: "H_date", label: "H日期", align: "center", render: c => <span className="text-xs">{c.H_date}</span> },
-            { key: "L_date", label: "L日期", align: "center", render: c => <span className="text-xs">{c.L_date}</span> },
-          ]}
-          klineData={klineData}
-          expandedKline={expandedKline}
-          onKline={fetchKline}
-          onBuy={c => handleBuy(c.code, c.name, "fibonacci", { price: c.price, E: c.E, stop: c.stop, score: c.score })}
-          onSelect={setSelectedStock}
-          emptyText="暂无斐波那契选股结果"
-        />
-      </div>
+        {activeStrategy === "sentiment" && (
+          <div className="px-4 pb-3">
+            <RunLogPanel subdir="stock_selection" name="sentiment_leader" title="情绪选股运行日志" />
+          </div>
+        )}
+        {!running && (
+          <div className="px-4 py-3">
+            {activeStrategy === "fibonacci" && (
+              <StrategyTable
+                candidates={fibCandidates}
+                columns={[
+                  { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
+                  { key: "name", label: "名称", render: c => c.name },
+                  { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+                  { key: "E", label: "E价", align: "right", render: c => c.E?.toFixed(2) ?? "-" },
+                  { key: "deviation", label: "偏差%", align: "right", render: c => <span className={(c.deviation ?? 0) >= 0 ? "text-red-600" : "text-green-600"}>{c.deviation?.toFixed(2) ?? "-"}%</span> },
+                  { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
+                  { key: "swing", label: "摆动%", align: "right", render: c => `${c.swing?.toFixed(1) ?? "-"}%` },
+                  { key: "stop", label: "止损", align: "right", render: c => <span className="text-muted-foreground">{c.stop?.toFixed(2) ?? "-"}</span> },
+                  { key: "H_date", label: "H日期", align: "center", render: c => <span className="text-xs">{c.H_date}</span> },
+                  { key: "L_date", label: "L日期", align: "center", render: c => <span className="text-xs">{c.L_date}</span> },
+                ]}
+                klineData={klineData}
+                expandedKline={expandedKline}
+                onKline={fetchKline}
+                onBuy={c => handleBuy(c.code, c.name, "fibonacci", { price: c.price, E: c.E, stop: c.stop, score: c.score })}
+                onSelect={setSelectedStock}
+                emptyText="暂无斐波那契选股结果"
+              />
+            )}
+            {activeStrategy === "v5" && (
+              <StrategyTable
+                candidates={v5Candidates}
+                columns={[
+                  { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
+                  { key: "name", label: "名称", render: c => c.name },
+                  { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+                  { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
+                ]}
+                klineData={klineData}
+                expandedKline={expandedKline}
+                onKline={fetchKline}
+                onBuy={c => handleBuy(c.code, c.name, "v5", { price: c.price, score: c.score })}
+                onSelect={setSelectedStock}
+                emptyText="暂无V5趋势选股结果"
+              />
+            )}
+            {activeStrategy === "ict" && (
+              <StrategyTable
+                candidates={ictCandidates}
+                columns={[
+                  { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
+                  { key: "name", label: "名称", render: c => c.name },
+                  { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+                  { key: "score", label: "总分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
+                  { key: "structure_score", label: "结构", align: "right", render: c => (c as any).structure_score?.toFixed(0) ?? "-" },
+                  { key: "fvg_score", label: "FVG", align: "right", render: c => (c as any).fvg_score?.toFixed(0) ?? "-" },
+                  { key: "ob_score", label: "OB", align: "right", render: c => (c as any).ob_score?.toFixed(0) ?? "-" },
+                  { key: "liquidity_score", label: "流动性", align: "right", render: c => (c as any).liquidity_score?.toFixed(0) ?? "-" },
+                  { key: "ote_score", label: "OTE", align: "right", render: c => (c as any).ote_score?.toFixed(0) ?? "-" },
+                  { key: "vol_score", label: "量能", align: "right", render: c => (c as any).vol_score?.toFixed(0) ?? "-" },
+                ]}
+                klineData={klineData}
+                expandedKline={expandedKline}
+                onKline={fetchKline}
+                onBuy={c => handleBuy(c.code, c.name, "ict", { price: c.price, score: c.score, structure: (c as any).structure, sweep_level: (c as any).sweep_level })}
+                onSelect={setSelectedStock}
+                emptyText="暂无ICT/SMC选股结果"
+              />
+            )}
+            {activeStrategy === "sentiment" && (
+              <div className="space-y-5">
+                {!sentHeader && sentCandidates.length === 0 && (
+                  <div className="p-6 text-center text-muted-foreground">暂无短线情绪选股结果，请点击上方「重新选股」或先运行短线情绪选股</div>
+                )}
+                {sentHeader && (
+                  <>
+                    <RunLogPanel subdir="ai_analysis" name="sentiment_ai_analyze" title="情绪周期AI分析运行日志" autoRefresh={10000} />
+                    {/* Step 1 情绪周期 */}
+                    <div className="border rounded-lg p-4">
+                      <h4 className="font-semibold mb-3 text-base flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">1</span>
+                        情绪周期
+                      </h4>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <span className={`inline-flex px-3 py-1 rounded-full text-sm font-semibold ${
+                          sentHeader.cycle === "主升" ? "bg-red-100 text-red-700" :
+                          sentHeader.cycle === "启动" ? "bg-orange-100 text-orange-700" :
+                          sentHeader.cycle === "分歧" ? "bg-amber-100 text-amber-700" :
+                          "bg-blue-100 text-blue-700"
+                        }`}>
+                          当前情绪：{sentHeader.cycle}
+                        </span>
+                        {sentHeader.breadth && (
+                          <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+                            <span className="px-2 py-1 bg-muted/40 rounded">涨停 {sentHeader.breadth.limit_up}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">涨幅&gt;5% {sentHeader.breadth.gainer}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">最高连板 {sentHeader.breadth.max_streak}</span>
+                          </div>
+                        )}
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        操作参考：启动/主升→可参与；分歧→低位切换；退潮→空仓或极小仓位试错。
+                      </p>
+                      {renderSentAi(1)}
+                    </div>
 
-      {/* V5 选股结果 */}
-      <div className="border rounded-lg bg-card overflow-hidden">
-        <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-          <h2 className="font-semibold">V5趋势选股结果 {v5Candidates.length > 0 ? `(${v5Candidates.length} 只)` : ""}</h2>
-          <button
-            onClick={() => handleRunScan("v5")}
-            disabled={running === "v5"}
-            className="flex items-center gap-1 px-3 py-1 text-xs border rounded-md hover:bg-muted disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3 w-3 ${running === "v5" ? "animate-spin" : ""}`} />
-            重新选股
-          </button>
-        </div>
-        <StrategyTable
-          candidates={v5Candidates}
-          columns={[
-            { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
-            { key: "name", label: "名称", render: c => c.name },
-            { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
-            { key: "score", label: "评分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
-          ]}
-          klineData={klineData}
-          expandedKline={expandedKline}
-          onKline={fetchKline}
-          onBuy={c => handleBuy(c.code, c.name, "v5", { price: c.price, score: c.score })}
-          onSelect={setSelectedStock}
-          emptyText="暂无V5趋势选股结果"
-        />
-      </div>
+                    {/* Step 2 主线板块 */}
+                    <div className="border rounded-lg p-4">
+                      <h4 className="font-semibold mb-3 text-base flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">2</span>
+                        主线板块
+                      </h4>
+                      {(!sentHeader.mainlines || sentHeader.mainlines.length === 0) ? (
+                        <div className="text-sm text-muted-foreground">今日无成立主线（板块内个股不足）</div>
+                      ) : (
+                        <div className="grid gap-2 md:grid-cols-3">
+                          {sentHeader.mainlines.map((ml: any) => (
+                            <div key={ml.concept} className="border rounded-lg p-3 bg-muted/10">
+                              <div className="flex items-center justify-between">
+                                <span className="font-medium text-sm">{ml.concept}</span>
+                                <span className="text-xs text-primary">强度 {ml.score}</span>
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground space-x-3">
+                                <span>{ml.n} 家</span>
+                                <span>涨停 {ml.zt_n}</span>
+                                <span>最高 {ml.max_streak}板</span>
+                                <span>均涨 {ml.avg_chg}%</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {renderSentAi(2)}
+                    </div>
 
-      {/* ICT/SMC 选股结果 */}
-      <div className="border rounded-lg bg-card overflow-hidden">
-        <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-          <h2 className="font-semibold">ICT/SMC选股结果 {ictCandidates.length > 0 ? `(${ictCandidates.length} 只)` : ""}</h2>
-          <button
-            onClick={() => handleRunScan("ict")}
-            disabled={running === "ict"}
-            className="flex items-center gap-1 px-3 py-1 text-xs border rounded-md hover:bg-muted disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3 w-3 ${running === "ict" ? "animate-spin" : ""}`} />
-            重新选股
-          </button>
-        </div>
-        <StrategyTable
-          candidates={ictCandidates}
-          columns={[
-            { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
-            { key: "name", label: "名称", render: c => c.name },
-            { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
-            { key: "score", label: "总分", align: "right", render: c => <span className="font-medium">{c.score.toFixed(1)}</span> },
-            { key: "structure_score", label: "结构", align: "right", render: c => (c as any).structure_score?.toFixed(0) ?? "-" },
-            { key: "fvg_score", label: "FVG", align: "right", render: c => (c as any).fvg_score?.toFixed(0) ?? "-" },
-            { key: "ob_score", label: "OB", align: "right", render: c => (c as any).ob_score?.toFixed(0) ?? "-" },
-            { key: "liquidity_score", label: "流动性", align: "right", render: c => (c as any).liquidity_score?.toFixed(0) ?? "-" },
-            { key: "ote_score", label: "OTE", align: "right", render: c => (c as any).ote_score?.toFixed(0) ?? "-" },
-            { key: "vol_score", label: "量能", align: "right", render: c => (c as any).vol_score?.toFixed(0) ?? "-" },
-          ]}
-          klineData={klineData}
-          expandedKline={expandedKline}
-          onKline={fetchKline}
-          onBuy={c => handleBuy(c.code, c.name, "ict", { price: c.price, score: c.score, structure: (c as any).structure, sweep_level: (c as any).sweep_level })}
-          onSelect={setSelectedStock}
-          emptyText="暂无ICT/SMC选股结果"
-        />
+                    {/* Step 3 个股精选 */}
+                    <div className="border rounded-lg p-4">
+                      <h4 className="font-semibold mb-3 text-base flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">3</span>
+                        个股精选（按主线/地位排序）
+                      </h4>
+                      {sentCandidates.length === 0 && (
+                        <div className="text-sm text-muted-foreground">无候选（涨幅未达阈值）</div>
+                      )}
+                      {sentCandidates.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead className="bg-muted/40 text-xs text-muted-foreground">
+                              <tr>
+                                <th className="px-3 py-2 text-left font-medium">主线</th>
+                                <th className="px-3 py-2 text-left font-medium">地位</th>
+                                <th className="px-3 py-2 text-left font-medium">代码</th>
+                                <th className="px-3 py-2 text-left font-medium">名称</th>
+                                <th className="px-3 py-2 text-right font-medium">现价</th>
+                                <th className="px-3 py-2 text-right font-medium">涨幅</th>
+                                <th className="px-3 py-2 text-center font-medium">连板</th>
+                                <th className="px-3 py-2 text-center font-medium">上板时间</th>
+                                <th className="px-3 py-2 text-center font-medium">操作</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sentCandidates.map((c, i) => {
+                                const s = c.stock || {};
+                                const isZt = !!s.is_zt;
+                                const roleTag =
+                                  s.role === "龙" ? <span className="text-red-600 font-semibold">龙头</span> :
+                                  s.role === "板块龙头" ? <span className="text-orange-600 font-medium">板块龙头</span> :
+                                  s.role === "补涨龙" ? <span className="text-amber-600 font-medium">补涨龙</span> :
+                                  s.role === "日内先锋" ? <span className="text-blue-600 font-medium">日内先锋</span> :
+                                  <span className="text-muted-foreground">{s.role || "跟风"}</span>;
+                                return (
+                                  <Fragment key={`${c.mainline}-${s.code}-${i}`}>
+                                    <tr className="border-t">
+                                      <td className="px-3 py-2">
+                                        <span className="inline-flex px-2 py-0.5 rounded bg-primary/10 text-primary text-xs">{c.mainline}</span>
+                                      </td>
+                                      <td className="px-3 py-2">{roleTag}</td>
+                                      <td className="px-3 py-2 font-mono">{s.code}</td>
+                                      <td className="px-3 py-2">{s.name}</td>
+                                      <td className="px-3 py-2 text-right font-mono">{s.price?.toFixed(2)}</td>
+                                      <td className="px-3 py-2 text-right">
+                                        <span className={isZt ? "text-red-600 font-semibold" : "text-red-600"}>{isZt ? "涨停" : `+${s.chg?.toFixed(2)}%`}</span>
+                                      </td>
+                                      <td className="px-3 py-2 text-center">{s.streak ? `${s.streak}板` : "首板"}</td>
+                                      <td className="px-3 py-2 text-center text-muted-foreground">{s.ltime || "--:--"}</td>
+                                      <td className="px-3 py-2 text-center">
+                                        <button onClick={() => handleBuy(s.code, s.name, "sentiment_leader", { price: s.price, score: c.score })} className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">买入</button>
+                                        <button onClick={() => fetchKline(s.code)} className="ml-1 p-1 text-muted-foreground hover:text-primary rounded" title="查看K线">
+                                          <CandleIcon className="h-4 w-4 inline" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                    {expandedKline === s.code && klineData[s.code] && (
+                                      <tr>
+                                        <td colSpan={9} className="px-4 py-3 bg-muted/10">
+                                          <CandlestickChart data={klineData[s.code]} height={360} />
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                    {renderSentAi(3)}
+
+                    {/* Step 4 决策区（结论留人判断） */}
+                    <div className="border rounded-lg p-4 border-dashed">
+                      <h4 className="font-semibold mb-3 text-base flex items-center gap-2">
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">4</span>
+                        决策区（结论由你判断）
+                      </h4>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        以上仅为客观数据。请依据情绪周期决定「做不做」，依据主线板块决定「在哪做」，依据个股地位决定「做哪个」。
+                        回避：非主线杂毛 / 中位股（退潮期3-4板）/ 缩量加速一字板 / 跟风后排。
+                      </p>
+                      <textarea
+                        value={decisionNotes}
+                        onChange={(e) => setDecisionNotes(e.target.value)}
+                        placeholder="记录你的结论与理由（仅保存在本地页面，刷新后清空）..."
+                        className="w-full p-3 border rounded-md text-sm min-h-[100px] bg-muted/20 resize-y"
+                      />
+                      {renderSentAi(4)}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 股票详情弹窗 */}
