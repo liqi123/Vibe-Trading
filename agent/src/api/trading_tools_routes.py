@@ -1001,14 +1001,11 @@ def sell_cv_position(data: dict) -> dict:
 @router.get("/scan-results")
 def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
     """Return cached scan results for given strategy and date.
-    13:00之前默认取前一天（当日选股尚未生成），之后取当天。"""
+    优先取指定(默认当日)缓存；当日缓存尚不存在时，13:00前回退前一天（当日选股尚未生成）。"""
+    from datetime import date as _date, datetime, timedelta
+    today = _date.today()
     if not date:
-        from datetime import date as _date, datetime
-        today = _date.today()
         date = today.strftime("%Y-%m-%d")
-        if datetime.now().hour < 13:
-            from datetime import timedelta
-            date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     prefix = "v1" if strategy == "fibonacci" else "trend" if strategy == "trend" else "ict" if strategy == "ict" else "sentiment"
 
     def _load(cache_date: str) -> dict | None:
@@ -1025,6 +1022,14 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
     if result is not None:
         return result
 
+    # 当日缓存不存在：13:00前回退前一天（当日选股尚未生成），之后报空
+    if datetime.now().hour < 13:
+        prev = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        result = _load(prev)
+        if result is not None:
+            result["message"] = f"no cache for {date}, using {prev}"
+            return result
+
     # Fallback: find latest cache file for this strategy
     try:
         files = sorted(_PAPER_DIR.glob(f"{prefix}_screening_cache_*.json"), reverse=True)
@@ -1040,12 +1045,412 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
     return {"date": date, "candidates": [], "message": "no cache found"}
 
 
+@router.post("/sentiment/decision")
+def set_sentiment_decision(body: dict) -> dict:
+    """保存情绪选股决策笔记到当日缓存 JSON。
+
+    body: {date?, decision}
+    返回: {ok, date, decision} 或 {ok:false, error}
+    """
+    from datetime import date as _date
+    date = body.get("date") or _date.today().strftime("%Y-%m-%d")
+    decision = (body.get("decision") or "").strip()
+    path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
+    data = _read_json(path)
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "error": f"缓存不存在: sentiment_screening_cache_{date}.json"}
+    data["decision"] = decision
+    _atomic_write_json(path, data)
+    return _ok(date=date, decision=decision)
+
+
+# ---------- 情绪选股 逐维度分析（主线/个股） ----------
+
+_SENT_SCOPE_KEYS = ("mainlines", "stocks", "cycle")
+
+
+def _sent_get_analysis(data: dict, scope_key: str, key: str, dimension: str) -> str:
+    """读取缓存 analysis[scope_key][key][dimension] 的合并文本：manual 优先，否则 ai。"""
+    try:
+        dim = data.get("analysis", {}).get(scope_key, {}).get(key, {}).get(dimension, {})
+        return (dim.get("manual") or dim.get("ai") or "")
+    except Exception:
+        return ""
+
+
+def _sent_set_analysis(data: dict, scope_key: str, key: str, dimension: str, text: str, source: str) -> None:
+    """写入缓存 analysis[scope_key][key][dimension][source] = text（就地修改 data）。"""
+    data.setdefault("analysis", {}).setdefault(scope_key, {}).setdefault(key, {}).setdefault(dimension, {})
+    node = data["analysis"][scope_key][key][dimension]
+    node[source] = text
+    if source == "manual" and not text:
+        node.pop("manual", None)
+
+
+@router.post("/sentiment/analysis/save")
+def save_sentiment_analysis(body: dict) -> dict:
+    """保存某个维度的人工分析到当日缓存。
+
+    body: {date?, scope: mainlines|stocks, key: 主线名或代码, dimension, text}
+    返回: {ok, date, scope, key, dimension, text} 或错误
+    """
+    from datetime import date as _date
+    date = body.get("date") or _date.today().strftime("%Y-%m-%d")
+    scope = body.get("scope")
+    key = (body.get("key") or "").strip()
+    dimension = (body.get("dimension") or "").strip()
+    text = (body.get("text") or "").strip()
+    if scope not in _SENT_SCOPE_KEYS:
+        return {"ok": False, "error": f"scope 必须为 {_SENT_SCOPE_KEYS}"}
+    if not key or not dimension:
+        return {"ok": False, "error": "key 与 dimension 必填"}
+    path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
+    data = _read_json(path)
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "error": f"缓存不存在: sentiment_screening_cache_{date}.json"}
+    _sent_set_analysis(data, scope, key, dimension, text, "manual")
+    _atomic_write_json(path, data)
+    return _ok(date=date, scope=scope, key=key, dimension=dimension, text=text)
+
+
+_SENT_DIM_PROMPTS = {
+    "mainlines": {
+        "地位优先": "你是A股短线板块地位分析师。下面给出某主线（板块）的全部成员个股列表（含名称、代码、涨幅、是否涨停、连板数、上板时间、地位role、概念concepts）。请基于这些成员，判断并点名：①龙头——市场总龙头或板块最高标（连板最高、上板早），是谁；②补涨龙——在龙头分歧/断板时第一个强势涨停的低位板（常1进2/2进3、最好带新属性），是谁；③日内先锋——板块分歧转一致时最先上板带动情绪的个股，是谁；④跟风——其余跟涨标的。逐条写出个股代码+名称及理由，绝不使用分数。",
+        "筹码形态": "你是A股短线板块筹码与形态分析师。下面给出该板块成员列表。请从中筛出筹码与形态合适的个股并点名：①股性活跃（历史有连板/涨停次日常有溢价的，常是连板高标或反复涨停者）；②筹码结构干净（前期无密集套牢、近期换手充分，少套牢的平台/次新票优先）；③形态突破（处于平台突破或关键位置放量上板的）。逐条点名个股代码+名称并简述依据，不使用分数。",
+        "盘口时机": "你是A股短线板块盘口与时机分析师。下面给出该板块成员列表（含涨停时间、是否涨停、上板时间）。请从中筛出盘口与时机合适的个股并点名：①涨停时间——越早涨停地位越高的（除龙头外），列出上板较早者；②封单质量——封板坚决、抛压小的（涨停且早封的优先）；③带动性——它涨停后能带动同类或整个板块的（通常是龙头/先锋）。逐条点名个股代码+名称并简述，不使用分数。",
+    },
+    "stocks": {
+        "地位优先": "你是A股短线个股地位分析师。按当前标的的role判断地位：龙头（市场总龙头/板块龙头，参与需艺高人胆大）；补涨龙（龙头断板或分歧时第一个强势涨停的低位板，常1进2或2进3，最好有新属性）；日内先锋（板块分歧转一致时最先上板带动情绪的个股）。说明该标的是哪种地位及其含义，绝不使用分数。",
+        "筹码形态": "你是A股短线个股筹码与形态分析师。根据个股涨幅、连板、是否涨停、所属概念具体分析：股性是否活跃（历史有连板/涨停次日常有溢价）、筹码结构是否干净（前期无密集套牢盘、近期换手充分）、形态是否突破（平台突破或关键位置）。点名该股，不使用分数。",
+        "盘口时机": "你是A股短线个股盘口与时机分析师。具体分析：涨停时间（通常越早涨停地位越高，龙头除外）、封单质量（封板坚决、抛压小）、带动性（涨停后能否带动同类或整个板块）。点名该股，不使用分数。",
+    },
+    "cycle": {
+        "strategy": "你是A股情绪周期操作策略顾问。根据当前情绪周期阶段，给出对应的具体操作策略（做不做/怎么做），结合涨停家数、涨跌家数、炸板、成交额。",
+    },
+}
+
+
+@router.post("/sentiment/analysis/ai")
+def ai_sentiment_analysis(body: dict) -> dict:
+    """对某个维度调用 LLM 生成分析文本（不落盘，由前端保存或人工改写后保存）。
+
+    body: {scope: mainlines|stocks, key, dimension, mainline?, stock?}
+    mainline: 该主线的 dict（含 concept/n/zt_n/avg_chg/max_streak/score/heat/board_chg/stocks）
+    stock:    该个股的 dict（含 code/name/chg/streak/is_zt/ltime/role/concepts）
+    返回: {ok, analysis}
+    """
+    from strategies.common.llm_client import get_llm_client, is_llm_available
+    scope = body.get("scope")
+    key = (body.get("key") or "").strip()
+    dimension = (body.get("dimension") or "").strip()
+    if scope not in _SENT_SCOPE_KEYS or not key or not dimension:
+        return {"ok": False, "error": "scope/key/dimension 必填"}
+    prompt = _SENT_DIM_PROMPTS.get(scope, {}).get(dimension)
+    if not prompt:
+        return {"ok": False, "error": f"未知维度: {scope}/{dimension}"}
+    if not is_llm_available():
+        return {"ok": False, "error": "LLM 未配置"}
+    # 构造用户上下文
+    if scope == "cycle":
+        breadth = body.get("breadth") or {}
+        ctx = {
+            "周期": body.get("cycle", ""),
+            "涨家数": breadth.get("up_n"), "跌家数": breadth.get("down_n"),
+            "涨停": breadth.get("limit_up"), "跌停": breadth.get("limit_down"),
+            "炸板": breadth.get("broke_limit"), "两市成交额亿": breadth.get("total_amount_yi"),
+            "涨幅>5%家数": breadth.get("gainer"), "最高连板": breadth.get("max_streak"),
+        }
+    elif scope == "mainlines":
+        ml = body.get("mainline") or {}
+        members = []
+        for m in (ml.get("stocks") or [])[:12]:
+            members.append({"name": m.get("name"), "code": m.get("code"), "chg": m.get("chg"),
+                            "is_zt": m.get("is_zt"), "streak": m.get("streak"), "ltime": m.get("ltime"),
+                            "role": m.get("role"), "concepts": m.get("concepts")})
+        ctx = {
+            "主线": ml.get("concept"), "家数": ml.get("n"), "涨停家数": ml.get("zt_n"),
+            "均涨": ml.get("avg_chg"), "最高连板": ml.get("max_streak"), "强度分": ml.get("score"),
+            "概念热度": (ml.get("heat") or 0), "板块涨幅%": ml.get("board_chg"),
+            "当前周期": body.get("cycle", ""), "成员": members,
+        }
+    else:
+        s = body.get("stock") or {}
+        ctx = {
+            "代码": s.get("code"), "名称": s.get("name"), "涨幅%": s.get("chg"),
+            "连板": s.get("streak"), "是否涨停": s.get("is_zt"), "上板时间": s.get("ltime"),
+            "地位": s.get("role"), "概念": s.get("concepts"),
+            "属于主线": body.get("mainline", ""),
+        }
+    try:
+        client = get_llm_client()
+        result = client.chat_json(prompt, f"请分析：\n{json.dumps(ctx, ensure_ascii=False)}")
+        analysis = str(result.get("analysis") or result.get("text") or "").strip()
+        # 兼容返回 {analysis: ...} 或直接文本
+        if not analysis and isinstance(result, str):
+            analysis = result.strip()
+        if not analysis:
+            return {"ok": False, "error": "LLM 未返回有效分析"}
+        return _ok(scope=scope, key=key, dimension=dimension, analysis=analysis)
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败：{e}"}
+
+
+_SENT_RANK_DIMS = [
+    ("梯队", "梯队完整度（高标龙头—中位—低位跟风是否齐全）"),
+    ("容量", "板块容量与人气（家数多、成交活跃、可容纳资金大）"),
+    ("逻辑", "逻辑支撑（政策/行业事件/业绩预期等硬逻辑，而非纯消息）"),
+    ("持续性", "持续性（能否连续多日活跃，还是可能一日游）"),
+]
+
+
+@router.post("/sentiment/analysis/rank-mainlines")
+def rank_sentiment_mainlines(body: dict) -> dict:
+    """对一组主线做四维度横向对比，选出当前最值得参与的主线。
+
+    body: {date?, mainlines: [dict], cycle?, use_ai?}
+    每个 mainline dict 含 concept/n/zt_n/avg_chg/max_streak/score/heat/board_chg/stocks。
+    use_ai=false（默认）走纯规则四维度打分，不调 LLM；true 才调 LLM 分析。
+    结果存 analysis.mainlines["结论"] = {winner: {manual|ai|rule: "...", ...}, scores: {...}}
+    返回: {ok, date, conclusion, scores, winner}
+    """
+    from datetime import date as _date, datetime
+    date = body.get("date") or _date.today().strftime("%Y-%m-%d")
+    mls = body.get("mainlines") or []
+    use_ai = bool(body.get("use_ai"))
+    if not mls:
+        return {"ok": False, "error": "mainlines 为空"}
+    path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
+    data = _read_json(path)
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "error": f"缓存不存在: sentiment_screening_cache_{date}.json"}
+    cycle = body.get("cycle", "")
+
+    def _pick_leader(ml) -> str:
+        """高标龙头：最高连板（≥2板）最强者优先；全不高即无龙头。"""
+        sts = [s for s in (ml.get("stocks") or []) if (s.get("streak") or 0) > 0]
+        if not sts:
+            return ""
+        top = max(s.get("streak") or 0 for s in sts)
+        if top < 2:
+            return ""
+        ranked = sorted([s for s in sts if (s.get("streak") or 0) == top],
+                        key=lambda s: -len(str(s.get("ltime") or "99:99")))
+        lead = ranked[0]
+        return f"{lead.get('name') or lead.get('code')}({top}板)"
+
+    def _pick_mid(ml) -> list:
+        """中位股：有连板但不是最高连板，或1板里涨停较早的一批。"""
+        sts = ml.get("stocks") or []
+        if not sts:
+            return []
+        top = max((s.get("streak") or 0) for s in sts)
+        if top < 2:
+            return []
+        mids = [s for s in sts if 0 < (s.get("streak") or 0) < top]
+        return [f"{s.get('name') or s.get('code')}" for s in mids[:3]]
+
+    def _pick_follower(ml) -> list:
+        """低位跟风：首板成员，涨停时间较晚者。"""
+        sts = ml.get("stocks") or []
+        lows = sorted([s for s in sts if (s.get("streak") or 0) == 0],
+                      key=lambda s: str(s.get("ltime") or "99:99"), reverse=True)
+        return [f"{s.get('name') or s.get('code')}" for s in lows[:4]]
+
+    def _rule_analyze() -> tuple:
+        """纯规则四维度定性分析（不调 LLM，不展示分数，点名具体个股）。
+        返回 ({主线: {4维描述}}, winner, 选主线的总表述)。"""
+        descs = {}
+        for ml in mls[:12]:
+            concept = ml.get("concept", "")
+            n = ml.get("n") or 0
+            zt = ml.get("zt_n") or 0
+            streak = ml.get("max_streak") or 0
+            board = ml.get("board_chg") or 0
+            leader = _pick_leader(ml)
+            mids = _pick_mid(ml)
+            lows = _pick_follower(ml)
+            # 梯队描述
+            if leader:
+                tier_desc = f"龙头：{leader}。" + (f"中位：{'、'.join(mids)}。" if mids else "缺中位。") + (f"跟风：{'、'.join(lows)}。" if lows else "缺低位跟风。")
+                if not mids and not lows:
+                    tier_desc = "不完整（只有龙头，缺中位和低位跟风）。"
+            else:
+                tier_desc = "不完整（无高标龙头）。" + (f"有低位跟风：{'、'.join(lows)}。" if lows else "")
+            # 容量
+            cap_desc = f"板块 {n} 家、涨停 {zt} 只。" + ("人气较旺、可容纳资金大。" if n >= 10 else "家数中等，容量有限。" if n >= 5 else "家数偏少，容量小。")
+            # 逻辑（板块涨幅做真实催化代理，无政策/业绩直接标注）
+            if board > 2:
+                log_desc = "板块涨幅为正、疑似有行业真实催化，但本数据未标注政策/业绩明细。"
+            elif board > 0:
+                log_desc = "板块微涨，逻辑支撑偏弱，更多依赖题材情绪。"
+            else:
+                log_desc = "板块涨幅为负，未见明显硬逻辑支撑，疑似纯题材炒作。"
+            # 持续性（呼应周期 + 板块涨幅）
+            if "退潮" in (cycle or ""):
+                cont_desc = "当前退潮期，炸板多、赚钱效应差，该主线大概率难以持续，仅宜首板试错。"
+            elif streak >= 2 and board > 0:
+                cont_desc = "有 2 板以上高度且板块正向，具备多日活跃潜力。"
+            else:
+                cont_desc = "高度或板块催化不足，存在一日游风险。"
+            descs[concept] = {"梯队": tier_desc, "容量": cap_desc, "逻辑": log_desc, "持续性": cont_desc}
+        # winner：梯队越完整 + 容量越大者优先（内部定性判断，不展示分数）
+        def _strength(desc):
+            d = desc.get("梯队", "")
+            s = 0
+            if "龙头" in d: s += 3
+            if "中位" in d: s += 1
+            if "跟风" in d: s += 1
+            return s
+        winner = max(descs, key=lambda k: (_strength(descs[k]), (next((m.get("n") or 0) for m in mls if m.get("concept") == k), 0))) if descs else ""
+        reasons = "\n".join(f"· {k}：梯队{descs[k]['梯队']} 容量{descs[k]['容量']} 逻辑{descs[k]['逻辑']} 持续性{descs[k]['持续性']}" for k in descs)
+        return descs, winner, reasons
+
+    if not use_ai:
+        descs, winner, reasons = _rule_analyze()
+        if not winner:
+            return {"ok": False, "error": "无合理主线可对比"}
+        content = (
+            f"选出主线：**{winner}**。\n\n"
+            f"四维度对比（按描述，非分数）：\n{reasons}\n\n"
+            f"【为何选 {winner}】：梯队结构相对更完整（有龙头并带中/低位跟风）、板块容量更大。"
+        )
+        _sent_set_analysis(data, "mainlines", "结论", "winner", content, "rule")
+        data.setdefault("analysis", {}).setdefault("mainlines", {}).setdefault("结论", {})["descs"] = descs
+        data.setdefault("updated_at", {})
+        data["updated_at"]["mainlines_winner"] = datetime.now().isoformat(timespec="seconds")
+        _atomic_write_json(path, data)
+        return _ok(date=date, conclusion=content, descs=descs, winner=winner)
+
+    from strategies.common.llm_client import get_llm_client, is_llm_available
+    if not is_llm_available():
+        return {"ok": False, "error": "LLM 未配置"}
+    brief = []
+    for ml in mls[:12]:
+        members = [
+            {"name": s.get("name") or s.get("code"), "streak": s.get("streak") or 0,
+             "is_zt": s.get("is_zt"), "ltime": s.get("ltime"), "role": s.get("role")}
+            for s in (ml.get("stocks") or [])
+        ]
+        brief.append({
+            "主线": ml.get("concept"), "家数": ml.get("n"), "涨停": ml.get("zt_n"),
+            "均涨%": ml.get("avg_chg"), "最高连板": ml.get("max_streak"),
+            "强度分": ml.get("score"), "概念热度": (ml.get("heat") or 0),
+            "板块涨幅%": ml.get("board_chg"), "成员": members,
+        })
+    dims_desc = "、".join(f"{k}({v})" for k, v in _SENT_RANK_DIMS)
+    prompt = (
+        "你是A股短线主线横向对比分析师，基于当前情绪周期判断主线取舍。"
+        "对每条主线逐条从四方面具体分析，并点名龙头/中位/跟风个股："
+        f"{dims_desc}。绝不使用分数。最后综合选出当前【最值得参与的一条主线】。"
+        "返回严格JSON：{\"winner\": \"<主线名>\", "
+        "\"dims\": {\"<主线名>\": {\"梯队\":\"...\", \"容量\":\"...\", \"逻辑\":\"...\", \"持续性\":\"...\"}}, "
+        "\"reason\": \"综合取舍理由(120字内)\"}"
+    )
+    user = (
+        f"当前情绪周期：{body.get('cycle', '')}\n"
+        f"待对比主线({len(brief)}条)：\n{json.dumps(brief, ensure_ascii=False)}"
+    )
+    try:
+        client = get_llm_client()
+        result = client.chat_json(prompt, user)
+        dims = result.get("dims") or {}
+        winner = result.get("winner") or ""
+        reason = str(result.get("reason") or "").strip()
+        if not winner:
+            return {"ok": False, "error": "LLM 未选出主线"}
+        lines = "\n".join(
+            f"· {k}：梯队{d.get('梯队','')}容量{d.get('容量','')}逻辑{d.get('逻辑','')}持续性{d.get('持续性','')}"
+            for k, d in dims.items()
+        )
+        content = (
+            f"选出主线：**{winner}**。\n\n"
+            f"四方面具体分析：\n{lines}\n\n"
+            f"【取舍理由】{reason}"
+        )
+        _sent_set_analysis(data, "mainlines", "结论", "winner", content, "ai")
+        data.setdefault("analysis", {}).setdefault("mainlines", {}).setdefault("结论", {})["descs"] = dims
+        data.setdefault("updated_at", {})
+        data["updated_at"]["mainlines_winner"] = datetime.now().isoformat(timespec="seconds")
+        _atomic_write_json(path, data)
+        return _ok(date=date, conclusion=content, descs=dims, winner=winner)
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败：{e}"}
+
+
+@router.post("/sentiment/analysis/rank-stocks")
+def rank_sentiment_stocks(body: dict) -> dict:
+    """对同一主线内的个股做三方面对比（地位优先/筹码形态/盘口时机），选出最优个股。
+
+    body: {date?, mainline: str, stocks: [dict], cycle?}
+    stocks 每项含 code/name/chg/streak/is_zt/ltime/role/concepts。
+    结果存 analysis.stocks[mainline] = {descs: {code: {dim: text}}, winner_code, winner_name}
+    返回: {ok, date, descs, winner, mainline}
+    """
+    from datetime import date as _date, datetime
+    date = body.get("date") or _date.today().strftime("%Y-%m-%d")
+    mainline = body.get("mainline") or ""
+    stocks = body.get("stocks") or []
+    cycle = body.get("cycle") or ""
+    if not mainline or not stocks:
+        return {"ok": False, "error": "mainline 和 stocks 必填"}
+    path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
+    data = _read_json(path)
+    if not isinstance(data, dict) or not data:
+        return {"ok": False, "error": f"缓存不存在: sentiment_screening_cache_{date}.json"}
+    from strategies.common.llm_client import get_llm_client, is_llm_available
+    if not is_llm_available():
+        return {"ok": False, "error": "LLM 未配置"}
+    brief = []
+    for s in stocks[:15]:
+        brief.append({
+            "代码": s.get("code"), "名称": s.get("name"), "涨幅%": s.get("chg"),
+            "连板": s.get("streak"), "是否涨停": s.get("is_zt"), "上板时间": s.get("ltime"),
+            "地位": s.get("role"), "概念": s.get("concepts", []),
+        })
+    prompt = (
+        "你是A股短线个股横向对比分析师。对同板块内个股，从三方面逐只具体描述分析："
+        "1.地位优先（龙头/补涨龙/日内先锋，各自含义）；"
+        "2.筹码形态（股性活跃度/套牢盘/突破形态）；"
+        "3.盘口时机（涨停时间/封单质量/带动性）。"
+        "绝不使用分数。最后综合选出当前板块内【最值得参与的一只个股】。"
+        "返回严格JSON：{\"descs\": {\"<代码>\": {\"地位优先\":\"...\", \"筹码形态\":\"...\", \"盘口时机\":\"...\"}}, "
+        "\"winner_code\": \"<代码>\", \"winner_name\": \"<名称>\", \"reason\": \"综合理由(100字内)\"}"
+    )
+    user = (
+        f"当前情绪周期：{cycle}\n"
+        f"所属板块：{mainline}\n"
+        f"待对比个股({len(brief)}只)：\n{json.dumps(brief, ensure_ascii=False)}"
+    )
+    try:
+        client = get_llm_client()
+        result = client.chat_json(prompt, user)
+        descs = result.get("descs") or {}
+        winner_code = result.get("winner_code") or ""
+        winner_name = result.get("winner_name") or ""
+        reason = str(result.get("reason") or "").strip()
+        if not winner_code:
+            return {"ok": False, "error": "LLM 未选出个股"}
+        winner_desc = f"选出个股：**{winner_name}({winner_code})**。\n\n{reason}"
+        _sent_set_analysis(data, "stocks", mainline, "winner", winner_desc, "ai")
+        data.setdefault("analysis", {}).setdefault("stocks", {})[mainline] = {
+            "descs": descs, "winner_code": winner_code, "winner_name": winner_name,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        data.setdefault("updated_at", {})
+        data["updated_at"][f"stocks_winner_{mainline}"] = datetime.now().isoformat(timespec="seconds")
+        _atomic_write_json(path, data)
+        return _ok(date=date, mainline=mainline, descs=descs, winner=winner_name, winner_code=winner_code)
+    except Exception as e:
+        return {"ok": False, "error": f"LLM 调用失败：{e}"}
+
+
 # ---------- 情绪选股 AI 阶段分析 ----------
 
 _SENT_STEP_PROMPTS = {
     1: (
         "你是A股短线情绪周期分析师。根据市场广度数据判断当前情绪周期阶段。"
         "阶段取值：冰点/启动/发酵/主升/分歧/退潮。"
+        "判断要点：涨停家数、跌多涨少、炸板多、缩量与高标断板更可能是退潮或分歧而非主升。"
         "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"判断依据(80字内)\", \"suggestion\": \"操作建议(60字内)\"}"
     ),
     2: (
@@ -1074,6 +1479,11 @@ def _build_sentiment_user_prompt(step: int, header: dict, candidates: list) -> s
             "cycle": header.get("cycle", ""),
             "breadth": {
                 "limit_up": breadth.get("limit_up", 0),
+                "limit_down": breadth.get("limit_down", 0),
+                "up_n": breadth.get("up_n", 0),
+                "down_n": breadth.get("down_n", 0),
+                "broke_limit": breadth.get("broke_limit", 0),
+                "total_amount_yi": breadth.get("total_amount_yi", 0),
                 "gainer": breadth.get("gainer", 0),
                 "max_streak": breadth.get("max_streak", 0),
             },
@@ -3889,6 +4299,11 @@ def collect_auction_data():
             except Exception:
                 _log.warning("auction insert failed for %s", code, exc_info=True)
         db.commit()
+        # 只读端点用 immutable 连接（不读 WAL），写入后必须 checkpoint 才可见
+        try:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except Exception:
+            _log.warning("auction wal_checkpoint failed", exc_info=True)
         # 导出 Excel
         try:
             import pandas as pd
@@ -4093,8 +4508,16 @@ _SEAL_BANDS = {
     "一字":   (6, 9, 9),
     "9:45前": (4, 6, 6),
     "午前板": (2, 4, 4),
-    "午后板": (0, 2, 2),
-    "尾盘板": (0, 0, 0),
+    "午后板": (-2, 1, 1),
+    "尾盘板": (-2, 0, 0),
+}
+
+
+# 身份 → 高开预期带 ((不及下限, 符合下限, 超预期下限)，%)，文章《涨停后怎么做预期》分身份基准
+_ROLE_BANDS = {
+    "龙头": (3, 6, 6),
+    "跟风": (0, 3, 3),
+    "独立": (6, 9, 9),
 }
 
 
@@ -4118,11 +4541,19 @@ def _seal_band(first_seal: str, last_seal: str) -> str:
     return "尾盘板"
 
 
-def _price_level(band: str, open_pct) -> str:
-    """价预期：按预期带把今日竞价高开%分为 超预期/符合/不及预期。"""
-    if open_pct is None or band not in _SEAL_BANDS:
+def _price_level(band: str, role: str, open_pct) -> str:
+    """价预期：按身份（龙头/跟风/独立）选基准带，把今日竞价高开%分为 超预期/符合/不及预期。
+
+    身份优先（文章《涨停后怎么做预期》分身份基准）；身份未知回退到封板时间档。
+    """
+    if open_pct is None:
         return "未知"
-    bad, ok, strong = _SEAL_BANDS[band]
+    if role in _ROLE_BANDS:
+        bad, ok, strong = _ROLE_BANDS[role]
+    elif band in _SEAL_BANDS:
+        bad, ok, strong = _SEAL_BANDS[band]
+    else:
+        return "未知"
     if open_pct > strong and strong > bad:
         return "超预期"
     if open_pct >= bad:
@@ -4133,13 +4564,24 @@ def _price_level(band: str, open_pct) -> str:
 def _vol_level(auction_amount_wan, yest_amount_yuan) -> str:
     """量能：竞价量能 = 今竞价额 ÷ 昨日总成交额。
 
-    简化标准（文章）：昨日成交额 <10 亿 → 达标需 ≥10%；≥10 亿 → 达标需 ≥8%。
+    四档达标线（文章《涨停后怎么做预期》及格线）：
+        昨日成交额 <5 亿    → 达标需 ≥10%
+        昨日成交额 5~10 亿  → 达标需 ≥8%
+        昨日成交额 10~20 亿 → 达标需 ≥5%
+        昨日成交额 ≥20 亿   → 达标需 ≥4%
     返回值 (level, pct)：(达标/不足, 竞价量能百分比)。
     """
     if auction_amount_wan is None or not yest_amount_yuan or yest_amount_yuan <= 0:
         return "未知", None
     pct = auction_amount_wan * 1e4 / yest_amount_yuan * 100
-    need = 8 if yest_amount_yuan >= 1e9 else 10
+    if yest_amount_yuan >= 2e9:
+        need = 4
+    elif yest_amount_yuan >= 1e9:
+        need = 5
+    elif yest_amount_yuan >= 5e8:
+        need = 8
+    else:
+        need = 10
     return ("达标" if pct >= need else "不足"), round(pct, 2)
 
 
@@ -4193,8 +4635,42 @@ def _fetch_zt_pool_map(date_yyyymmdd: str) -> dict:
             "last_seal": str(r.get("最后封板时间", "") or ""),
             "consec": consec,
             "turnover_amount": t_amt,
+            "industry": str(r.get("所属行业", "") or ""),
         }
     return out
+
+
+def _calc_roles(zt_map: dict) -> dict:
+    """按行业分组判断昨日涨停股的板块身份：龙头/跟风/独立（文章《涨停后怎么做预期》+ 连板身位）。
+
+    规则（组内身位 = 连板数降序、同连板按封板时间升序）：
+      组内最高连板者为龙头；并列最高连板时取封板最早者为龙头；其余 → 跟风；
+      组内唯一涨停 → 独立票。
+      无行业信息组的唯一票按「独立」处理；无封板时间者不在分组内。
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for code, zt in zt_map.items():
+        st = zt.get("seal_time", "")
+        if st and st[:4].isdigit():
+            consec = zt.get("consec", 0) or 0
+            groups[zt.get("industry", "")].append((consec, int(st[:4]), code))
+    roles = {}
+    for ind, gs in groups.items():
+        if len(gs) <= 1:
+            for _, _, c in gs:
+                roles[c] = "独立" if ind else "跟风"
+            continue
+        max_consec = max(x[0] for x in gs)
+        same_top = [x for x in gs if x[0] == max_consec]
+        if len(same_top) == 1:
+            lead_codes = {same_top[0][2]}
+        else:
+            lead_codes = {min(same_top, key=lambda x: x[1])[2]}
+        for k, t, c in gs:
+            roles[c] = "龙头" if c in lead_codes else "跟风"
+    return roles
 
 
 @router.get("/auction/limit-up-compare")
@@ -4289,8 +4765,9 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
             if _is_limit_up(code, info["price"], info["prev_close"], info.get("name", "")):
                 today_limitup_codes.add(code)
 
-        # 昨日东财涨停池（封板时间/连板数/成交额）→ 涨停次日竞价预期（「明礼队长」方法论）
+        # 昨日东财涨停池（封板时间/连板数/成交额/行业）→ 涨停次日竞价预期（文章《涨停后怎么做预期》方法论）
         zt_map = _fetch_zt_pool_map(str(date2).replace("-", ""))
+        roles = _calc_roles(zt_map)
 
         def build_stock(code):
             p = prev_auction.get(code)
@@ -4310,15 +4787,17 @@ def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
             auction_chg = round((t_price - prev_close) / prev_close * 100, 2) if prev_close and t_price else None
             is_prev = code in prev_limitup_codes
             is_today = code in today_limitup_codes
-            # 涨停次日竞价预期：仅对「昨日涨停」股算（价+量 → C1~C6）
+            # 涨停次日竞价预期：仅对「昨日涨停」股算（身份+价+量 → C1~C6）
             biz = {}
             if is_prev:
                 zt = zt_map.get(code) or {}
                 band = _seal_band(zt.get("seal_time", ""), zt.get("last_seal", ""))
-                plev = _price_level(band, auction_chg)
+                role = roles.get(code, "")
+                plev = _price_level(band, role, auction_chg)
                 vlev, vpct = _vol_level(t_amt, zt.get("turnover_amount"))
                 biz = {
                     "band": band,
+                    "role": role,
                     "first_seal": zt.get("seal_time", ""),
                     "consec_boards": zt.get("consec", 0),
                     "yest_amount": zt.get("turnover_amount", 0),
@@ -5109,8 +5588,38 @@ def auction_ai_analysis_status(task_id: str):
 
 _LADDER_CACHE_DIR = _PAPER_DIR
 
+# 单文件最新梯队：始终保存当日最新一次拉取的结果，方便直接打开查看
+# （与按日缓存并存；按日缓存仍用于盘前回退）。
+_LADDER_LATEST_PATH = _PAPER_DIR / "ladder_latest.json"
+
 def _ladder_cache_path(today_compact: str) -> Path:
     return _LADDER_CACHE_DIR / f"ladder_cache_{today_compact}.json"
+
+
+# 收盘时间（本地/北京时间 15:00）。A股 15:00 收盘后当日连板梯队已定型，
+# 刷新应返回当日最终数据，而非盘中首次写入的不完整缓存。
+_LADDER_MARKET_CLOSE_HOUR = 15
+
+
+def _ladder_now() -> datetime:
+    """当前本地时间（后端运行在用户本机，即北京时间）。"""
+    return datetime.now()
+
+
+def _ladder_cache_is_stale(cached: dict) -> bool:
+    """缓存是否需在收盘后重新拉取：写入时间在今日 15:00 收盘前 → 视为过期。
+
+    无时间戳（旧缓存）一律视为过期。
+    """
+    ts = cached.get("cached_at")
+    if not ts:
+        return True
+    try:
+        written = datetime.fromisoformat(ts)
+    except Exception:
+        return True
+    close_today = written.replace(hour=_LADDER_MARKET_CLOSE_HOUR, minute=0, second=0, microsecond=0)
+    return written < close_today
 
 
 def _fallback_ladder_date(today_compact: str) -> str | None:
@@ -5184,24 +5693,42 @@ def _iwencai_first_match(row: dict, *names):
 
 
 @router.get("/market/ladder")
-def get_market_ladder():
-    """Get limit-up ladder analysis via iwencai, with daily file cache.
+def get_market_ladder(refetch: bool = False):
+    """连板梯队：默认仅读本地缓存（刷新）；refetch=true 时强制问财重查。
 
-    盘前回退：盘前（今日尚无涨停）时，以数据库最近交易日为回退日期展示（优先用该日缓存，否则在线查询）。
+    本地数据来源：当日缓存文件 paper/ladder_cache_YYYYMMDD.json → 单文件最新 paper/ladder_latest.json。
+    刷新（默认）：只取本地（缓存优先，其次单文件最新），不查问财，避免重复打接口。
+    重新获取(refetch)：无视本地缓存，直接问财查询并写回两份本地文件。
+    盘前回退：问财今日无数据时，以数据库最近交易日为回退日期展示，仅在 refetch 时触发。
     """
     today_compact = date.today().strftime("%Y%m%d")
     cache_path = _ladder_cache_path(today_compact)
     from_path = "today"
 
-    # Serve from cache if available
-    try:
-        if cache_path.exists():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            return cached
-    except Exception:
-        pass
+    # 刷新（默认）：仅读本地数据，不查问财。
+    # 本地来源优先级：当日缓存文件 → 单文件最新；两者皆无则返回提示。
+    if not refetch:
+        for _p in (cache_path, _LADDER_LATEST_PATH):
+            try:
+                if _p.exists():
+                    cached = json.loads(_p.read_text(encoding="utf-8"))
+                    if _p is cache_path:
+                        # 以日期缓存为准时，同步到单文件最新（保证两者一致）
+                        try:
+                            _LADDER_LATEST_PATH.write_text(
+                                json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8"
+                            )
+                        except Exception:
+                            pass
+                    return cached
+            except Exception:
+                pass
+        return {
+            "ladder": [], "by_board": {}, "by_concept": {}, "stats": None,
+            "summary": "本地无缓存数据，请点击「重新获取」",
+        }
 
-    # Cache miss — fetch from iwencai. 优先采集 IWENCAI_API_KEY（根项目 .env）。
+    # 重新获取：强制问财查询（无视本地缓存），结果写回缓存 + 单文件最新
     try:
         if not os.environ.get("IWENCAI_API_KEY"):
             root_env = _PROJECT_ROOT / ".env"
@@ -5233,9 +5760,11 @@ def get_market_ladder():
                 cached = json.loads(fb_cache.read_text(encoding="utf-8"))
                 summary = cached.get("summary", "") + f"（回退至 {fb_compact}）"
                 return dict(cached, summary=summary)
+            y, m, d = fallback_date.split("-")
+            fb_cn = f"{y}年{m}月{d}日"
             raw = query_data(
-                f"{fallback_date} 涨停股票 剔除ST 剔除退市 股票代码 股票简称 收盘价 最新涨跌幅 "
-                "连续涨停天数 首次封板时间 封单额 炸板次数 涨停原因 成交额"
+                f"{fb_cn} 涨停的股票 剔除ST 剔除退市 首次封板时间 连续涨停天数 股票代码 股票简称 "
+                "收盘价 最新涨跌幅 涨停原因 涨停开板次数 隔夜单额 成交额"
             )
             from_path = f"fallback:{fb_compact}"
             today_compact = fb_compact
@@ -5267,12 +5796,12 @@ def get_market_ladder():
                 continue
 
             price_str = row.get(f"收盘价[{today_compact}]") or row.get("收盘价", "0")
-            chg = row.get("最新涨跌幅") or 0
+            chg = _iwencai_first_match(row, "最新涨跌幅", "涨跌幅") or 0
             board_raw = row.get(f"连续涨停天数[{today_compact}]") or row.get("连续涨停天数", 1)
             amount_str = row.get(f"成交额[{today_compact}]") or row.get("成交额", "0")
             reason = row.get(f"涨停原因[{today_compact}]") or row.get("涨停原因", "")
             # 问财列名存在别名且不带/带变动后缀，用健壮匹配
-            first_time = _iwencai_first_match(row, "首次封板时间", "最新首次涨停时间")
+            first_time = _iwencai_first_match(row, "首次封板时间", "首次涨停时间", "最新首次涨停时间")
             seal_amt_str = _iwencai_first_match(row, "封单额", "隔夜单额")
             open_times_str = _iwencai_first_match(row, "炸板次数", "涨停开板次数")
 
@@ -5349,6 +5878,7 @@ def get_market_ladder():
             "ladder": ladder,
             "by_board": by_board,
             "by_concept": by_concept,
+            "cached_at": datetime.now().isoformat(),
             "stats": {
                 "total_limit_up": total,
                 "first_board": first,
@@ -5363,7 +5893,10 @@ def get_market_ladder():
         if not from_path.startswith("fallback:"):
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                payload = json.dumps(result, ensure_ascii=False, indent=2)
+                cache_path.write_text(payload, encoding="utf-8")
+                # 同步写单文件最新梯队（固定路径，始终为当日最新）
+                _LADDER_LATEST_PATH.write_text(payload, encoding="utf-8")
             except Exception:
                 pass
 

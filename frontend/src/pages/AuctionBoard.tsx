@@ -636,7 +636,7 @@ export function AuctionBoard() {
         if (!biz) {
           return (
             <>
-              <td colSpan={5} className="px-3 py-2 text-center text-muted-foreground">—</td>
+              <td colSpan={6} className="px-3 py-2 text-center text-muted-foreground">—</td>
             </>
           );
         }
@@ -656,6 +656,14 @@ export function AuctionBoard() {
             <td className="px-3 py-2 text-center">
               <span className="text-xs text-muted-foreground">{biz.band || "-"}</span>
               <span className="block text-[10px] text-muted-foreground/70">{biz.first_seal ? `${biz.first_seal.slice(0, 2)}:${biz.first_seal.slice(2, 4)}` : ""}</span>
+            </td>
+            <td className="px-3 py-2 text-center">
+              <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-medium ${
+                biz.role === "龙头" ? "bg-red-600/15 text-red-600 border-red-600/30"
+                : biz.role === "跟风" ? "bg-blue-600/15 text-blue-600 border-blue-600/30"
+                : biz.role === "独立" ? "bg-purple-600/15 text-purple-600 border-purple-600/30"
+                : "bg-muted text-muted-foreground border-muted"
+              }`}>{biz.role || "—"}</span>
             </td>
             <td className="px-3 py-2 text-right font-medium">
               {biz.vol_pct_auction != null ? (
@@ -1529,6 +1537,7 @@ export function AuctionBoard() {
                       <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
                       <th className="px-3 py-2 text-center font-medium">连板</th>
                       <th className="px-3 py-2 text-center font-medium">昨封板/预期</th>
+                      <th className="px-3 py-2 text-center font-medium">身份</th>
                       <th className="px-3 py-2 text-right font-medium">竞价量能</th>
                       <th className="px-3 py-2 text-center font-medium">预期组合</th>
                       <th className="px-3 py-2 text-left font-medium">操作</th>
@@ -1551,14 +1560,14 @@ export function AuctionBoard() {
                         if (sorted.length === 0) {
                           return (
                             <tr>
-                              <td colSpan={15} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                              <td colSpan={16} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
                             </tr>
                           );
                         }
                         return sorted.map(([board, stocks]) => (
                           <Fragment key={board}>
                             <tr className="bg-muted/40">
-                              <td colSpan={15} className="px-3 py-1.5 text-xs font-bold">
+                              <td colSpan={16} className="px-3 py-1.5 text-xs font-bold">
                                 {board === 1 ? "首板" : `${board}板`}
                                 <span className="font-normal text-muted-foreground">（{stocks.length}只）</span>
                               </td>
@@ -1572,7 +1581,7 @@ export function AuctionBoard() {
                       else items = [...limitUpData.both_limitup, ...limitUpData.today_limitup];
                       return items.length > 0 ? items.map((s) => renderLimitUpRow(s)) : (
                         <tr>
-                          <td colSpan={15} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
+                          <td colSpan={16} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td>
                         </tr>
                       );
                     })()}

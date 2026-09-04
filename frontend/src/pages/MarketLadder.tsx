@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RefreshCw, TrendingUp, Layers, Grid3X3 } from "lucide-react";
+import { RefreshCw, DownloadCloud, TrendingUp, Layers, Grid3X3 } from "lucide-react";
 import { api } from "@/lib/api";
 
 interface LadderStock {
@@ -19,18 +19,21 @@ export function MarketLadder() {
   const [byConcept, setByConcept] = useState<Record<string, LadderStock[]>>({});
   const [stats, setStats] = useState<LadderStats | null>(null);
   const [summary, setSummary] = useState("");
+  const [updatedAt, setUpdatedAt] = useState("");
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<"board" | "concept">("board");
 
-  const fetchData = async () => {
+  const fetchData = async (refetch = false) => {
     setLoading(true);
     try {
-      const data = await api.tools.get<any>("/market/ladder");
+      const url = refetch ? "/market/ladder?refetch=1" : "/market/ladder";
+      const data = await api.tools.get<any>(url);
       setLadder(data.ladder || []);
       setByBoard(data.by_board || {});
       setByConcept(data.by_concept || {});
       setStats(data.stats || null);
       setSummary(data.summary || "");
+      setUpdatedAt(data.cached_at || "");
     } catch (e) { /* ignore */ }
     finally { setLoading(false); }
   };
@@ -57,6 +60,20 @@ export function MarketLadder() {
     if (!t) return "—";
     const m = t.match(/(\d{1,2}):(\d{2})/);
     return m ? `${m[1].padStart(2, "0")}:${m[2]}` : t;
+  };
+
+  // 数据更新时间展示：从 "2026-09-04T15:30:12.345" 提取 "2026-09-04 15:30"
+  const fmtUpdated = (s?: string): string => {
+    if (!s) return "";
+    const m = s.match(/(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
+    return m ? `${m[1]} ${m[2]}` : s;
+  };
+
+  // 更新时间在 15:00 之后 → 已是收盘后的当日最终数据
+  const isClosedData = (s?: string): boolean => {
+    if (!s) return false;
+    const m = s.match(/[T ](\d{2}):/);
+    return m ? parseInt(m[1], 10) >= 15 : false;
   };
 
   const boardColors: Record<number, string> = {
@@ -86,17 +103,35 @@ export function MarketLadder() {
           </h1>
           <p className="text-sm text-muted-foreground mt-1">涨停板高度与题材聚类分析</p>
         </div>
-        <button
-          onClick={fetchData}
-          disabled={loading}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          刷新
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => fetchData(false)}
+            disabled={loading}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            刷新
+          </button>
+          <button
+            onClick={() => fetchData(true)}
+            disabled={loading}
+            className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            <DownloadCloud className="h-4 w-4" />
+            重新获取
+          </button>
+        </div>
       </div>
 
       {summary && <div className="text-sm text-muted-foreground">{summary}</div>}
+      {updatedAt && (
+        <div className="text-xs text-muted-foreground">
+          数据更新于 {fmtUpdated(updatedAt)}
+          {isClosedData(updatedAt) && (
+            <span className="ml-2 text-orange-600">· 已收盘，展示当日最终梯队</span>
+          )}
+        </div>
+      )}
 
       {/* Stats Cards */}
       {stats && (

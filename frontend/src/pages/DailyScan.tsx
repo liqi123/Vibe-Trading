@@ -1,10 +1,12 @@
-import { useEffect, useState, Fragment } from "react";
+import { useEffect, useState } from "react";
 import { Search, RefreshCw, TrendingUp, Download, BarChart3, CandlestickChart as CandleIcon, X, Activity, Brain, Loader2 } from "lucide-react";
 import { CandlestickChart } from "@/components/charts/CandlestickChart";
 import { SMCChart } from "@/components/charts/SMCChart";
 import { api } from "@/lib/api";
 import type { PriceBar } from "@/lib/api";
 import { RunLogPanel } from "@/components/RunLogPanel";
+import { SentimentAnalysisBlock } from "@/components/SentimentAnalysisBlock";
+import type { DimDef } from "@/components/SentimentAnalysisBlock";
 
 interface MarketStats {
   total: number;
@@ -655,6 +657,23 @@ function StrategyTable({ candidates, columns, klineData, expandedKline, onKline,
   );
 }
 
+const CYCLE_STRATEGY: Record<string, string> = {
+  "冰点": "极度低迷，空仓等待，仅关注超跌反弹的新题材迹象，不主动参与。",
+  "启动": "寻找与指数共振的新题材，参与首板或1进2的领涨股。",
+  "发酵": "赚钱效应扩散，可参与低位补涨或强势股回踩，控制仓位，关注高标能否晋级确认主升。",
+  "主升": "聚焦市场最强主线，参与龙头或主线内的补涨龙。",
+  "分歧": "向主线板块内低位切换（做首板或1进2），或关注新出现的过渡题材。",
+  "退潮": "空仓或极小仓位试错，绝对回避中高位股（3-4板死亡地带）。",
+};
+
+const RANK_DIMS = ["梯队", "容量", "逻辑", "持续性"];
+
+const STOCK_DIMS: DimDef[] = [
+  { key: "地位优先", label: "地位优先（龙头/补涨龙/日内先锋）" },
+  { key: "筹码形态", label: "筹码与形态（股性活跃/筹码结构干净/形态突破）" },
+  { key: "盘口时机", label: "盘口与时机（涨停时间/封单质量/带动性）" },
+];
+
 export function DailyScan() {
   const [market, setMarket] = useState<MarketStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -665,13 +684,64 @@ export function DailyScan() {
   const [ictCandidates, setIctCandidates] = useState<Candidate[]>([]);
   const [sentHeader, setSentHeader] = useState<any>(null);
   const [sentCandidates, setSentCandidates] = useState<any[]>([]);
+  const [sentCycle, setSentCycle] = useState<string>("");
+  const [sentHiddenMainlines, setSentHiddenMainlines] = useState<Set<string>>(new Set());
+  const [sentHiddenStocks, setSentHiddenStocks] = useState<Set<string>>(new Set());
+  const [sentRoleOverrides, setSentRoleOverrides] = useState<Record<string, string>>({});
+  const [sentAnalysis, setSentAnalysis] = useState<any>(null);
+
+  const handleSentAnalysisUpdated = (scope: string, objectKey: string, dimension: string, text: string) => {
+    setSentAnalysis((prev: any) => {
+      const cur = prev || {};
+      const tree = { ...cur };
+      tree[scope] = tree[scope] || {};
+      tree[scope][objectKey] = tree[scope][objectKey] || {};
+      tree[scope][objectKey][dimension] = tree[scope][objectKey][dimension] || {};
+      tree[scope][objectKey][dimension].manual = text;
+      return tree;
+    });
+  };
+  const handleRankMainlines = async (useAi: boolean = false) => {
+    const mls = (sentHeader?.mainlines || []).filter((m: any) => !sentHiddenMainlines.has(m.concept));
+    if (mls.length === 0) { setRankResult("无主线可对比"); return; }
+    setRankLoading(true);
+    setRankResult("");
+    try {
+      const res = await api.tools.post<any>("/sentiment/analysis/rank-mainlines", {
+        mainlines: mls,
+        cycle: sentCycle || sentHeader?.cycle,
+        use_ai: useAi,
+      });
+      if (res?.ok) {
+        setRankResult(res.conclusion);
+        setSentAnalysis((prev: any) => {
+          const t = { ...(prev || {}) };
+          t.mainlines = t.mainlines || {};
+          t.mainlines["结论"] = t.mainlines["结论"] || {};
+          const src = useAi ? "ai" : "rule";
+          t.mainlines["结论"].winner = { ...t.mainlines["结论"].winner, [src]: res.conclusion };
+          if (res.scores) t.mainlines["结论"].scores = res.scores;
+          if (res.descs) t.mainlines["结论"].descs = res.descs;
+          return t;
+        });
+      } else {
+        setRankResult(`${useAi ? "AI" : "规则"}对比失败: ${res?.error || ""}`);
+      }
+    } catch (e: any) {
+      setRankResult(`${useAi ? "AI" : "规则"}对比失败: ${e?.message || String(e)}`);
+    } finally {
+      setRankLoading(false);
+    }
+  };
   const [running, setRunning] = useState<string | null>(null);
   const [scriptOutput, setScriptOutput] = useState<string | null>(null);
   const [noCache, setNoCache] = useState(false);
   const [klineData, setKlineData] = useState<Record<string, PriceBar[]>>({});
   const [expandedKline, setExpandedKline] = useState<string | null>(null);
+  const [rankLoading, setRankLoading] = useState(false);
+  const [rankResult, setRankResult] = useState<string>("");
   const [selectedStock, setSelectedStock] = useState<Candidate | null>(null);
-  const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "sentiment">("fibonacci");
+  const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "sentiment">("sentiment");
   const [decisionNotes, setDecisionNotes] = useState("");
   const [sentAi, setSentAi] = useState<Record<number, { phase: string; analysis: string; suggestion: string } | null>>({});
   const [sentAiLoading, setSentAiLoading] = useState<number | null>(null);
@@ -683,8 +753,21 @@ export function DailyScan() {
     try {
       const res = await api.tools.post<any>("/sentiment/ai-analyze", {
         step,
-        header: sentHeader ?? {},
-        candidates: sentCandidates,
+        header: {
+          ...(sentHeader ?? {}),
+          cycle: sentCycle || sentHeader?.cycle,
+          breadth: step === 1 ? { ...(sentHeader?.breadth ?? {}), broke_limit: sentHeader?.breadth?.broke_limit, total_amount_yi: sentHeader?.breadth?.total_amount_yi, limit_down: sentHeader?.breadth?.limit_down, up_n: sentHeader?.breadth?.up_n, down_n: sentHeader?.breadth?.down_n } : (sentHeader?.breadth ?? {}),
+          mainlines: sentHeader?.mainlines?.filter((m: any) => !sentHiddenMainlines.has(m.concept)),
+        },
+        candidates: sentCandidates
+          .filter((c) => !sentHiddenMainlines.has(c.mainline) && !sentHiddenStocks.has(c.stock?.code))
+          .map((c) => {
+            const code = c.stock?.code;
+            if (code && sentRoleOverrides[code]) {
+              return { ...c, stock: { ...c.stock, role: sentRoleOverrides[code] } };
+            }
+            return c;
+          }),
       });
       if (res?.ok) {
         setSentAi((p) => ({ ...p, [step]: { phase: res.phase, analysis: res.analysis, suggestion: res.suggestion } }));
@@ -754,6 +837,14 @@ export function DailyScan() {
       setIctCandidates(ict);
       setSentCandidates(sent);
       setSentHeader(sentData?.mainlines && sentData.mainlines.length ? sentData : null);
+      setSentCycle(sentData?.cycle || "");
+      setSentHiddenMainlines(new Set());
+      setSentHiddenStocks(new Set());
+      setSentRoleOverrides({});
+      setDecisionNotes(sentData?.decision || "");
+      setSentAnalysis(sentData?.analysis || null);
+      const savedWinner = sentData?.analysis?.mainlines?.["结论"]?.winner;
+      setRankResult(savedWinner?.manual || savedWinner?.ai || savedWinner?.rule || "");
       setNoCache(fib.length === 0 && v5.length === 0 && ict.length === 0 && sent.length === 0);
       setActiveStrategy((cur) => {
         const counts: Record<string, number> = { fibonacci: fib.length, v5: v5.length, ict: ict.length, sentiment: sent.length };
@@ -805,6 +896,19 @@ export function DailyScan() {
       alert(data.message);
     } catch (e: any) {
       alert(`买入失败: ${e.message}`);
+    }
+  };
+
+  const handleSaveDecision = async () => {
+    try {
+      const res = await api.tools.post<any>("/sentiment/decision", { decision: decisionNotes });
+      if (res?.ok) {
+        alert("决策已保存到缓存");
+      } else {
+        alert(`保存失败: ${res?.error || "未知错误"}`);
+      }
+    } catch (e: any) {
+      alert(`保存失败: ${e.message}`);
     }
   };
 
@@ -1137,26 +1241,48 @@ export function DailyScan() {
                         <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">1</span>
                         情绪周期
                       </h4>
-                      <div className="flex flex-wrap items-center gap-4">
-                        <span className={`inline-flex px-3 py-1 rounded-full text-sm font-semibold ${
-                          sentHeader.cycle === "主升" ? "bg-red-100 text-red-700" :
-                          sentHeader.cycle === "启动" ? "bg-orange-100 text-orange-700" :
-                          sentHeader.cycle === "分歧" ? "bg-amber-100 text-amber-700" :
-                          "bg-blue-100 text-blue-700"
-                        }`}>
-                          当前情绪：{sentHeader.cycle}
-                        </span>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-muted-foreground">当前情绪周期：</span>
+                          <select
+                            value={sentCycle || sentHeader.cycle}
+                            onChange={(e) => setSentCycle(e.target.value)}
+                            className="rounded-md border bg-background px-2 py-1 text-sm font-semibold"
+                          >
+                            {["冰点", "启动", "发酵", "主升", "分歧", "退潮"].map((c) => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </div>
                         {sentHeader.breadth && (
                           <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
                             <span className="px-2 py-1 bg-muted/40 rounded">涨停 {sentHeader.breadth.limit_up}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">跌停 {sentHeader.breadth.limit_down ?? "—"}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">涨 {sentHeader.breadth.up_n ?? "—"}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">跌 {sentHeader.breadth.down_n ?? "—"}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">炸板 {sentHeader.breadth.broke_limit ?? "—"}</span>
+                            <span className="px-2 py-1 bg-muted/40 rounded">成交 {sentHeader.breadth.total_amount_yi ?? "—"}亿</span>
                             <span className="px-2 py-1 bg-muted/40 rounded">涨幅&gt;5% {sentHeader.breadth.gainer}</span>
                             <span className="px-2 py-1 bg-muted/40 rounded">最高连板 {sentHeader.breadth.max_streak}</span>
                           </div>
                         )}
                       </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        操作参考：启动/主升→可参与；分歧→低位切换；退潮→空仓或极小仓位试错。
-                      </p>
+                      <div className="mt-2 rounded-lg border bg-primary/5 px-3 py-2">
+                        <span className="text-xs font-semibold text-primary">当前周期操作策略</span>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {CYCLE_STRATEGY[sentCycle || sentHeader.cycle] || "选择周期后展示对应操作策略"}
+                        </p>
+                      </div>
+                      <SentimentAnalysisBlock
+                        title="周期策略逐项分析（AI / 人工）"
+                        scope="cycle"
+                        objectKey="strategy"
+                        dims={[{ key: "strategy", label: "周期操作策略" }]}
+                        analysis={sentAnalysis}
+                        aiCtx={{ ...(sentHeader.breadth || {}), cycle: sentCycle || sentHeader.cycle }}
+                        cycle={sentCycle || sentHeader.cycle}
+                        onUpdated={handleSentAnalysisUpdated}
+                      />
                       {renderSentAi(1)}
                     </div>
 
@@ -1169,23 +1295,87 @@ export function DailyScan() {
                       {(!sentHeader.mainlines || sentHeader.mainlines.length === 0) ? (
                         <div className="text-sm text-muted-foreground">今日无成立主线（板块内个股不足）</div>
                       ) : (
-                        <div className="grid gap-2 md:grid-cols-3">
-                          {sentHeader.mainlines.map((ml: any) => (
-                            <div key={ml.concept} className="border rounded-lg p-3 bg-muted/10">
-                              <div className="flex items-center justify-between">
-                                <span className="font-medium text-sm">{ml.concept}</span>
-                                <span className="text-xs text-primary">强度 {ml.score}</span>
-                              </div>
-                              <div className="mt-1 text-xs text-muted-foreground space-x-3">
-                                <span>{ml.n} 家</span>
-                                <span>涨停 {ml.zt_n}</span>
-                                <span>最高 {ml.max_streak}板</span>
-                                <span>均涨 {ml.avg_chg}%</span>
-                              </div>
+                        (() => {
+                          const visible = sentHeader.mainlines.filter((ml: any) => !sentHiddenMainlines.has(ml.concept));
+                          return visible.length === 0 ? (
+                            <div className="text-sm text-muted-foreground">已全部剔除主线</div>
+                          ) : (
+                            <div className="space-y-2">
+                              {visible.map((ml: any) => (
+                                <div key={ml.concept} className="border rounded-lg p-3 bg-muted/10">
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-medium text-sm">{ml.concept}</span>
+                                    <span className="flex items-center gap-1">
+                                      <span className="text-xs text-primary">强度 {ml.score}</span>
+                                      <button
+                                        onClick={() => { const s = new Set(sentHiddenMainlines); s.add(ml.concept); setSentHiddenMainlines(s); }}
+                                        title={`剔除主线「${ml.concept}」`}
+                                        className="p-0.5 text-muted-foreground hover:text-red-600 rounded"
+                                      >
+                                        <X className="h-3.5 w-3.5" />
+                                      </button>
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 text-xs text-muted-foreground space-x-3">
+                                    <span>{ml.n} 家</span>
+                                    <span>涨停 {ml.zt_n}</span>
+                                    <span>最高 {ml.max_streak}板</span>
+                                    <span>均涨 {ml.avg_chg}%</span>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
+                          );
+                        })()
                       )}
+                      {sentHiddenMainlines.size > 0 && (
+                        <button
+                          onClick={() => setSentHiddenMainlines(new Set())}
+                          className="mt-2 text-xs text-primary underline"
+                        >
+                          恢复已剔除主线（{sentHiddenMainlines.size}）
+                        </button>
+                      )}
+                      <div className="mt-3 border-t pt-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <h5 className="text-sm font-semibold text-primary">🎯 四维度横向对比选最优主线</h5>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleRankMainlines(false)}
+                              disabled={rankLoading}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:opacity-90 disabled:opacity-50 transition-colors"
+                            >
+                              {rankLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Activity className="h-3 w-3" />}
+                              {rankLoading ? "对比中..." : "规则对比（不用AI）"}
+                            </button>
+                            <button
+                              onClick={() => handleRankMainlines(true)}
+                              disabled={rankLoading}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs bg-violet-600 text-white rounded hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                            >
+                              {rankLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3" />}
+                              {rankLoading ? "AI对比中..." : "AI对比"}
+                            </button>
+                          </div>
+                        </div>
+                        {sentAnalysis?.mainlines?.["结论"]?.descs && (
+                          <div className="space-y-2 mb-2">
+                            {Object.entries(sentAnalysis.mainlines["结论"].descs).map(([name, desc]: any) => (
+                              <div key={name} className={`rounded-md border p-2 ${rankResult?.includes(`**${name}**`) || rankResult?.includes(name) ? "bg-primary/5" : "bg-muted/5"}`}>
+                                <div className="text-xs font-semibold text-primary mb-1">{name}</div>
+                                {RANK_DIMS.map((dim) => (
+                                  <div key={dim} className="text-xs text-muted-foreground leading-relaxed">
+                                    <span className="text-muted-foreground/70">{dim}：</span>{desc?.[dim] ?? "—"}
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {rankResult && (
+                          <div className="rounded-md bg-primary/5 border p-3 text-sm whitespace-pre-wrap">{rankResult}</div>
+                        )}
+                      </div>
                       {renderSentAi(2)}
                     </div>
 
@@ -1193,72 +1383,123 @@ export function DailyScan() {
                     <div className="border rounded-lg p-4">
                       <h4 className="font-semibold mb-3 text-base flex items-center gap-2">
                         <span className="inline-flex items-center justify-center w-5 h-5 rounded bg-primary text-primary-foreground text-xs">3</span>
-                        个股精选（按主线/地位排序）
+                        个股精选（按板块分节 · 逐条分析）
                       </h4>
-                      {sentCandidates.length === 0 && (
-                        <div className="text-sm text-muted-foreground">无候选（涨幅未达阈值）</div>
-                      )}
-                      {sentCandidates.length > 0 && (
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-sm">
-                            <thead className="bg-muted/40 text-xs text-muted-foreground">
-                              <tr>
-                                <th className="px-3 py-2 text-left font-medium">主线</th>
-                                <th className="px-3 py-2 text-left font-medium">地位</th>
-                                <th className="px-3 py-2 text-left font-medium">代码</th>
-                                <th className="px-3 py-2 text-left font-medium">名称</th>
-                                <th className="px-3 py-2 text-right font-medium">现价</th>
-                                <th className="px-3 py-2 text-right font-medium">涨幅</th>
-                                <th className="px-3 py-2 text-center font-medium">连板</th>
-                                <th className="px-3 py-2 text-center font-medium">上板时间</th>
-                                <th className="px-3 py-2 text-center font-medium">操作</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {sentCandidates.map((c, i) => {
-                                const s = c.stock || {};
-                                const isZt = !!s.is_zt;
-                                const roleTag =
-                                  s.role === "龙" ? <span className="text-red-600 font-semibold">龙头</span> :
-                                  s.role === "板块龙头" ? <span className="text-orange-600 font-medium">板块龙头</span> :
-                                  s.role === "补涨龙" ? <span className="text-amber-600 font-medium">补涨龙</span> :
-                                  s.role === "日内先锋" ? <span className="text-blue-600 font-medium">日内先锋</span> :
-                                  <span className="text-muted-foreground">{s.role || "跟风"}</span>;
-                                return (
-                                  <Fragment key={`${c.mainline}-${s.code}-${i}`}>
-                                    <tr className="border-t">
-                                      <td className="px-3 py-2">
-                                        <span className="inline-flex px-2 py-0.5 rounded bg-primary/10 text-primary text-xs">{c.mainline}</span>
-                                      </td>
-                                      <td className="px-3 py-2">{roleTag}</td>
-                                      <td className="px-3 py-2 font-mono">{s.code}</td>
-                                      <td className="px-3 py-2">{s.name}</td>
-                                      <td className="px-3 py-2 text-right font-mono">{s.price?.toFixed(2)}</td>
-                                      <td className="px-3 py-2 text-right">
-                                        <span className={isZt ? "text-red-600 font-semibold" : "text-red-600"}>{isZt ? "涨停" : `+${s.chg?.toFixed(2)}%`}</span>
-                                      </td>
-                                      <td className="px-3 py-2 text-center">{s.streak ? `${s.streak}板` : "首板"}</td>
-                                      <td className="px-3 py-2 text-center text-muted-foreground">{s.ltime || "--:--"}</td>
-                                      <td className="px-3 py-2 text-center">
-                                        <button onClick={() => handleBuy(s.code, s.name, "sentiment_leader", { price: s.price, score: c.score })} className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">买入</button>
-                                        <button onClick={() => fetchKline(s.code)} className="ml-1 p-1 text-muted-foreground hover:text-primary rounded" title="查看K线">
-                                          <CandleIcon className="h-4 w-4 inline" />
-                                        </button>
-                                      </td>
-                                    </tr>
-                                    {expandedKline === s.code && klineData[s.code] && (
-                                      <tr>
-                                        <td colSpan={9} className="px-4 py-3 bg-muted/10">
-                                          <CandlestickChart data={klineData[s.code]} height={360} />
-                                        </td>
-                                      </tr>
+                      {(() => {
+                        const visible = sentCandidates.filter(
+                          (c) => !sentHiddenMainlines.has(c.mainline) && !sentHiddenStocks.has(c.stock?.code),
+                        );
+                        if (visible.length === 0) {
+                          return <div className="text-sm text-muted-foreground">无候选（涨幅未达阈值或已剔除）</div>;
+                        }
+                        // 按板块（主线）分组，逐条分析
+                        const mlStats: Record<string, any> = {};
+                        (sentHeader?.mainlines || []).forEach((m: any) => { mlStats[m.concept] = m; });
+                        const byMainline: Record<string, any[]> = {};
+                        visible.forEach((c) => {
+                          if (!byMainline[c.mainline]) byMainline[c.mainline] = [];
+                          byMainline[c.mainline].push(c);
+                        });
+                        const orderedMls = Object.keys(byMainline).sort((a, b) => {
+                          const sa = mlStats[a]?.score ?? 0;
+                          const sb = mlStats[b]?.score ?? 0;
+                          return (sb ?? 0) - (sa ?? 0);
+                        });
+                        return (
+                          <div className="space-y-4">
+                            {orderedMls.map((ml) => {
+                              const stat = mlStats[ml];
+                              const stocks = byMainline[ml];
+                              return (
+                                <div key={ml} className="border rounded-lg bg-muted/10 p-3">
+                                  <div className="flex items-center justify-between mb-2 flex-wrap gap-1">
+                                    <h5 className="font-semibold text-sm flex items-center gap-1.5">
+                                      <span className="inline-flex px-2 py-0.5 rounded bg-primary/10 text-primary text-xs">{ml}</span>
+                                      <span className="text-xs text-muted-foreground">（{stocks.length} 只）</span>
+                                    </h5>
+                                    {stat && (
+                                      <span className="text-xs text-muted-foreground space-x-2">
+                                        <span>强度 {stat.score}</span>
+                                        <span>{stat.n}家</span>
+                                        <span>涨停 {stat.zt_n}</span>
+                                        <span>最高 {stat.max_streak}板</span>
+                                        <span>均涨 {stat.avg_chg}%</span>
+                                      </span>
                                     )}
-                                  </Fragment>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
+                                  </div>
+                                  <SentimentAnalysisBlock
+                                    title={`${ml} · 板块逐维度选股分析`}
+                                    scope="mainlines"
+                                    objectKey={ml}
+                                    dims={STOCK_DIMS}
+                                    analysis={sentAnalysis}
+                                    aiCtx={stat || { concept: ml, stocks: stocks.map((c) => c.stock || {}) }}
+                                    cycle={sentCycle || sentHeader.cycle}
+                                    defaultOpen
+                                    onUpdated={handleSentAnalysisUpdated}
+                                  />
+                                  <div className="space-y-3">
+                                    {stocks.map((c) => {
+                                      const s = c.stock || {};
+                                      const isZt = !!s.is_zt;
+                                      const role = sentRoleOverrides[s.code] ?? s.role ?? "跟风";
+                                      const GAP: Record<string, string> = { "龙(高标)": "text-red-600 font-semibold", "龙": "text-red-600 font-semibold", "板块龙头": "text-orange-600 font-medium", "补涨龙": "text-amber-600 font-medium", "日内先锋": "text-blue-600 font-medium" };
+                                      return (
+                                        <div key={`${ml}-${s.code}`} className="border rounded-md bg-card p-2.5">
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <select
+                                              value={role}
+                                              onChange={(e) => setSentRoleOverrides((m) => ({ ...m, [s.code]: e.target.value }))}
+                                              className={`rounded-md border bg-background px-1.5 py-0.5 text-xs ${GAP[role] || "text-muted-foreground"}`}
+                                            >
+                                              {["龙(高标)", "板块龙头", "补涨龙", "日内先锋", "首板", "跟风"].map((r) => (
+                                                <option key={r} value={r}>{r}</option>
+                                              ))}
+                                            </select>
+                                            <span className="font-mono text-xs">{s.code}</span>
+                                            <span className="text-sm font-medium">{s.name}</span>
+                                            <span className="text-xs font-mono">{s.price?.toFixed(2)}</span>
+                                            <span className={`text-xs ${isZt ? "text-red-600 font-semibold" : "text-red-600"}`}>
+                                              {isZt ? "涨停" : `+${s.chg?.toFixed(2)}%`}
+                                            </span>
+                                            <span className="text-xs text-muted-foreground">{s.streak ? `${s.streak}板` : "首板"}</span>
+                                            <span className="text-xs text-muted-foreground">上板 {s.ltime || "--:--"}</span>
+                                            <span className="ml-auto flex items-center gap-1">
+                                              <button onClick={() => handleBuy(s.code, s.name, "sentiment_leader", { price: s.price, score: c.score })} className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">买入</button>
+                                              <button onClick={() => fetchKline(s.code)} className="p-1 text-muted-foreground hover:text-primary rounded" title="查看K线">
+                                                <CandleIcon className="h-4 w-4 inline" />
+                                              </button>
+                                              <button
+                                                onClick={() => { const st = new Set(sentHiddenStocks); st.add(s.code); setSentHiddenStocks(st); }}
+                                                title="移除该股"
+                                                className="p-1 text-muted-foreground hover:text-red-600 rounded"
+                                              >
+                                                <X className="h-4 w-4 inline" />
+                                              </button>
+                                            </span>
+                                          </div>
+                                          {expandedKline === s.code && klineData[s.code] && (
+                                            <div className="mt-2">
+                                              <CandlestickChart data={klineData[s.code]} height={320} />
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+                      {sentHiddenStocks.size > 0 && (
+                        <button
+                          onClick={() => setSentHiddenStocks(new Set())}
+                          className="mt-2 text-xs text-primary underline"
+                        >
+                          恢复已剔除个股（{sentHiddenStocks.size}）
+                        </button>
                       )}
                     </div>
                     {renderSentAi(3)}
@@ -1276,9 +1517,17 @@ export function DailyScan() {
                       <textarea
                         value={decisionNotes}
                         onChange={(e) => setDecisionNotes(e.target.value)}
-                        placeholder="记录你的结论与理由（仅保存在本地页面，刷新后清空）..."
+                        placeholder="记录你的结论与理由（点击「保存决策」后写入当日缓存，重跑选股后再加载）..."
                         className="w-full p-3 border rounded-md text-sm min-h-[100px] bg-muted/20 resize-y"
                       />
+                      <div className="mt-2 flex justify-end">
+                        <button
+                          onClick={handleSaveDecision}
+                          className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors"
+                        >
+                          保存决策到缓存
+                        </button>
+                      </div>
                       {renderSentAi(4)}
                     </div>
                   </>
