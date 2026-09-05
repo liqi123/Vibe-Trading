@@ -1049,19 +1049,23 @@ def get_scan_results(strategy: str = "fibonacci", date: str = "") -> dict:
 def set_sentiment_decision(body: dict) -> dict:
     """保存情绪选股决策笔记到当日缓存 JSON。
 
-    body: {date?, decision}
-    返回: {ok, date, decision} 或 {ok:false, error}
+    body: {date?, decision, ai?}
+    decision 为人工编辑文本；ai 为第4步 AI 分析原文（phase/analysis/suggestion）。
+    返回: {ok, date, decision, ai} 或 {ok:false, error}
     """
     from datetime import date as _date
     date = body.get("date") or _date.today().strftime("%Y-%m-%d")
     decision = (body.get("decision") or "").strip()
+    ai = body.get("ai")
     path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
     data = _read_json(path)
     if not isinstance(data, dict) or not data:
         return {"ok": False, "error": f"缓存不存在: sentiment_screening_cache_{date}.json"}
     data["decision"] = decision
+    if ai:
+        data["decision_ai"] = ai
     _atomic_write_json(path, data)
-    return _ok(date=date, decision=decision)
+    return _ok(date=date, decision=decision, ai=ai)
 
 
 # ---------- 情绪选股 逐维度分析（主线/个股） ----------
@@ -1466,13 +1470,22 @@ _SENT_STEP_PROMPTS = {
     4: (
         "你是A股短线交易决策顾问。综合情绪周期、主线板块、个股梯队给出综合阶段判断和操作策略。"
         "阶段取值：积极进攻/均衡配置/防守/空仓。"
-        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"综合判断(100字内)\", \"suggestion\": \"做不做/在哪做/做哪个(100字内)\"}"
+        "必须从候选个股清单中挑选唯一一只最值得参与的个股（防守/空仓阶段也要挑，作为若参与时的首选，可为相对风险最低者）。"
+        "严禁推荐候选清单之外的个股。"
+        "推荐类型：当前适合进攻参与的标为「主动推荐」；防守/退潮阶段仍要交易的首选标为「被动推荐」。"
+        "基于清单中该股的「现价/昨收/涨停与否」等真实价位给出操作区间，严禁编造价格："
+        "支撑位=support，压力位=pressure，入场区间=entry_low~entry_high，出场区间=exit_low~exit_high（含预期/止盈逻辑），目标预期=target。"
+        "返回严格JSON：{\"phase\": \"阶段\", \"analysis\": \"综合判断(100字内)\", \"suggestion\": \"做不做/在哪做/做哪个(100字内)\", \"stock\": {\"code\": \"股票代码\", \"name\": \"股票名称\", \"type\": \"主动推荐或被动推荐\", \"reason\": \"推荐理由(60字内)\", \"support\": \"支撑位\", \"pressure\": \"压力位\", \"entry_low\": \"入场价下限\", \"entry_high\": \"入场价上限\", \"exit_low\": \"出场价下限\", \"exit_high\": \"出场价上限\", \"target\": \"目标预期(60字内)\"}}"
     ),
 }
 
 
-def _build_sentiment_user_prompt(step: int, header: dict, candidates: list) -> str:
-    """按 step 构造发给 LLM 的用户提示（精简数据避免 token 爆炸）。"""
+def _build_sentiment_user_prompt(step: int, header: dict, candidates: list, prior: dict | None = None) -> str:
+    """按 step 构造发给 LLM 的用户提示（精简数据避免 token 爆炸）。
+
+    prior: step=4 时传入前三步的 AI 分析结果 {1: {...}, 2: {...}, 3: {...}}，
+           让最终决策基于前序分析而非仅原始数据。
+    """
     if step == 1:
         breadth = header.get("breadth") or {}
         data = {
@@ -1525,7 +1538,35 @@ def _build_sentiment_user_prompt(step: int, header: dict, candidates: list) -> s
         "candidate_count": len(candidates),
         "top_roles": [c.get("stock", {}).get("role", "") for c in candidates[:8]],
     }
-    return f"综合数据：\n{json.dumps(summary, ensure_ascii=False)}\n请给出综合阶段判断和操作策略。"
+    sticks = [
+        {
+            "代码": c.get("stock", {}).get("code", ""),
+            "名称": c.get("stock", {}).get("name", ""),
+            "地位": c.get("stock", {}).get("role", ""),
+            "连板": c.get("stock", {}).get("streak", 0),
+            "涨幅%": c.get("stock", {}).get("chg", 0),
+            "现价": c.get("stock", {}).get("price", 0),
+            "昨收": c.get("stock", {}).get("prev_close", 0),
+            "是否涨停": c.get("stock", {}).get("is_zt", False),
+            "上板时间": c.get("stock", {}).get("ltime", ""),
+            "主线": c.get("mainline", ""),
+        }
+        for c in candidates[:20]
+    ]
+    msg = f"综合数据：\n{json.dumps(summary, ensure_ascii=False)}"
+    if sticks:
+        msg += f"\n\n候选个股清单（推荐必须从其中选出，不得编造清单外个股）：\n{json.dumps(sticks, ensure_ascii=False)}"
+    if prior:
+        parts = []
+        for s in (1, 2, 3):
+            p = prior.get(str(s)) or prior.get(s)
+            if isinstance(p, dict) and p.get("analysis"):
+                parts.append(
+                    f"步骤{s}：阶段={p.get('phase', '')}；分析={p.get('analysis', '')}；建议={p.get('suggestion', '')}"
+                )
+        if parts:
+            msg += "\n\n前序三步 AI 分析结果：\n" + "\n".join(parts)
+    return msg + "\n请结合上述数据与前序分析，给出综合阶段判断和操作策略。"
 
 
 @router.post("/sentiment/ai-analyze")
@@ -1577,8 +1618,88 @@ def sentiment_ai_analyze(body: dict) -> dict:
         _run_logger.warning("[sentiment-ai] step 超范围: %s", step)
         return {"ok": False, "error": f"step 必须为 1-4，收到 {step}"}
 
+    # step=3 与 rank-stocks 保持一致：逐主线、逐股三维度对比（地位优先/筹码形态/盘口时机），
+    # 并写回缓存 analysis.stocks[code][dim].ai，供「个股分析汇总」复用。
+    if step == 3:
+        try:
+            from datetime import datetime as _dt
+
+            client = get_llm_client()
+            date = body.get("date") or _dt.now().strftime("%Y-%m-%d")
+            path = _PAPER_DIR / f"sentiment_screening_cache_{date}.json"
+            data = _read_json(path)
+            if not isinstance(data, dict) or not data:
+                return {"ok": False, "error": f"缓存不存在: {path.name}"}
+
+            # 按主线分组
+            by_ml: dict[str, list] = {}
+            for c in candidates:
+                ml = c.get("mainline") or "其他"
+                by_ml.setdefault(ml, []).append(c)
+            if not by_ml:
+                return {"ok": False, "error": "无候选个股"}
+
+            all_winners: list[str] = []
+            per_ml_summary: list[str] = []
+            for mainline, grp in by_ml.items():
+                brief = []
+                for c in grp:
+                    s = c.get("stock") or {}
+                    brief.append({
+                        "代码": s.get("code"), "名称": s.get("name"), "涨幅%": s.get("chg"),
+                        "连板": s.get("streak"), "是否涨停": s.get("is_zt"), "上板时间": s.get("ltime"),
+                        "地位": s.get("role"), "概念": s.get("concepts", []),
+                    })
+                prompt = (
+                    "你是A股短线个股横向对比分析师。对同板块内个股，从三方面逐只具体描述分析："
+                    "1.地位优先（龙头/补涨龙/日内先锋，各自含义）；"
+                    "2.筹码形态（股性活跃度/套牢盘/突破形态）；"
+                    "3.盘口时机（涨停时间/封单质量/带动性）。"
+                    "绝不使用分数。最后综合选出当前板块内【最值得参与的一只个股】。"
+                    "返回严格JSON：{\"descs\": {\"<代码>\": {\"地位优先\":\"...\", \"筹码形态\":\"...\", \"盘口时机\":\"...\"}}, "
+                    "\"winner_code\": \"<代码>\", \"winner_name\": \"<名称>\", \"reason\": \"综合理由(100字内)\"}"
+                )
+                user = (
+                    f"当前情绪周期：{header.get('cycle', '')}\n"
+                    f"所属板块：{mainline}\n"
+                    f"待对比个股({len(brief)}只)：\n{json.dumps(brief, ensure_ascii=False)}"
+                )
+                result = client.chat_json(prompt, user, temperature=0.1)
+                descs = result.get("descs") or {}
+                winner_code = result.get("winner_code") or ""
+                winner_name = result.get("winner_name") or ""
+                reason = str(result.get("reason") or "").strip()
+                for code, dims in descs.items():
+                    for dim in ("地位优先", "筹码形态", "盘口时机"):
+                        txt = (dims.get(dim) or "").strip()
+                        if txt:
+                            data.setdefault("analysis", {}).setdefault("stocks", {}).setdefault(code, {}).setdefault(dim, {})["ai"] = txt
+                if winner_code:
+                    all_winners.append(f"{winner_name}({winner_code})")
+                    per_ml_summary.append(f"{mainline}→{winner_name}({winner_code})：{reason[:60]}")
+                _run_logger.info("[sentiment-ai] step=3 主线「%s」完成，%d 只，winner=%s", mainline, len(brief), winner_code)
+
+            data.setdefault("updated_at", {})
+            data["updated_at"]["stocks_ai_analyze"] = _dt.now().isoformat(timespec="seconds")
+            _atomic_write_json(path, data)
+
+            phase = "已完成三维度对比"
+            analysis = f"已按主线逐股对比（共 {len(by_ml)} 条主线 / {sum(len(v) for v in by_ml.values())} 只），结果已写回「个股分析汇总」。"
+            suggestion = "；".join(per_ml_summary) or "无"
+            _run_logger.info("[sentiment-ai] step=3 完成 winners=%s", all_winners)
+            return {
+                "ok": True,
+                "step": step,
+                "phase": phase,
+                "analysis": analysis,
+                "suggestion": suggestion,
+            }
+        except Exception as e:
+            _run_logger.error("[sentiment-ai] step=3 调用失败 错误=%s", e, exc_info=True)
+            return {"ok": False, "error": f"LLM 调用失败：{e}"}
+
     system_prompt = _SENT_STEP_PROMPTS[step]
-    user_prompt = _build_sentiment_user_prompt(step, header, candidates)
+    user_prompt = _build_sentiment_user_prompt(step, header, candidates, prior=body.get("prior"))
     _run_logger.info(
         "[sentiment-ai] 调用 LLM step=%d sys_prompt_len=%d user_prompt_len=%d",
         step, len(system_prompt), len(user_prompt),
@@ -1590,9 +1711,73 @@ def sentiment_ai_analyze(body: dict) -> dict:
         phase = str(result.get("phase", ""))
         analysis = str(result.get("analysis", ""))
         suggestion = str(result.get("suggestion", ""))
+        stock = None
+        if step == 4:
+            s = result.get("stock")
+            if isinstance(s, dict):
+                s_type = str(s.get("type", "")).strip()
+                if s_type not in ("主动推荐", "被动推荐"):
+                    s_type = "主动推荐" if phase not in ("防守", "空仓") else "被动推荐"
+                code = str(s.get("code", "")).strip()
+                name = str(s.get("name", "")).strip()
+                if code or name:
+                    stock = {
+                        "code": code,
+                        "name": name,
+                        "type": s_type,
+                        "reason": str(s.get("reason", "")).strip(),
+                        "support": str(s.get("support", "")).strip(),
+                        "pressure": str(s.get("pressure", "")).strip(),
+                        "entry": str(s.get("entry_low", "")).strip(),
+                        "entry_high": str(s.get("entry_high", "")).strip(),
+                        "exit": str(s.get("exit_low", "")).strip(),
+                        "exit_high": str(s.get("exit_high", "")).strip(),
+                        "target": str(s.get("target", "")).strip(),
+                    }
+            # 防幻觉：推荐必须来自候选清单；不在则回退到「真涨停+最高地位」候选
+            def _cand_by_code(csrc):
+                for c in csrc:
+                    st = c.get("stock") or {}
+                    if str(st.get("code", "")).strip() == str(stock.get("code", "")).strip():
+                        return c
+                return None
+
+            if stock:
+                valid = {str(c.get("stock", {}).get("code", "")).strip() for c in candidates if c.get("stock")}
+                if stock["code"] not in valid and valid:
+                    fallback = None
+                    for c in candidates:
+                        st = c.get("stock") or {}
+                        if st.get("is_zt") or str(st.get("role", "")).startswith(("龙", "龙头", "补涨")):
+                            fallback = c
+                            break
+                    if fallback is None and candidates:
+                        fallback = candidates[0]
+                    if fallback:
+                        fst = fallback.get("stock") or {}
+                        stock = {
+                            "code": str(fst.get("code", "")),
+                            "name": str(fst.get("name", "")),
+                            "type": s_type,
+                            "reason": f"原推荐{stock['name']}({stock['code']})不在候选清单，已回退为 {fst.get('name')}：{stock['reason']}",
+                            "support": "", "pressure": "", "entry": "", "entry_high": "",
+                            "exit": "", "exit_high": "", "target": "",
+                        }
+                # LLM 未给价位时，用候选真实价格推算下限（保守区间）
+                if stock.get("entry") == "" or stock.get("exit") == "":
+                    cand = _cand_by_code(candidates)
+                    if cand:
+                        st = cand.get("stock") or {}
+                        price = st.get("price") or 0
+                        if stock.get("entry") == "" and price:
+                            stock["entry"] = f"{price * 0.98:.2f}"
+                            stock["entry_high"] = stock["entry_high"] or f"{price * 1.005:.2f}"
+                        if stock.get("exit") == "" and price:
+                            stock["exit"] = f"{price * 1.04:.2f}"
+                            stock["exit_high"] = stock["exit_high"] or f"{price * 1.10:.2f}"
         _run_logger.info(
-            "[sentiment-ai] LLM 成功 step=%d phase=%s analysis_len=%d suggestion_len=%d",
-            step, phase, len(analysis), len(suggestion),
+            "[sentiment-ai] LLM 成功 step=%d phase=%s analysis_len=%d suggestion_len=%d stock=%s",
+            step, phase, len(analysis), len(suggestion), stock,
         )
         return {
             "ok": True,
@@ -1600,6 +1785,7 @@ def sentiment_ai_analyze(body: dict) -> dict:
             "phase": phase,
             "analysis": analysis,
             "suggestion": suggestion,
+            "stock": stock,
         }
     except Exception as e:
         _run_logger.error("[sentiment-ai] LLM 调用失败 step=%s 错误=%s", step, e, exc_info=True)

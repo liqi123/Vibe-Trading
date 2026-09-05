@@ -743,7 +743,7 @@ export function DailyScan() {
   const [selectedStock, setSelectedStock] = useState<Candidate | null>(null);
   const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "sentiment">("sentiment");
   const [decisionNotes, setDecisionNotes] = useState("");
-  const [sentAi, setSentAi] = useState<Record<number, { phase: string; analysis: string; suggestion: string } | null>>({});
+  const [sentAi, setSentAi] = useState<Record<number, { phase: string; analysis: string; suggestion: string; stock?: { code: string; name: string; type: string; reason: string; support?: string; pressure?: string; entry?: string; entry_high?: string; exit?: string; exit_high?: string; target?: string } } | null>>({});
   const [sentAiLoading, setSentAiLoading] = useState<number | null>(null);
   const [sentAiError, setSentAiError] = useState<Record<number, string>>({});
 
@@ -759,6 +759,7 @@ export function DailyScan() {
           breadth: step === 1 ? { ...(sentHeader?.breadth ?? {}), broke_limit: sentHeader?.breadth?.broke_limit, total_amount_yi: sentHeader?.breadth?.total_amount_yi, limit_down: sentHeader?.breadth?.limit_down, up_n: sentHeader?.breadth?.up_n, down_n: sentHeader?.breadth?.down_n } : (sentHeader?.breadth ?? {}),
           mainlines: sentHeader?.mainlines?.filter((m: any) => !sentHiddenMainlines.has(m.concept)),
         },
+        prior: step === 4 ? { 1: sentAi[1], 2: sentAi[2], 3: sentAi[3] } : undefined,
         candidates: sentCandidates
           .filter((c) => !sentHiddenMainlines.has(c.mainline) && !sentHiddenStocks.has(c.stock?.code))
           .map((c) => {
@@ -770,7 +771,25 @@ export function DailyScan() {
           }),
       });
       if (res?.ok) {
-        setSentAi((p) => ({ ...p, [step]: { phase: res.phase, analysis: res.analysis, suggestion: res.suggestion } }));
+        setSentAi((p) => ({
+          ...p,
+          [step]: {
+            phase: res.phase,
+            analysis: res.analysis,
+            suggestion: res.suggestion,
+            stock: res?.stock,
+          },
+        }));
+        if (step === 4) {
+          setDecisionNotes((prev) => {
+            if (prev.trim()) return prev;
+            const parts = [
+              res.suggestion ? String(res.suggestion) : "",
+              res.analysis ? String(res.analysis) : "",
+            ].filter(Boolean);
+            return parts.join("\n");
+          });
+        }
       } else {
         setSentAiError((e) => ({ ...e, [step]: res?.error || "分析失败" }));
       }
@@ -806,6 +825,39 @@ export function DailyScan() {
             <p className="font-medium">阶段：<span className="text-violet-700">{data.phase}</span></p>
             <p className="text-muted-foreground leading-snug">{data.analysis}</p>
             <p className="text-violet-700 leading-snug">建议：{data.suggestion}</p>
+            {step === 4 && data.stock && (
+              <div className="mt-2 rounded-md border border-violet-200 bg-white/60 p-2">
+                <div className="flex items-center justify-between">
+                  <p className="font-medium">
+                    推荐个股：
+                    <span className="text-violet-700 font-semibold">
+                      {data.stock.name}（{data.stock.code}）
+                    </span>
+                  </p>
+                  <span
+                    className={`shrink-0 ml-2 px-2 py-0.5 text-xs rounded-full font-medium ${
+                      data.stock.type === "主动推荐"
+                        ? "bg-red-100 text-red-600 border border-red-200"
+                        : "bg-amber-100 text-amber-600 border border-amber-200"
+                    }`}
+                  >
+                    {data.stock.type || "主动推荐"}
+                  </span>
+                </div>
+                <p className="text-muted-foreground leading-snug mt-1">{data.stock.reason}</p>
+                {(data.stock.support !== undefined || data.stock.pressure !== undefined) && (
+                  <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    {data.stock.support && <span>支撑位：<b className="text-green-600">{data.stock.support}</b></span>}
+                    {data.stock.pressure && <span>压力位：<b className="text-red-600">{data.stock.pressure}</b></span>}
+                    {data.stock.entry && <span>入场区间：<b className="text-violet-700">{data.stock.entry}~{data.stock.entry_high}</b></span>}
+                    {data.stock.exit && <span>出场区间：<b className="text-violet-700">{data.stock.exit}~{data.stock.exit_high}</b></span>}
+                    {data.stock.target && (
+                      <span className="col-span-2">目标预期：<span className="text-muted-foreground">{data.stock.target}</span></span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
         {err && <p className="mt-1.5 text-xs text-red-500">{err}</p>}
@@ -901,7 +953,11 @@ export function DailyScan() {
 
   const handleSaveDecision = async () => {
     try {
-      const res = await api.tools.post<any>("/sentiment/decision", { decision: decisionNotes });
+      const ai = sentAi[4];
+      const res = await api.tools.post<any>("/sentiment/decision", {
+        decision: decisionNotes,
+        ai: ai ? { phase: ai.phase, analysis: ai.analysis, suggestion: ai.suggestion } : undefined,
+      });
       if (res?.ok) {
         alert("决策已保存到缓存");
       } else {
@@ -1376,7 +1432,6 @@ export function DailyScan() {
                           <div className="rounded-md bg-primary/5 border p-3 text-sm whitespace-pre-wrap">{rankResult}</div>
                         )}
                       </div>
-                      {renderSentAi(2)}
                     </div>
 
                     {/* Step 3 个股精选 */}
@@ -1427,25 +1482,48 @@ export function DailyScan() {
                                       </span>
                                     )}
                                   </div>
-                                  <SentimentAnalysisBlock
-                                    title={`${ml} · 板块逐维度选股分析`}
-                                    scope="mainlines"
-                                    objectKey={ml}
-                                    dims={STOCK_DIMS}
-                                    analysis={sentAnalysis}
-                                    aiCtx={stat || { concept: ml, stocks: stocks.map((c) => c.stock || {}) }}
-                                    cycle={sentCycle || sentHeader.cycle}
-                                    defaultOpen
-                                    onUpdated={handleSentAnalysisUpdated}
-                                  />
-                                  <div className="space-y-3">
+<div className="border rounded-md bg-card/40 p-3">
+                                    <h6 className="text-sm font-semibold mb-2">
+                                              {ml} · 个股分析汇总
+                                            </h6>
+                                            <div className="space-y-2.5">
+                                              {stocks.map((c) => {
+                                                const ss = c.stock || {};
+                                                const dims = STOCK_DIMS.filter(
+                                                  (d) => (sentAnalysis?.stocks?.[ss.code]?.[d.key]?.manual || sentAnalysis?.stocks?.[ss.code]?.[d.key]?.ai)
+                                                );
+                                                if (dims.length === 0) return null;
+                                                const text = (d: string) =>
+                                                  sentAnalysis?.stocks?.[ss.code]?.[d]?.manual || sentAnalysis?.stocks?.[ss.code]?.[d]?.ai || "";
+                                                return (
+                                                  <div key={`${ml}-sum-${ss.code}`} className="border-t border-muted/60 pt-2 first:border-t-0 first:pt-0">
+                                                    <div className="flex items-center gap-2 text-xs font-medium mb-1">
+                                                      <span>{ss.name}</span>
+                                                      <span className="font-mono text-muted-foreground">{ss.code}</span>
+                                                      <span className="text-muted-foreground">{ss.chg != null ? `+${ss.chg.toFixed(2)}%` : ""}</span>
+                                                      {ss.is_zt && <span className="text-red-600">涨停</span>}
+                                                    </div>
+                                                    <div className="space-y-1 text-xs text-muted-foreground">
+                                                      {dims.map((d) => (
+                                                        <p key={d.key}>
+                                                          <span className="font-medium text-foreground">{d.label}：</span>
+                                                          {text(d.key)}
+                                                        </p>
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+<div className="divide-y divide-muted/50">
                                     {stocks.map((c) => {
                                       const s = c.stock || {};
                                       const isZt = !!s.is_zt;
                                       const role = sentRoleOverrides[s.code] ?? s.role ?? "跟风";
                                       const GAP: Record<string, string> = { "龙(高标)": "text-red-600 font-semibold", "龙": "text-red-600 font-semibold", "板块龙头": "text-orange-600 font-medium", "补涨龙": "text-amber-600 font-medium", "日内先锋": "text-blue-600 font-medium" };
                                       return (
-                                        <div key={`${ml}-${s.code}`} className="border rounded-md bg-card p-2.5">
+                                        <div key={`${ml}-${s.code}`} className="py-1.5">
                                           <div className="flex flex-wrap items-center gap-2">
                                             <select
                                               value={role}
