@@ -5182,6 +5182,7 @@ def get_auction_sector_strength(
     top_sectors: int = 15,
     top_stocks: int = 5,
     source: str = "ths_industry",
+    basket: str = "",
 ) -> dict:
     """竞价板块强度：按同花顺行业分组排名，并从最强板块挑可交易最强个股。
 
@@ -5190,12 +5191,20 @@ def get_auction_sector_strength(
         top_sectors: 返回最强板块数量
         top_stocks: 每个板块返回的个股数量
         source: 目前仅 'ths_industry'（同花顺行业）；预留扩展
+        basket: 备选池对照（备/新机会标注）。空=关闭；"1"/"auto"=自动取晚于 date 的最晚
+                basket_*.json；其余按 日期 或 路径 解析
     """
     try:
         from data.auction_sector_strength import sector_strength
 
+        basket_arg = None
+        if basket and basket.strip() not in ("1", "auto", "true"):
+            basket_arg = basket.strip()
+        elif basket:
+            basket_arg = True
         return sector_strength(
-            date=date, top_sectors=top_sectors, top_stocks=top_stocks, source=source
+            date=date, top_sectors=top_sectors, top_stocks=top_stocks,
+            source=source, basket=basket_arg,
         )
     except Exception as e:
         _log.warning("[sector-strength] FAILED: %s", e, exc_info=True)

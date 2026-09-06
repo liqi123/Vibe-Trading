@@ -392,9 +392,9 @@ export function AuctionBoard() {
       const date = d || selectedDate || dates[0]?.date;
       if (!date) { toast.warning("请先选择日期"); return; }
       const s = src || analysisSource;
-      // 最强行业 / 最强概念 共用 sector-strength 端点，source 区分口径
+      // 最强行业 / 最强概念 共用 sector-strength 端点，source 区分口径；basket 对照昨晚备选池标注 备/新机会
       const data = await api.tools.get<any>(
-        `/auction/sector-strength?date=${encodeURIComponent(date)}&top_sectors=15&top_stocks=5&source=${s}`
+        `/auction/sector-strength?date=${encodeURIComponent(date)}&top_sectors=15&top_stocks=5&source=${s}&basket=1`
       );
       if (data.error) { toast.error(`分析失败: ${data.error}`); return; }
       setSectorData(data.sectors || []);
@@ -491,6 +491,8 @@ export function AuctionBoard() {
         <div className="border rounded-lg bg-card p-3 text-xs text-muted-foreground leading-relaxed">
           按同花顺{groupLabel}分组。{groupLabel}强度分 = 均价涨幅45% + 上涨占比25% + 涨停开盘占比20% + 竞价金额10%（各分量在分组间归一加权）。
           个股取该{groupLabel}最强前 5（排除 ST，含涨停开盘——只看强度不限是否可交易），按 竞价涨幅 &gt; 量比 &gt; 金额 排序。点击{groupLabel}行展开查看。
+          <br />
+          标记对照昨晚备选池：<span className="text-blue-500 font-semibold">备</span>=池内覆盖板块；<span className="text-amber-500 font-semibold">新机会</span>=无覆盖且竞价强（涨停开盘≥3家，或红盘率≥70%且均涨≥2%且放量）。
         </div>
         <div className="border rounded-lg bg-card overflow-hidden">
           <table className="w-full text-sm">
@@ -505,6 +507,7 @@ export function AuctionBoard() {
                 <th className="px-3 py-2 text-right font-medium">涨停开盘</th>
                 <th className="px-3 py-2 text-right font-medium">竞价金额(万)</th>
                 <th className="px-3 py-2 text-right font-medium">量比</th>
+                <th className="px-3 py-2 text-center font-medium">标记</th>
               </tr>
             </thead>
             <tbody>
@@ -513,7 +516,9 @@ export function AuctionBoard() {
                 return (
                   <Fragment key={s.industry}>
                     <tr
-                      className="border-t hover:bg-muted/30 cursor-pointer transition-colors"
+                      className={`border-t hover:bg-muted/30 cursor-pointer transition-colors ${
+                        s.mark === "新机会" ? "bg-amber-50 dark:bg-amber-950/30" : ""
+                      }`}
                       onClick={() => setExpanded(isOpen ? null : s.industry)}
                     >
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
@@ -527,10 +532,19 @@ export function AuctionBoard() {
                       <td className="px-3 py-2 text-right font-medium text-amber-600">{s.limit_up_open_n}</td>
                       <td className="px-3 py-2 text-right">{s.total_amount_wan.toLocaleString()}</td>
                       <td className="px-3 py-2 text-right">{s.avg_vol_ratio.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-center">
+                        {s.mark === "新机会" && (
+                          <span className="inline-block px-1.5 py-0.5 rounded text-[11px] font-bold bg-amber-500 text-white">新机会</span>
+                        )}
+                        {s.mark === "备" && (
+                          <span className="inline-block px-1.5 py-0.5 rounded text-[11px] font-medium bg-blue-500/80 text-white">备</span>
+                        )}
+                        {!s.mark && <span className="text-muted-foreground/40 text-[11px]">—</span>}
+                      </td>
                     </tr>
                     {isOpen && (
                       <tr className="bg-muted/20">
-                        <td colSpan={9} className="px-6 py-3">
+                        <td colSpan={10} className="px-6 py-3">
                           <div className="text-xs text-muted-foreground mb-2">该{groupLabel}最强个股（Top {s.top_stocks.length}）</div>
                           <div className="overflow-x-auto">
                             <table className="w-full text-sm">
