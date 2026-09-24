@@ -1416,7 +1416,7 @@ export function ShortTermFlow() {
               }
             />
             <p className="text-xs text-muted-foreground">
-              竞价后四阶段规则验证资金态度与主线合力；AI 多源分析（豆包 + DeepSeek 综合）已内联在下方：
+              竞价后四阶段（阶段1·09:25 竞价结束 / 阶段2·09:35 / 阶段3·09:45 / 阶段4·10:00）由规则引擎 + 项目自有 LLM（DeepSeek）判定资金态度与主线合力。数据冻结：竞价价由「采集竞价」在 09:30 前落库，盘中各时点由快照录制冻结。
             </p>
             <AuctionSentiment date={date} />
           </div>

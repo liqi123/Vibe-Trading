@@ -49,6 +49,21 @@ interface Candidate {
   var_s?: number;
   regime?: number;
   adx_val?: number;
+  vwap?: number;
+  obv?: number;
+  peak?: number;
+  avg_dev?: number;
+  trend_label?: string;
+  signal_type?: string;
+  pullback_signal?: boolean;
+  breakout_signal?: boolean;
+  entry_price?: number;
+  ideal_entry?: number;
+  stop_loss?: number;
+  target1?: number;
+  target2?: number;
+  advice?: string;
+  distance_pct?: number;
 }
 
 interface Column {
@@ -682,6 +697,7 @@ export function DailyScan() {
   const [fibCandidates, setFibCandidates] = useState<Candidate[]>([]);
   const [v5Candidates, setV5Candidates] = useState<Candidate[]>([]);
   const [ictCandidates, setIctCandidates] = useState<Candidate[]>([]);
+  const [mainCostCandidates, setMainCostCandidates] = useState<Candidate[]>([]);
   const [sentHeader, setSentHeader] = useState<any>(null);
   const [sentCandidates, setSentCandidates] = useState<any[]>([]);
   const [sentCycle, setSentCycle] = useState<string>("");
@@ -741,7 +757,7 @@ export function DailyScan() {
   const [rankLoading, setRankLoading] = useState(false);
   const [rankResult, setRankResult] = useState<string>("");
   const [selectedStock, setSelectedStock] = useState<Candidate | null>(null);
-  const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "sentiment">("sentiment");
+  const [activeStrategy, setActiveStrategy] = useState<"fibonacci" | "v5" | "ict" | "main_cost" | "sentiment">("sentiment");
   const [decisionNotes, setDecisionNotes] = useState("");
   const [sentAi, setSentAi] = useState<Record<number, { phase: string; analysis: string; suggestion: string; stock?: { code: string; name: string; type: string; reason: string; support?: string; pressure?: string; entry?: string; entry_high?: string; exit?: string; exit_high?: string; target?: string } } | null>>({});
   const [sentAiLoading, setSentAiLoading] = useState<number | null>(null);
@@ -869,24 +885,28 @@ export function DailyScan() {
     { key: "fibonacci" as const, label: "斐波那契", icon: Search, count: fibCandidates.length },
     { key: "v5" as const, label: "V5趋势", icon: TrendingUp, count: v5Candidates.length },
     { key: "ict" as const, label: "ICT/SMC", icon: BarChart3, count: ictCandidates.length },
+    { key: "main_cost" as const, label: "枯荣线", icon: CandleIcon, count: mainCostCandidates.length },
     { key: "sentiment" as const, label: "情绪选股", icon: Activity, count: sentCandidates.length },
   ];
 
   const fetchScanResults = async () => {
     try {
-      const [fibData, v5Data, ictData, sentData] = await Promise.all([
+      const [fibData, v5Data, ictData, mainCostData, sentData] = await Promise.all([
         api.tools.get<any>("/scan-results?strategy=fibonacci"),
         api.tools.get<any>("/scan-results?strategy=v5"),
         api.tools.get<any>("/scan-results?strategy=ict"),
+        api.tools.get<any>("/main-cost-screening"),
         api.tools.get<any>("/scan-results?strategy=sentiment_leader"),
       ]);
       const fib = fibData?.candidates || [];
       const v5 = v5Data?.candidates || [];
       const ict = ictData?.candidates || [];
+      const mainCost = mainCostData?.candidates || [];
       const sent = sentData?.candidates || [];
       setFibCandidates(fib);
       setV5Candidates(v5);
       setIctCandidates(ict);
+      setMainCostCandidates(mainCost);
       setSentCandidates(sent);
       setSentHeader(sentData?.mainlines && sentData.mainlines.length ? sentData : null);
       setSentCycle(sentData?.cycle || "");
@@ -895,15 +915,27 @@ export function DailyScan() {
       setSentRoleOverrides({});
       setDecisionNotes(sentData?.decision || "");
       setSentAnalysis(sentData?.analysis || null);
+      // 恢复已保存的 AI 分析结果（所有 step）
+      if (sentData?.ai_analysis) {
+        const restored: Record<number, any> = {};
+        for (const [k, v] of Object.entries(sentData.ai_analysis)) {
+          const stepNum = parseInt(k, 10);
+          if (stepNum >= 1 && stepNum <= 4 && v && typeof v === "object") {
+            restored[stepNum] = v;
+          }
+        }
+        setSentAi(restored);
+      }
       const savedWinner = sentData?.analysis?.mainlines?.["结论"]?.winner;
       setRankResult(savedWinner?.manual || savedWinner?.ai || savedWinner?.rule || "");
-      setNoCache(fib.length === 0 && v5.length === 0 && ict.length === 0 && sent.length === 0);
+      setNoCache(fib.length === 0 && v5.length === 0 && ict.length === 0 && mainCost.length === 0 && sent.length === 0);
       setActiveStrategy((cur) => {
-        const counts: Record<string, number> = { fibonacci: fib.length, v5: v5.length, ict: ict.length, sentiment: sent.length };
+        const counts: Record<string, number> = { fibonacci: fib.length, v5: v5.length, ict: ict.length, main_cost: mainCost.length, sentiment: sent.length };
         if (counts[cur] && counts[cur] > 0) return cur;
         if (fib.length) return "fibonacci";
         if (v5.length) return "v5";
         if (ict.length) return "ict";
+        if (mainCost.length) return "main_cost";
         if (sent.length) return "sentiment";
         return "fibonacci";
       });
@@ -1115,7 +1147,7 @@ export function DailyScan() {
       {noCache && !running && !loading && (
         <div className="border rounded-lg p-8 bg-card">
           <h2 className="text-lg font-semibold mb-4 text-center">今日尚无选股结果</h2>
-          <div className="grid gap-3 md:grid-cols-4 max-w-3xl mx-auto">
+          <div className="grid gap-3 md:grid-cols-5 max-w-4xl mx-auto">
             <button
               onClick={() => handleRunScan("fibonacci")}
               className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
@@ -1147,6 +1179,16 @@ export function DailyScan() {
               </div>
             </button>
             <button
+              onClick={() => handleRunScan("main_cost")}
+              className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
+            >
+              <CandleIcon className="h-5 w-5 text-primary" />
+              <div>
+                <p className="font-medium">枯荣线选股</p>
+                <p className="text-xs text-muted-foreground">约需2-3分钟</p>
+              </div>
+            </button>
+            <button
               onClick={() => handleRunScan("sentiment_leader")}
               className="flex items-center gap-3 p-4 border rounded-lg hover:bg-muted transition-colors text-left"
             >
@@ -1165,7 +1207,7 @@ export function DailyScan() {
           <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2">
             <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full" />
             <span className="font-semibold text-sm">
-              {running === "fibonacci" ? "斐波那契" : running === "ict" ? "ICT/SMC" : running === "v5" ? "V5趋势" : running === "sentiment_leader" ? "短线情绪" : ""}选股执行中...
+              {running === "fibonacci" ? "斐波那契" : running === "ict" ? "ICT/SMC" : running === "v5" ? "V5趋势" : running === "main_cost" ? "枯荣线" : running === "sentiment_leader" ? "短线情绪" : ""}选股执行中...
             </span>
           </div>
           <pre className="p-4 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-[400px] text-muted-foreground">
@@ -1198,9 +1240,9 @@ export function DailyScan() {
         </div>
         <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between">
           <h3 className="text-sm font-medium">
-            {activeStrategy === "fibonacci" ? "斐波那契选股结果" : activeStrategy === "v5" ? "V5趋势选股结果" : activeStrategy === "sentiment" ? "短线情绪选股结果" : "ICT/SMC选股结果"}
+            {activeStrategy === "fibonacci" ? "斐波那契选股结果" : activeStrategy === "v5" ? "V5趋势选股结果" : activeStrategy === "main_cost" ? "枯荣线选股结果" : activeStrategy === "sentiment" ? "短线情绪选股结果" : "ICT/SMC选股结果"}
             {(() => {
-              const n = activeStrategy === "fibonacci" ? fibCandidates.length : activeStrategy === "v5" ? v5Candidates.length : activeStrategy === "sentiment" ? sentCandidates.length : ictCandidates.length;
+              const n = activeStrategy === "fibonacci" ? fibCandidates.length : activeStrategy === "v5" ? v5Candidates.length : activeStrategy === "main_cost" ? mainCostCandidates.length : activeStrategy === "sentiment" ? sentCandidates.length : ictCandidates.length;
               return n > 0 ? `（${n} 只）` : "";
             })()}
           </h3>
@@ -1281,6 +1323,28 @@ export function DailyScan() {
                 onBuy={c => handleBuy(c.code, c.name, "ict", { price: c.price, score: c.score, structure: (c as any).structure, sweep_level: (c as any).sweep_level })}
                 onSelect={setSelectedStock}
                 emptyText="暂无ICT/SMC选股结果"
+              />
+            )}
+            {activeStrategy === "main_cost" && (
+              <StrategyTable
+                candidates={mainCostCandidates}
+                columns={[
+                  { key: "code", label: "代码", render: c => <span className="font-mono cursor-pointer text-primary hover:underline">{c.code}</span> },
+                  { key: "name", label: "名称", render: c => c.name },
+                  { key: "price", label: "现价", align: "right", render: c => c.price.toFixed(2) },
+                  { key: "signal_type", label: "信号", render: c => <span className={c.signal_type === "回踩低吸" ? "text-green-600 font-bold" : c.signal_type === "突破起爆" ? "text-red-600 font-bold" : "text-muted-foreground"}>{c.signal_type || "-"}</span> },
+                  { key: "entry_price", label: "入场价", align: "right", render: c => <span className="text-primary font-medium">{c.entry_price?.toFixed(2) ?? "-"}</span> },
+                  { key: "stop_loss", label: "止损", align: "right", render: c => <span className="text-red-500">{c.stop_loss?.toFixed(2) ?? "-"}</span> },
+                  { key: "target1", label: "目标1", align: "right", render: c => <span className="text-green-600">{c.target1?.toFixed(2) ?? "-"}</span> },
+                  { key: "rsi", label: "RSI", align: "right", render: c => <span className={(c.rsi ?? 50) < 30 ? "text-green-600" : (c.rsi ?? 50) > 70 ? "text-red-600" : ""}>{c.rsi?.toFixed(0) ?? "-"}</span> },
+                  { key: "advice", label: "操作建议", render: c => <span className="text-xs text-muted-foreground">{c.advice || "-"}</span> },
+                ]}
+                klineData={klineData}
+                expandedKline={expandedKline}
+                onKline={fetchKline}
+                onBuy={c => handleBuy(c.code, c.name, "main_cost", { price: c.price, score: c.score, entry_price: c.entry_price, stop_loss: c.stop_loss, target1: c.target1 })}
+                onSelect={setSelectedStock}
+                emptyText="暂无枯荣线选股结果"
               />
             )}
             {activeStrategy === "sentiment" && (

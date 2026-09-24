@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Calculator, ArrowRight, Search } from "lucide-react";
+import { Calculator, ArrowRight, Search, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 
 function RunawayPriceCalc() {
@@ -247,6 +247,144 @@ function PriceRangeCalc() {
   );
 }
 
+interface MainCostResult {
+  vwap: number | null;
+  obv: number | null;
+  peak: number | null;
+  large_order: number | null;
+  avg_dev?: number;
+}
+
+function MainCostCalc() {
+  const [code, setCode] = useState("");
+  const [date, setDate] = useState("");
+  const [window, setWindow] = useState("20");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{ price: number; costs: MainCostResult } | null>(null);
+  const [error, setError] = useState("");
+
+  const handleCalc = async () => {
+    if (!code.trim()) return;
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const params = new URLSearchParams({ code: code.trim().toLowerCase(), window });
+      if (date) params.set("date", date);
+      const data = await api.tools.get<{ price: number; costs: MainCostResult }>(`/main-cost?${params}`);
+      setResult(data);
+    } catch (e: any) {
+      setError(e?.detail || e?.message || "查询失败");
+    }
+    setLoading(false);
+  };
+
+  const price = result?.price || 0;
+  const costs = result?.costs;
+
+  const methods: { label: string; key: keyof MainCostResult }[] = [
+    { label: "VWAP筹码成本", key: "vwap" },
+    { label: "OBV加权成本", key: "obv" },
+    { label: "峰值换手成本", key: "peak" },
+    { label: "大单近似成本", key: "large_order" },
+  ];
+
+  const getSignal = (dev: number) => {
+    if (dev >= -3 && dev <= 5) return { text: "看涨", color: "text-green-600" };
+    if (dev < -10) return { text: "主力深套", color: "text-red-600" };
+    if (dev < -3) return { text: "低于成本", color: "text-yellow-600" };
+    if (dev > 15) return { text: "远离风险", color: "text-red-600" };
+    return { text: "高于成本", color: "text-yellow-600" };
+  };
+
+  return (
+    <div className="border rounded-lg p-5 bg-card space-y-4">
+      <h3 className="font-semibold flex items-center gap-2">
+        <Calculator className="h-4 w-4 text-cyan-500" />
+        主力成本计算
+      </h3>
+      <p className="text-xs text-muted-foreground">四种方法估算主力持仓成本，判断价格相对成本位置</p>
+
+      <div className="flex gap-2 items-end">
+        <div className="flex-1">
+          <label className="text-xs text-muted-foreground">股票代码</label>
+          <input
+            value={code}
+            onChange={e => setCode(e.target.value)}
+            placeholder="如 sh600519 或600519"
+            onKeyDown={e => e.key === "Enter" && handleCalc()}
+            className="w-full mt-1 px-3 py-1.5 text-sm border rounded bg-background outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+        <div className="flex-1">
+          <label className="text-xs text-muted-foreground">日期（可选）</label>
+          <input
+            type="date"
+            value={date}
+            onChange={e => setDate(e.target.value)}
+            className="w-full mt-1 px-3 py-1.5 text-sm border rounded bg-background outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+        <div className="w-20">
+          <label className="text-xs text-muted-foreground">窗口</label>
+          <input
+            value={window}
+            onChange={e => setWindow(e.target.value)}
+            className="w-full mt-1 px-3 py-1.5 text-sm border rounded bg-background outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+        <button
+          onClick={handleCalc}
+          disabled={!code.trim() || loading}
+          className="flex items-center gap-1 px-3 py-1.5 text-sm border rounded bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+        >
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+          {loading ? "计算中..." : "计算"}
+        </button>
+      </div>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {costs && price > 0 && (
+        <div className="pt-2 border-t space-y-2">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs text-muted-foreground">现价</span>
+            <span className="text-lg font-bold">{price.toFixed(2)}</span>
+          </div>
+          {methods.map(({ label, key }) => {
+            const val = costs[key];
+            if (!val || val <= 0) return null;
+            const dev = ((price - val) / val) * 100;
+            const signal = getSignal(dev);
+            return (
+              <div key={key} className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">{label}</span>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono font-medium">{val.toFixed(2)}</span>
+                  <span className={`font-mono text-xs ${dev >= 0 ? "text-green-600" : "text-red-600"}`}>
+                    {dev >= 0 ? "+" : ""}{dev.toFixed(2)}%
+                  </span>
+                  <span className={`text-xs font-medium ${signal.color}`}>{signal.text}</span>
+                </div>
+              </div>
+            );
+          })}
+          {costs.avg_dev !== undefined && (
+            <div className="pt-2 border-t">
+              <div className="flex items-center justify-between text-sm font-bold">
+                <span className="text-muted-foreground">综合偏离</span>
+                <span className={costs.avg_dev >= -3 && costs.avg_dev <= 5 ? "text-green-600" : "text-yellow-600"}>
+                  {costs.avg_dev >= 0 ? "+" : ""}{costs.avg_dev.toFixed(2)}%
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CalcTools() {
   return (
     <div className="p-6 space-y-6">
@@ -258,6 +396,7 @@ export function CalcTools() {
         <RunawayPriceCalc />
         <FibonacciCalc />
         <PriceRangeCalc />
+        <MainCostCalc />
       </div>
     </div>
   );

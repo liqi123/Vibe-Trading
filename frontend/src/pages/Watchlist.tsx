@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw, Trash2, Edit2, Check, X, CandlestickChart as CandleIcon, Network as NetworkIcon, AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useModalStore } from "../stores/modal";
@@ -28,6 +28,30 @@ interface WatchlistItem {
   concepts?: string[];
   auction_change_pct?: number;
   auction_vol_ratio?: number | null;
+  // 候选池专用：竞价预期
+  auction_expectation?: string;
+  // 打分模型（四步法）
+  score?: {
+    scenario: string;
+    r_base: number;
+    expected_price: number;
+    expected_price_final: number;
+    r_sector: number;
+    sector_status: string;
+    r_market: number;
+    market_status: string;
+    price_score: number;
+    price_deviation: number;
+    price_judgement: string;
+    volume_score: number;
+    volume_pct: number;
+    volume_judgement: string;
+    context_score: number;
+    context_desc: string;
+    total_score: number;
+    verdict: string;
+    action: string;
+  } | null;
 }
 
 
@@ -57,11 +81,43 @@ export function Watchlist() {
   const [editValues, setEditValues] = useState({ cost_price: "" });
   const [editingNoteCode, setEditingNoteCode] = useState<string | null>(null);
   const [editNote, setEditNote] = useState("");
+  const editNoteRef = useRef("");
   const openStock = useModalStore((s) => s.open);
   const { t } = useTranslation();
   const [smcStock, setSmcStock] = useState<{ code: string; name: string } | null>(null);
   const [smcData, setSmcData] = useState<any>(null);
   const [smcLoading, setSmcLoading] = useState(false);
+  // 打分详情弹窗
+  const [scoreDetail, setScoreDetail] = useState<{ code: string; name: string; score: NonNullable<WatchlistItem["score"]> } | null>(null);
+
+  const verdictCls = (verdict: string) =>
+    verdict === "超预期" ? "text-red-600" :
+    verdict === "符合预期" ? "text-green-600" :
+    verdict === "低于预期" ? "text-yellow-600" :
+    "text-gray-600";
+
+  const renderScoreCell = (item: WatchlistItem) =>
+    item.score ? (
+      <span
+        className={`text-xs font-medium cursor-pointer underline decoration-dotted underline-offset-2 hover:opacity-70 ${verdictCls(item.score.verdict)}`}
+        onClick={() => setScoreDetail({ code: item.code, name: item.name, score: item.score! })}
+        title="点击查看打分细节"
+      >
+        {item.score.verdict}({item.score.total_score})
+      </span>
+    ) : (
+      "-"
+    );
+
+  // 竞价预期计算（与集合竞价看板一致）
+  const calcExpectation = (changePct: number, volRatio: number | null) => {
+    if (volRatio == null) return null;
+    if (changePct > 3 && volRatio >= 1.5) return { type: "超预期", color: "text-red-600" };
+    if (changePct >= -1 && changePct <= 1 && volRatio >= 0.8 && volRatio <= 1.2) return { type: "符合预期", color: "text-green-600" };
+    if (changePct < -1 || volRatio < 0.7) return { type: "不及预期", color: "text-yellow-600" };
+    return { type: "正常", color: "text-muted-foreground" };
+  };
+  void calcExpectation; // 预留：Watchlist 暂未接入，保留实现供后续使用
 
   const openSMC = async (code: string, name: string) => {
     setSmcStock({ code, name });
@@ -78,7 +134,7 @@ export function Watchlist() {
   const [czscStock, setCzscStock] = useState<{ code: string; name: string } | null>(null);
   const [czscData, setCzscData] = useState<any>(null);
   const [czscLoading, setCzscLoading] = useState(false);
-  const [addCategory, setAddCategory] = useState<"observation" | "holding">("observation");
+  const [addCategory, setAddCategory] = useState<"observation" | "holding" | "candidate">("observation");
 
   const openCzsc = async (code: string, name: string) => {
     setCzscStock({ code, name });
@@ -103,6 +159,11 @@ export function Watchlist() {
           const priceInfo = priceData.prices?.[p.code]
             || priceData.prices?.[p.code.startsWith("6") ? "sh" + p.code : "sz" + p.code]
             || {};
+          // 从 note 中提取竞价预期
+          const note = p.note || "";
+          const expectationMatch = note.match(/\[竞价预期\]([^\n]*)/);
+          const auctionExpectation = expectationMatch ? expectationMatch[1].trim() : "";
+          const cleanNote = note.replace(/\[竞价预期\][^\n]*/g, "").trim();
           return {
             code: p.code,
             name: p.name || priceInfo.name || "",
@@ -114,18 +175,19 @@ export function Watchlist() {
             ma20: p.ma20,
             support: p.support,
             resistance: p.resistance,
-            note: p.note || "",
+            note: cleanNote,
             category: p.category || "holding",
+            auction_expectation: auctionExpectation,
           };
         });
-        // 观察股：补充竞价数据 + 同花顺行业
-        const obsCodes = enriched.filter((i) => i.category === "observation").map((i) => i.code);
+        // 观察股 + 候选池 + 持仓股：补充竞价数据 + 同花顺行业
+        const obsCodes = enriched.filter((i) => i.category === "observation" || i.category === "candidate" || i.category === "holding").map((i) => i.code);
         if (obsCodes.length > 0) {
           try {
             const aData = await api.tools.get<any>(`/watchlist-auction?codes=${obsCodes.join(",")}`);
             const a = aData.auction || {};
             enriched = enriched.map((it: WatchlistItem) => {
-              if (it.category !== "observation") return it;
+              if (it.category !== "observation" && it.category !== "candidate" && it.category !== "holding") return it;
               const av = a[it.code] || {};
               const auctionPrice = av.auction_price || 0;
               const prevClose = av.prev_close || 0;
@@ -145,6 +207,7 @@ export function Watchlist() {
                 concepts: av.concepts || [],
                 auction_change_pct: chg,
                 auction_vol_ratio: ratio,
+                score: av.score || null,
               };
             });
           } catch (e) { /* ignore */ }
@@ -229,18 +292,21 @@ export function Watchlist() {
   const startEditNote = (item: WatchlistItem) => {
     setEditingNoteCode(item.code);
     setEditNote(item.note || "");
+    editNoteRef.current = item.note || "";
   };
 
   const cancelEditNote = () => {
     setEditingNoteCode(null);
     setEditNote("");
+    editNoteRef.current = "";
   };
 
   const saveNote = async (code: string) => {
+    const note = editNoteRef.current.trim();
     try {
       await api.tools.post<any>("/expectations/update-prices", {
         code,
-        note: editNote.trim(),
+        note,
       });
       setEditingNoteCode(null);
       fetchData();
@@ -254,9 +320,10 @@ export function Watchlist() {
   }, []);
 
   const observationItems = items.filter((i) => i.category === "observation");
-  const holdingItems = items.filter((i) => i.category !== "observation");
+  const candidateItems = items.filter((i) => i.category === "candidate");
+  const holdingItems = items.filter((i) => i.category !== "observation" && i.category !== "candidate");
 
-  const handleAdd = (category: "observation" | "holding") => {
+  const handleAdd = (category: "observation" | "holding" | "candidate") => {
     setAddCategory(category);
     setNewCode("");
     setSearchResults([]);
@@ -293,9 +360,9 @@ export function Watchlist() {
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
                 <th className="px-4 py-3 text-right font-medium">成本价</th>
                 <th className="px-4 py-3 text-right font-medium">盈亏</th>
-                <th className="px-4 py-3 text-right font-medium">MA5</th>
-                <th className="px-4 py-3 text-right font-medium">MA10</th>
-                <th className="px-4 py-3 text-right font-medium">MA20</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionChange")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionVol")}</th>
+                <th className="px-4 py-3 text-right font-medium">打分</th>
                 <th className="px-4 py-3 text-left font-medium">备注</th>
                 <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
               </tr>
@@ -332,16 +399,22 @@ export function Watchlist() {
                     <td className={`px-4 py-3 text-right font-medium ${pnlPct == null ? "text-muted-foreground" : pnlPct >= 0 ? "text-red-600" : "text-green-600"}`}>
                       {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "-"}
                     </td>
-                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma5?.toFixed(2) ?? "-"}</td>
-                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma10?.toFixed(2) ?? "-"}</td>
-                    <td className="px-4 py-3 text-right text-muted-foreground">{item.ma20?.toFixed(2) ?? "-"}</td>
+                    <td className={`px-4 py-3 text-right font-medium ${(item.auction_change_pct || 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.auction_change_pct ? `${item.auction_change_pct >= 0 ? "+" : ""}${item.auction_change_pct.toFixed(2)}%` : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {item.today_vol ? item.today_vol.toLocaleString() : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {renderScoreCell(item)}
+                    </td>
                     <td className="px-4 py-3 text-left">
                       {editingNoteCode === item.code ? (
                         <input
                           autoFocus
                           type="text"
                           value={editNote}
-                          onChange={(e) => setEditNote(e.target.value)}
+                          onChange={(e) => { setEditNote(e.target.value); editNoteRef.current = e.target.value; }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") saveNote(item.code);
                             if (e.key === "Escape") cancelEditNote();
@@ -459,6 +532,7 @@ export function Watchlist() {
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionChange")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionVol")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionRatio")}</th>
+                <th className="px-4 py-3 text-right font-medium">打分</th>
                 <th className="px-4 py-3 text-left font-medium">{t("watchlist.thIndustry")}</th>
                 <th className="px-4 py-3 text-left font-medium">{t("watchlist.thConcept")}</th>
                 <th className="px-4 py-3 text-left font-medium">备注</th>
@@ -487,6 +561,9 @@ export function Watchlist() {
                     <td className="px-4 py-3 text-right font-mono">
                       {item.auction_vol_ratio != null ? item.auction_vol_ratio.toFixed(2) : "-"}
                     </td>
+                    <td className="px-4 py-3 text-right">
+                      {renderScoreCell(item)}
+                    </td>
                     <td className="px-4 py-3">{item.industry || "-"}</td>
                     <td className="px-4 py-3 max-w-[280px]">
                       {item.concepts && item.concepts.length > 0 ? (
@@ -507,7 +584,140 @@ export function Watchlist() {
                           autoFocus
                           type="text"
                           value={editNote}
-                          onChange={(e) => setEditNote(e.target.value)}
+                          onChange={(e) => { setEditNote(e.target.value); editNoteRef.current = e.target.value; }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveNote(item.code);
+                            if (e.key === "Escape") cancelEditNote();
+                          }}
+                          onBlur={() => saveNote(item.code)}
+                          className="w-48 px-2 py-1 text-sm border rounded bg-background"
+                          placeholder="输入备注"
+                        />
+                      ) : (
+                        <span
+                          className={`cursor-pointer ${item.note ? "" : "text-muted-foreground"}`}
+                          onClick={() => startEditNote(item)}
+                          title="点击编辑备注"
+                        >
+                          {item.note || "添加备注"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => openSMC(item.code, item.name)}
+                          className="p-1 text-muted-foreground hover:text-purple-600 rounded transition-colors"
+                          title="SMC结构图"
+                        >
+                          <CandleIcon className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => openCzsc(item.code, item.name)}
+                          className="p-1 text-muted-foreground hover:text-indigo-600 rounded transition-colors"
+                          title="缠论结构图（笔/中枢/买卖点）"
+                        >
+                          <NetworkIcon className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => removeStock(item.code)}
+                          className="p-1 text-muted-foreground hover:text-red-600 rounded transition-colors"
+                          title={t("watchlist.delete")}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderCandidateTable = (title: string, rows: WatchlistItem[]) => (
+    <div className="border rounded-lg bg-card overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/30">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-semibold">{title}</h2>
+          <span className="text-xs text-muted-foreground">({rows.length})</span>
+        </div>
+        <button
+          onClick={() => handleAdd("candidate")}
+          className="flex items-center gap-1.5 px-2.5 py-1 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+          {t("watchlist.add")}
+        </button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="p-8 text-center text-muted-foreground">
+          候选池为空
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/40 text-xs text-muted-foreground">
+              <tr>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thCode")}</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thName")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionChange")}</th>
+                <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionVol")}</th>
+                <th className="px-4 py-3 text-right font-medium">打分</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thIndustry")}</th>
+                <th className="px-4 py-3 text-left font-medium">{t("watchlist.thConcept")}</th>
+                <th className="px-4 py-3 text-left font-medium">备注</th>
+                <th className="px-4 py-3 text-center font-medium">{t("watchlist.thAction")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((item) => {
+                const aucChg = item.auction_change_pct || 0;
+                return (
+                  <tr key={item.code} className="border-t hover:bg-muted/30 transition-colors">
+                    <td className="px-4 py-3 font-mono cursor-pointer hover:text-primary" onClick={() => openStock(item.code)}>{item.code}</td>
+                    <td className="px-4 py-3">{item.name}</td>
+                    <td className={`px-4 py-3 text-right font-medium ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.price.toFixed(2)}
+                    </td>
+                    <td className={`px-4 py-3 text-right ${item.change_pct >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.change_pct >= 0 ? "+" : ""}{item.change_pct.toFixed(2)}%
+                    </td>
+                    <td className={`px-4 py-3 text-right font-medium ${aucChg >= 0 ? "text-red-600" : "text-green-600"}`}>
+                      {item.auction_change_pct ? (aucChg >= 0 ? "+" : "") + aucChg.toFixed(2) + "%" : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono">
+                      {item.today_vol ? item.today_vol.toLocaleString() : "-"}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {renderScoreCell(item)}
+                    </td>
+                    <td className="px-4 py-3">{item.industry || "-"}</td>
+                    <td className="px-4 py-3 max-w-[280px]">
+                      {item.concepts && item.concepts.length > 0 ? (
+                        <span
+                          className="text-xs text-foreground/80 leading-relaxed"
+                          title={item.concepts.join("、")}
+                        >
+                          {item.concepts.slice(0, 4).join("、")}
+                          {item.concepts.length > 4 ? ` +${item.concepts.length - 4}` : ""}
+                        </span>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-left">
+                      {editingNoteCode === item.code ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={editNote}
+                          onChange={(e) => { setEditNote(e.target.value); editNoteRef.current = e.target.value; }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") saveNote(item.code);
                             if (e.key === "Escape") cancelEditNote();
@@ -588,6 +798,7 @@ export function Watchlist() {
       </div>
 
       {renderObservationTable(t("watchlist.observationTitle"), observationItems)}
+      {renderCandidateTable("候选池", candidateItems)}
       {renderStockTable(t("watchlist.holdingTitle"), "holding", holdingItems)}
 
       {/* 添加自选股弹窗 */}
@@ -595,6 +806,26 @@ export function Watchlist() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddModal(false)}>
           <div className="bg-card rounded-lg p-6 w-96 shadow-lg" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">{t("watchlist.addStockTitle")}</h3>
+            <div className="flex gap-2 mb-3">
+              <button
+                onClick={() => setAddCategory("observation")}
+                className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${addCategory === "observation" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+              >
+                观察股
+              </button>
+              <button
+                onClick={() => setAddCategory("candidate")}
+                className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${addCategory === "candidate" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+              >
+                候选池
+              </button>
+              <button
+                onClick={() => setAddCategory("holding")}
+                className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${addCategory === "holding" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+              >
+                持仓股
+              </button>
+            </div>
             <input
               autoFocus
               value={newCode}
@@ -849,6 +1080,135 @@ export function Watchlist() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 打分细节弹窗 */}
+      {scoreDetail && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setScoreDetail(null)}>
+          <div className="bg-card rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold">{scoreDetail.name} ({scoreDetail.code})</h3>
+                <p className="text-sm text-muted-foreground">打分细节 · 四步法</p>
+              </div>
+              <button onClick={() => setScoreDetail(null)} className="p-1 hover:bg-muted rounded">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-5 text-sm">
+              {/* 总分 */}
+              <div className="flex items-center justify-between p-4 rounded-lg border bg-muted/30">
+                <div>
+                  <div className="text-xs text-muted-foreground mb-1">最终评价</div>
+                  <div className={`text-xl font-bold ${verdictCls(scoreDetail.score.verdict)}`}>
+                    {scoreDetail.score.verdict}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">{scoreDetail.score.action}</div>
+                </div>
+                <div className="text-right">
+                  <span className="text-3xl font-bold">{scoreDetail.score.total_score}</span>
+                  <span className="text-sm text-muted-foreground"> / 100</span>
+                </div>
+              </div>
+
+              {/* 第一步：剧本分类 */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium">第一步 · 剧本分类</span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary font-mono">
+                    r_base = {scoreDetail.score.r_base >= 0 ? "+" : ""}{scoreDetail.score.r_base}
+                  </span>
+                </div>
+                <div className="text-muted-foreground">{scoreDetail.score.scenario}</div>
+              </div>
+
+              {/* 第二步：基准预期价 */}
+              <div className="rounded-lg border p-4">
+                <div className="font-medium mb-2">第二步 · 基准预期价</div>
+                <div className="font-mono text-xs bg-muted/40 rounded px-3 py-2">
+                  E = 昨收 × (1 + r_base/100)
+                </div>
+                <div className="mt-2 text-muted-foreground">
+                  预期价 <strong className="font-mono text-foreground">{scoreDetail.score.expected_price}</strong>
+                </div>
+              </div>
+
+              {/* 第三步：板块 + 大盘修正 */}
+              <div className="rounded-lg border p-4">
+                <div className="font-medium mb-2">第三步 · 板块 + 大盘修正</div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span>板块状态</span>
+                    <span className="text-right">
+                      {scoreDetail.score.sector_status}
+                      <span className="ml-2 font-mono text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        r_sector = {scoreDetail.score.r_sector >= 0 ? "+" : ""}{scoreDetail.score.r_sector}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>大盘状态</span>
+                    <span className="text-right">
+                      {scoreDetail.score.market_status}
+                      <span className="ml-2 font-mono text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        r_market = {scoreDetail.score.r_market >= 0 ? "+" : ""}{scoreDetail.score.r_market}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">
+                    <span>修正后预期价</span>
+                    <strong className="font-mono text-foreground text-sm">{scoreDetail.score.expected_price_final}</strong>
+                  </div>
+                </div>
+              </div>
+
+              {/* 第四步：实际竞价评分 */}
+              <div className="rounded-lg border p-4">
+                <div className="font-medium mb-3">第四步 · 实际竞价评分</div>
+                <div className="space-y-3">
+                  {/* 价格 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-muted-foreground">价格（40分）</span>
+                      <span className="font-mono text-sm font-medium">{scoreDetail.score.price_score}/40</span>
+                    </div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-blue-500 rounded-full" style={{ width: `${(scoreDetail.score.price_score / 40) * 100}%` }} />
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      偏离 {scoreDetail.score.price_deviation}% · {scoreDetail.score.price_judgement}
+                    </div>
+                  </div>
+                  {/* 量能 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-muted-foreground">量能（30分）</span>
+                      <span className="font-mono text-sm font-medium">{scoreDetail.score.volume_score}/30</span>
+                    </div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-amber-500 rounded-full" style={{ width: `${(scoreDetail.score.volume_score / 30) * 100}%` }} />
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      量比 {scoreDetail.score.volume_pct}% · {scoreDetail.score.volume_judgement}
+                    </div>
+                  </div>
+                  {/* 情绪 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs text-muted-foreground">情绪（30分）</span>
+                      <span className="font-mono text-sm font-medium">{scoreDetail.score.context_score}/30</span>
+                    </div>
+                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-purple-500 rounded-full" style={{ width: `${(scoreDetail.score.context_score / 30) * 100}%` }} />
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {scoreDetail.score.context_desc}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

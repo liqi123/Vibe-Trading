@@ -21,10 +21,12 @@ export function MarketLadder() {
   const [summary, setSummary] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [view, setView] = useState<"board" | "concept">("board");
 
   const fetchData = async (refetch = false) => {
     setLoading(true);
+    setError("");
     try {
       const url = refetch ? "/market/ladder?refetch=1" : "/market/ladder";
       const data = await api.tools.get<any>(url);
@@ -34,7 +36,9 @@ export function MarketLadder() {
       setStats(data.stats || null);
       setSummary(data.summary || "");
       setUpdatedAt(data.cached_at || "");
-    } catch (e) { /* ignore */ }
+    } catch (e: any) {
+      setError(e?.message || "获取数据失败，请稍后重试");
+    }
     finally { setLoading(false); }
   };
 
@@ -117,12 +121,17 @@ export function MarketLadder() {
             disabled={loading}
             className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
-            <DownloadCloud className="h-4 w-4" />
+            <DownloadCloud className={`h-4 w-4 ${loading ? "animate-bounce" : ""}`} />
             重新获取
           </button>
         </div>
       </div>
 
+      {error && (
+        <div className="px-4 py-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md">
+          {error}
+        </div>
+      )}
       {summary && <div className="text-sm text-muted-foreground">{summary}</div>}
       {updatedAt && (
         <div className="text-xs text-muted-foreground">

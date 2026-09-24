@@ -57,14 +57,17 @@ export function AuctionBoard() {
     prev_limitup: any[];
     today_limitup: any[];
     both_limitup: any[];
+    yizi_leaders: any[];
+    non_limitup_surprise: any[];
     date1: string;
     date2: string;
     prev_count: number;
     today_count: number;
     both_count: number;
+    non_limitup_surprise_count: number;
   } | null>(null);
   const [limitUpLoading, setLimitUpLoading] = useState(false);
-  const [limitUpSubTab, setLimitUpSubTab] = useState<"both" | "yesterday" | "today">("both");
+  const [limitUpSubTab, setLimitUpSubTab] = useState<"both" | "yesterday" | "today" | "yizi">("both");
   const [compareData, setCompareData] = useState<{ date1: string; date2: string; gainers: CompareStock[]; losers: CompareStock[]; increase: number; decrease: number; total: number } | null>(null);
   const [expectStocks, setExpectStocks] = useState<ExpectStock[]>([]);
   const [expectItems, setExpectItems] = useState<ExpectAuctionItem[]>([]);
@@ -664,6 +667,9 @@ export function AuctionBoard() {
           black: "bg-zinc-900 text-zinc-100 border-zinc-700",
         };
         const badgeCls = colorMap[combo.color] || colorMap.gray;
+        const pjColor = biz.price_level === "超预期" ? "text-red-600"
+          : biz.price_level === "不及预期" ? "text-green-600"
+          : "text-muted-foreground/70";
         return (
           <>
             <td className="px-3 py-2 text-center font-mono">{biz.consec_boards > 0 ? biz.consec_boards : "-"}</td>
@@ -692,7 +698,10 @@ export function AuctionBoard() {
                   {combo.combo} {combo.label}
                 </span>
               ) : <span className="text-muted-foreground text-xs">—</span>}
-              <span className="block text-[10px] text-muted-foreground/70">{biz.price_level}</span>
+              <span className={`block text-[10px] ${pjColor}`}>
+                {biz.price_level}
+                {biz.surprise != null ? ` ${biz.surprise > 0 ? "+" : ""}${biz.surprise.toFixed(1)}` : ""}
+              </span>
             </td>
             <td className="px-3 py-2 text-left text-xs text-muted-foreground">{combo.action || "-"}</td>
           </>
@@ -1507,11 +1516,12 @@ export function AuctionBoard() {
         <div className="space-y-4">
           {/* Sub-tabs */}
           <div className="flex items-center gap-2">
-            {[
-              { key: "both" as const, label: "双涨停", countKey: "both_count" as const },
-              { key: "yesterday" as const, label: "昨日连板梯队", countKey: "prev_count" as const },
-              { key: "today" as const, label: "竞价涨停", countKey: "today_count" as const },
-            ].map(({ key, label, countKey }) => (
+              {[
+              { key: "both" as const, label: "双涨停" },
+              { key: "yesterday" as const, label: "昨日连板" },
+              { key: "today" as const, label: "竞价涨停" },
+              { key: "yizi" as const, label: "一字定方向" },
+            ].map(({ key, label }) => (
               <button
                 key={key}
                 onClick={() => setLimitUpSubTab(key)}
@@ -1523,7 +1533,10 @@ export function AuctionBoard() {
               >
                 {label}
                 <span className="text-xs opacity-70">
-                  ({limitUpData ? (key === "today" ? limitUpData.both_limitup.length + limitUpData.today_limitup.length : limitUpData[countKey]) : 0})
+                  {limitUpData ? (key === "yizi" ? ((limitUpData.yizi_leaders?.length ?? 0) + (limitUpData.non_limitup_surprise?.length ?? 0))
+                    : key === "today" ? limitUpData.both_limitup.length + limitUpData.today_limitup.length
+                    : key === "both" ? limitUpData.both_count
+                    : limitUpData.prev_count) : 0}
                 </span>
               </button>
             ))}
@@ -1533,7 +1546,7 @@ export function AuctionBoard() {
             <div className="py-12 text-center text-muted-foreground">加载中...</div>
           ) : !limitUpData ? (
             <div className="py-12 text-center text-muted-foreground">请先选择日期</div>
-          ) : (
+          ) : limitUpSubTab !== "yizi" ? (
             <div className="border rounded-lg bg-card overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -1560,7 +1573,7 @@ export function AuctionBoard() {
                   <tbody>
                     {(() => {
                       if (limitUpSubTab === "yesterday") {
-                        // 昨日连板梯队：全部昨日涨停（含今日续板）按连板数分组，组内按竞价量排序
+                        // 昨日连板梯队：按连板数分组，组内按「超预期幅度」降序——超预期在前，无预期数据垫底
                         const all = [...limitUpData.prev_limitup, ...limitUpData.both_limitup];
                         const groups = new Map<number, any[]>();
                         for (const s of all) {
@@ -1568,9 +1581,16 @@ export function AuctionBoard() {
                           if (!groups.has(b)) groups.set(b, []);
                           groups.get(b)!.push(s);
                         }
+                        const surpOf = (s: any) => (s?.auction_expectation?.surprise ?? null);
                         const sorted = [...groups.entries()]
                           .sort((a, b) => b[0] - a[0])
-                          .map(([board, stocks]) => [board, [...stocks].sort((x, y) => y.vol_today - x.vol_today)] as const);
+                          .map(([board, stocks]) => [board, [...stocks].sort((x, y) => {
+                            const sx = surpOf(x), sy = surpOf(y);
+                            if (sx == null && sy == null) return y.vol_today - x.vol_today;
+                            if (sx == null) return 1;
+                            if (sy == null) return -1;
+                            return sy - sx || y.vol_today - x.vol_today;
+                          })] as const);
                         if (sorted.length === 0) {
                           return (
                             <tr>
@@ -1602,6 +1622,126 @@ export function AuctionBoard() {
                   </tbody>
                 </table>
               </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="text-sm text-muted-foreground">
+                竞价一字板（开盘即涨停）作为方向标，下列为「同概念 / 同板块」中竞价符合预期或超预期的昨日连板票（按超预期幅度降序）。
+              </div>
+              {!limitUpData.yizi_leaders || limitUpData.yizi_leaders.length === 0 ? (
+                <div className="py-12 text-center text-muted-foreground">今日无竞价一字板</div>
+              ) : (
+                (() => {
+                  // 预计算：涨停诱因(概念) → 非涨停超预期股票
+                  const surpriseByTrigger: Record<string, any[]> = {};
+                  for (const item of limitUpData.non_limitup_surprise || []) {
+                    const trigger = item.matched_yizi_concepts?.[0];
+                    if (trigger) (surpriseByTrigger[trigger] ||= []).push(item);
+                  }
+                  return limitUpData.yizi_leaders.map((lead: any) => {
+                    // concepts 已是问财题材（涨停诱因），取第一个
+                    const trigger = (lead.concepts || [])[0] || "";
+                    const leadSurprise = trigger ? (surpriseByTrigger[trigger] || []) : [];
+                    return (
+                    <div key={lead.code} className="border rounded-lg bg-card overflow-hidden">
+                      {/* 方向标 */}
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 bg-red-50 px-4 py-2.5 border-b">
+                        <span className="font-bold text-red-600">{lead.name}</span>
+                        <span className="text-xs text-muted-foreground">{lead.code}</span>
+                        <span className="text-sm font-semibold text-red-600">
+                          竞价{lead.auction_chg_today != null ? `${lead.auction_chg_today > 0 ? "+" : ""}${lead.auction_chg_today.toFixed(2)}%` : "-"}
+                        </span>
+                        {lead.consec_boards > 0 && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">{lead.consec_boards}板</span>
+                        )}
+                        {lead.industry && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">{lead.industry}</span>
+                        )}
+                        {lead.concepts?.length > 0 && (
+                          <span className="text-xs text-muted-foreground">概念：{lead.concepts.join("、")}</span>
+                        )}
+                        <span className="ml-auto text-xs text-muted-foreground">跟随 {lead.followers?.length ?? 0} 只{leadSurprise.length > 0 ? ` · 同概念强势 ${leadSurprise.length} 只` : ""}</span>
+                      </div>
+                      {/* 跟随标的（涨停次日竞价预期） */}
+                      {lead.followers?.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead className="bg-muted/40 text-xs text-muted-foreground">
+                              <tr>
+                                <th className="px-3 py-2 text-left font-medium">代码</th>
+                                <th className="px-3 py-2 text-left font-medium">名称</th>
+                                <th className="px-3 py-2 text-center font-medium">关联</th>
+                                <th className="px-3 py-2 text-right font-medium">竞价涨幅</th>
+                                <th className="px-3 py-2 text-center font-medium">连板</th>
+                                <th className="px-3 py-2 text-center font-medium">预期</th>
+                                <th className="px-3 py-2 text-right font-medium">超预期幅度</th>
+                                <th className="px-3 py-2 text-left font-medium">概念</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lead.followers.map((f: any) => {
+                                const fexp = f.auction_expectation || {};
+                                const pl = fexp.price_level;
+                                const plCls = pl === "超预期" ? "text-red-600 font-semibold" : pl === "符合预期" ? "text-orange-600" : "text-muted-foreground";
+                                const surp = fexp.surprise;
+                                const surpCls = surp == null ? "text-muted-foreground" : surp >= 0 ? "text-red-600" : "text-green-600";
+                                return (
+                                  <tr key={f.code} className="border-t">
+                                    <td className="px-3 py-1.5 font-mono">{f.code}</td>
+                                    <td className="px-3 py-1.5">{f.name}</td>
+                                    <td className="px-3 py-1.5 text-center">
+                                      <span className={`text-xs px-1.5 py-0.5 rounded ${f.match_type === "概念" ? "bg-blue-50 text-blue-600" : "bg-purple-50 text-purple-600"}`}>{f.match_type}</span>
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right font-semibold text-red-600">
+                                      {f.auction_chg_today != null ? `${f.auction_chg_today > 0 ? "+" : ""}${f.auction_chg_today.toFixed(2)}%` : "-"}
+                                    </td>
+                                    <td className="px-3 py-1.5 text-center">{(fexp.consec_boards || 0) > 0 ? `${fexp.consec_boards}板` : "-"}</td>
+                                    <td className={`px-3 py-1.5 text-center ${plCls}`}>{pl}</td>
+                                    <td className={`px-3 py-1.5 text-right font-mono ${surpCls}`}>{surp == null ? "-" : `${surp > 0 ? "+" : ""}${surp.toFixed(1)}`}</td>
+                                    <td className="px-3 py-1.5 text-xs text-muted-foreground max-w-[280px] truncate">{(f.concepts || []).join("、")}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      {!lead.followers || lead.followers.length === 0 && leadSurprise.length === 0 && (
+                        <div className="px-4 py-3 text-sm text-muted-foreground">（暂无同概念/板块的符合/超预期标的）</div>
+                      )}
+                      {/* 同概念非涨停强势股 */}
+                      {leadSurprise.length > 0 && (
+                        <div className="border-t bg-orange-50/50">
+                          <div className="px-4 py-1.5 text-xs font-medium text-orange-700">同概念竞价强势（未涨停）</div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead className="text-xs text-muted-foreground">
+                                <tr>
+                                  <th className="px-3 py-1.5 text-left font-medium">代码</th>
+                                  <th className="px-3 py-1.5 text-left font-medium">名称</th>
+                                  <th className="px-3 py-1.5 text-right font-medium">竞价涨幅</th>
+                                  <th className="px-3 py-1.5 text-left font-medium">匹配概念</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {leadSurprise.map((item: any) => (
+                                  <tr key={item.code} className="border-t hover:bg-orange-50">
+                                    <td className="px-3 py-1 font-mono">{item.code}</td>
+                                    <td className="px-3 py-1 font-medium">{item.name}</td>
+                                    <td className="px-3 py-1 text-right font-semibold text-red-600">+{item.auction_chg?.toFixed(2)}%</td>
+                                    <td className="px-3 py-1 text-xs text-orange-600">{(item.matched_yizi_concepts || []).join("、")}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    );
+                  });
+                })()
+              )}
             </div>
           )}
 
