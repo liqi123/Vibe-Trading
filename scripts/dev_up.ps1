@@ -37,7 +37,7 @@ function Start-Backend {
 
     if (Test-Path $pidFile) {
         $existingPid = Get-Content $pidFile
-        if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) {
+        if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
             Write-Host "backend already running (pid $existingPid)"
             return
         }
@@ -52,10 +52,10 @@ function Start-Backend {
     Write-Host "starting backend..."
     $env:PYTHONPATH = Join-Path $Root "agent"
     $proc = Start-Process -FilePath "python" `
-        -ArgumentList "-c", "import cli, sys; raise SystemExit(cli.main(sys.argv[1:]))", "serve", "--host", $BackendHost, "--port", $BackendPort `
+        -ArgumentList "-m", "cli", "serve", "--host", $BackendHost, "--port", $BackendPort `
         -WorkingDirectory (Join-Path $Root "agent") `
         -RedirectStandardOutput $logFile `
-        -RedirectStandardError $logFile `
+        -RedirectStandardError (Join-Path $LogDir "backend.err.log") `
         -NoNewWindow `
         -PassThru
 
@@ -69,7 +69,7 @@ function Start-Frontend {
 
     if (Test-Path $pidFile) {
         $existingPid = Get-Content $pidFile
-        if (Get-Process -Id $existingPid -ErrorAction SilentlyContinue) {
+        if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
             Write-Host "frontend already running (pid $existingPid)"
             return
         }
@@ -90,11 +90,11 @@ function Start-Frontend {
 
     Write-Host "starting frontend..."
     $env:VITE_API_URL = "http://$BackendHost`:$BackendPort"
-    $proc = Start-Process -FilePath "npm" `
-        -ArgumentList "run", "dev", "--", "--host", $FrontendHost, "--port", $FrontendPort `
+    $proc = Start-Process -FilePath "cmd.exe" `
+        -ArgumentList "/c", "npm run dev -- --host $FrontendHost --port $FrontendPort" `
         -WorkingDirectory $frontendDir `
         -RedirectStandardOutput $logFile `
-        -RedirectStandardError $logFile `
+        -RedirectStandardError (Join-Path $LogDir "frontend.err.log") `
         -NoNewWindow `
         -PassThru
 
@@ -106,10 +106,10 @@ function Stop-All {
     foreach ($service in @("frontend", "backend")) {
         $pidFile = Join-Path $PidDir "$service.pid"
         if (Test-Path $pidFile) {
-            $pid = Get-Content $pidFile
-            if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
-                Write-Host "stopping $service (pid $pid)..."
-                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            $procId = Get-Content $pidFile
+            if ($procId -and (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+                Write-Host "stopping $service (pid $procId)..."
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
             }
             Remove-Item $pidFile -ErrorAction SilentlyContinue
         }
@@ -121,12 +121,12 @@ function Show-Status {
         $pidFile = Join-Path $PidDir "$service.pid"
         $running = $false
         if (Test-Path $pidFile) {
-            $pid = Get-Content $pidFile
-            $running = [bool](Get-Process -Id $pid -ErrorAction SilentlyContinue)
+            $procId = Get-Content $pidFile
+            $running = [bool]($procId -and (Get-Process -Id $procId -ErrorAction SilentlyContinue))
         }
 
         if ($running) {
-            Write-Host "$service`trunning`tpid=$pid"
+            Write-Host "$service`trunning`tpid=$procId"
         } elseif (Test-ServiceUrl (Get-ServiceUrl $service)) {
             Write-Host "$service`treachable`tturl=$(Get-ServiceUrl $service)"
         } else {

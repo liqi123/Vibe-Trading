@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Plus, RefreshCw, Trash2, Edit2, Check, X, CandlestickChart as CandleIcon, Network as NetworkIcon, AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useModalStore } from "../stores/modal";
@@ -30,27 +30,29 @@ interface WatchlistItem {
   auction_vol_ratio?: number | null;
   // 候选池专用：竞价预期
   auction_expectation?: string;
-  // 打分模型（四步法）
+  // 打分模型（竞价超预期五步法）
   score?: {
-    scenario: string;
-    r_base: number;
-    expected_price: number;
-    expected_price_final: number;
-    r_sector: number;
-    sector_status: string;
-    r_market: number;
-    market_status: string;
-    price_score: number;
-    price_deviation: number;
-    price_judgement: string;
-    volume_score: number;
-    volume_pct: number;
-    volume_judgement: string;
-    context_score: number;
-    context_desc: string;
-    total_score: number;
+    framework: string;
+    cl: number;
+    turnover: number | null;
+    turnover_assumed?: boolean;
+    vr: number | null;
+    zone: string;
+    zone_name: string;
+    lianban: boolean;
+    hub: [number, number];
+    sup: number;
+    sup_ge?: boolean;
+    fail: number;
+    gap: number;
+    r: number | null;
+    r_level: string;
     verdict: string;
     action: string;
+    rule: string;
+    sector_signal?: boolean;
+    sector_peers?: number;
+    sector_desc?: string;
   } | null;
 }
 
@@ -91,19 +93,25 @@ export function Watchlist() {
   const [scoreDetail, setScoreDetail] = useState<{ code: string; name: string; score: NonNullable<WatchlistItem["score"]> } | null>(null);
 
   const verdictCls = (verdict: string) =>
-    verdict === "超预期" ? "text-red-600" :
-    verdict === "符合预期" ? "text-green-600" :
-    verdict === "低于预期" ? "text-yellow-600" :
+    verdict === "强超预期" || verdict === "超预期" ? "text-red-600" :
+    verdict === "弱超预期" ? "text-orange-500" :
+    verdict === "正常" ? "text-green-600" :
+    verdict === "偏强" ? "text-blue-600" :
+    verdict === "出货加速" ? "text-red-700" :
+    verdict === "抛压衰竭" ? "text-sky-600" :
+    verdict === "不及预期" || verdict === "抛压未释放" ? "text-yellow-600" :
     "text-gray-600";
+
+  const fmtSigned = (v: number) => `${v >= 0 ? "+" : ""}${v}`;
 
   const renderScoreCell = (item: WatchlistItem) =>
     item.score ? (
       <span
         className={`text-xs font-medium cursor-pointer underline decoration-dotted underline-offset-2 hover:opacity-70 ${verdictCls(item.score.verdict)}`}
         onClick={() => setScoreDetail({ code: item.code, name: item.name, score: item.score! })}
-        title="点击查看打分细节"
+        title={`点击查看五步法细节 · gap ${fmtSigned(item.score.gap)}% · R ${item.score.r ?? "-"}% · ${item.score.zone} ${item.score.zone_name}`}
       >
-        {item.score.verdict}({item.score.total_score})
+        {item.score.verdict}
       </span>
     ) : (
       "-"
@@ -1084,129 +1092,166 @@ export function Watchlist() {
           </div>
         </div>
       )}
-      {/* 打分细节弹窗 */}
+      {/* 打分细节弹窗（竞价超预期五步法） */}
       {scoreDetail && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setScoreDetail(null)}>
           <div className="bg-card rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="px-6 py-4 border-b flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold">{scoreDetail.name} ({scoreDetail.code})</h3>
-                <p className="text-sm text-muted-foreground">打分细节 · 四步法</p>
+                <p className="text-sm text-muted-foreground">打分细节 · 五步法</p>
               </div>
               <button onClick={() => setScoreDetail(null)} className="p-1 hover:bg-muted rounded">
                 <X className="h-5 w-5" />
               </button>
             </div>
             <div className="p-6 space-y-5 text-sm">
-              {/* 总分 */}
+              {/* 最终判定 */}
               <div className="flex items-center justify-between p-4 rounded-lg border bg-muted/30">
                 <div>
-                  <div className="text-xs text-muted-foreground mb-1">最终评价</div>
+                  <div className="text-xs text-muted-foreground mb-1">量价交叉判定</div>
                   <div className={`text-xl font-bold ${verdictCls(scoreDetail.score.verdict)}`}>
                     {scoreDetail.score.verdict}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">{scoreDetail.score.action}</div>
                 </div>
-                <div className="text-right">
-                  <span className="text-3xl font-bold">{scoreDetail.score.total_score}</span>
-                  <span className="text-sm text-muted-foreground"> / 100</span>
+                <div className="text-right text-xs font-mono space-y-1">
+                  <div>
+                    gap <span className="text-foreground font-semibold">{fmtSigned(scoreDetail.score.gap)}%</span>
+                  </div>
+                  <div>
+                    R <span className="text-foreground font-semibold">{scoreDetail.score.r ?? "-"}%</span>
+                    <span className="text-muted-foreground"> · {scoreDetail.score.r_level}</span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {scoreDetail.score.zone} {scoreDetail.score.zone_name}
+                    {scoreDetail.score.lianban ? " · 连板" : ""}
+                  </div>
                 </div>
               </div>
 
-              {/* 第一步：剧本分类 */}
+              {/* Step 1：昨日三个指标 */}
+              <div className="rounded-lg border p-4">
+                <div className="font-medium mb-2">Step 1 · 昨日三个指标</div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded bg-muted/40 p-2">
+                    <div className="text-xs text-muted-foreground">CL 收盘位置</div>
+                    <div className="font-mono font-semibold">{scoreDetail.score.cl}%</div>
+                  </div>
+                  <div className="rounded bg-muted/40 p-2">
+                    <div className="text-xs text-muted-foreground">T 换手率</div>
+                    <div className="font-mono font-semibold">
+                      {scoreDetail.score.turnover != null ? `${scoreDetail.score.turnover}%` : "缺失"}
+                    </div>
+                  </div>
+                  <div className="rounded bg-muted/40 p-2">
+                    <div className="text-xs text-muted-foreground">VR 量比</div>
+                    <div className="font-mono font-semibold">{scoreDetail.score.vr ?? "-"}</div>
+                  </div>
+                </div>
+                <div className="text-xs text-muted-foreground mt-2">
+                  CL=(收−低)/(高−低) 决定隔夜抛压；T=成交量/流通股本
+                  {scoreDetail.score.turnover_assumed ? "（换手缺失，按中位 10% 假设定档）" : ""}
+                  ；VR&gt;3 为异动
+                </div>
+              </div>
+
+              {/* Step 2：形态档 3×3 */}
               <div className="rounded-lg border p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium">第一步 · 剧本分类</span>
+                  <span className="font-medium">Step 2 · 形态档（CL × 换手率）</span>
                   <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary font-mono">
-                    r_base = {scoreDetail.score.r_base >= 0 ? "+" : ""}{scoreDetail.score.r_base}
+                    {scoreDetail.score.zone} {scoreDetail.score.zone_name}
                   </span>
                 </div>
-                <div className="text-muted-foreground">{scoreDetail.score.scenario}</div>
+                <div className="grid grid-cols-4 gap-1 text-xs">
+                  <div />
+                  <div className="text-center text-muted-foreground">T&lt;5%</div>
+                  <div className="text-center text-muted-foreground">T 5~15%</div>
+                  <div className="text-center text-muted-foreground">T&gt;15%</div>
+                  {([
+                    ["CL≥70%", ["S1", "S2", "S3"]],
+                    ["30~70%", ["S4", "S5", "S6"]],
+                    ["CL<30%", ["S7", "S8", "S9"]],
+                  ] as const).map(([rowLabel, zones]) => (
+                    <Fragment key={rowLabel}>
+                      <div className="text-muted-foreground self-center">{rowLabel}</div>
+                      {zones.map((z) => (
+                        <div
+                          key={z}
+                          className={`text-center rounded py-1 ${
+                            z === scoreDetail.score.zone
+                              ? "bg-primary text-primary-foreground font-semibold"
+                              : "bg-muted/40 text-muted-foreground"
+                          }`}
+                        >
+                          {z}
+                        </div>
+                      ))}
+                    </Fragment>
+                  ))}
+                </div>
               </div>
 
-              {/* 第二步：基准预期价 */}
+              {/* Step 3：预期中枢 */}
               <div className="rounded-lg border p-4">
-                <div className="font-medium mb-2">第二步 · 基准预期价</div>
+                <div className="font-medium mb-2">Step 3 · 预期中枢</div>
+                <div className="space-y-1.5 text-xs font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">预期中枢</span>
+                    <span>[{fmtSigned(scoreDetail.score.hub[0])}%, {fmtSigned(scoreDetail.score.hub[1])}%]</span>
+                  </div>
+                  <div className="flex justify-between text-red-600">
+                    <span className="text-muted-foreground">超预期线</span>
+                    <span>{scoreDetail.score.sup_ge ? "≥" : ">"} {fmtSigned(scoreDetail.score.sup)}%</span>
+                  </div>
+                  <div className="flex justify-between text-yellow-600">
+                    <span className="text-muted-foreground">不及线</span>
+                    <span>&lt; {fmtSigned(scoreDetail.score.fail)}%</span>
+                  </div>
+                  <div className="flex justify-between border-t pt-1.5">
+                    <span className="text-muted-foreground">实际 gap</span>
+                    <span className={`font-semibold ${verdictCls(scoreDetail.score.verdict)}`}>
+                      {fmtSigned(scoreDetail.score.gap)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 4：竞价量能比 R */}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium">Step 4 · 竞价量能比 R</span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary font-mono">
+                    {scoreDetail.score.r != null ? `${scoreDetail.score.r}%` : "无数据"} · {scoreDetail.score.r_level}
+                  </span>
+                </div>
                 <div className="font-mono text-xs bg-muted/40 rounded px-3 py-2">
-                  E = 昨收 × (1 + r_base/100)
+                  R = 竞价成交额 / 昨日成交额 × 100%
                 </div>
-                <div className="mt-2 text-muted-foreground">
-                  预期价 <strong className="font-mono text-foreground">{scoreDetail.score.expected_price}</strong>
-                </div>
-              </div>
-
-              {/* 第三步：板块 + 大盘修正 */}
-              <div className="rounded-lg border p-4">
-                <div className="font-medium mb-2">第三步 · 板块 + 大盘修正</div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span>板块状态</span>
-                    <span className="text-right">
-                      {scoreDetail.score.sector_status}
-                      <span className="ml-2 font-mono text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        r_sector = {scoreDetail.score.r_sector >= 0 ? "+" : ""}{scoreDetail.score.r_sector}
-                      </span>
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>大盘状态</span>
-                    <span className="text-right">
-                      {scoreDetail.score.market_status}
-                      <span className="ml-2 font-mono text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        r_market = {scoreDetail.score.r_market >= 0 ? "+" : ""}{scoreDetail.score.r_market}
-                      </span>
-                    </span>
-                  </div>
-                  <div className="pt-2 border-t flex items-center justify-between text-xs text-muted-foreground">
-                    <span>修正后预期价</span>
-                    <strong className="font-mono text-foreground text-sm">{scoreDetail.score.expected_price_final}</strong>
-                  </div>
+                <div className="text-xs text-muted-foreground mt-2">
+                  &lt;3% 缩量 · 3~5% 正常 · 5~8% 放量 · &gt;8% 巨量
+                  {scoreDetail.score.zone === "S1" ? "（S1 缩量强势基数小，抢筹线上浮至 9%）" : ""}
                 </div>
               </div>
 
-              {/* 第四步：实际竞价评分 */}
+              {/* Step 5：量价交叉判定 */}
               <div className="rounded-lg border p-4">
-                <div className="font-medium mb-3">第四步 · 实际竞价评分</div>
-                <div className="space-y-3">
-                  {/* 价格 */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-muted-foreground">价格（40分）</span>
-                      <span className="font-mono text-sm font-medium">{scoreDetail.score.price_score}/40</span>
-                    </div>
-                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500 rounded-full" style={{ width: `${(scoreDetail.score.price_score / 40) * 100}%` }} />
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      偏离 {scoreDetail.score.price_deviation}% · {scoreDetail.score.price_judgement}
-                    </div>
-                  </div>
-                  {/* 量能 */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-muted-foreground">量能（30分）</span>
-                      <span className="font-mono text-sm font-medium">{scoreDetail.score.volume_score}/30</span>
-                    </div>
-                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-amber-500 rounded-full" style={{ width: `${(scoreDetail.score.volume_score / 30) * 100}%` }} />
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      量比 {scoreDetail.score.volume_pct}% · {scoreDetail.score.volume_judgement}
-                    </div>
-                  </div>
-                  {/* 情绪 */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs text-muted-foreground">情绪（30分）</span>
-                      <span className="font-mono text-sm font-medium">{scoreDetail.score.context_score}/30</span>
-                    </div>
-                    <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-purple-500 rounded-full" style={{ width: `${(scoreDetail.score.context_score / 30) * 100}%` }} />
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {scoreDetail.score.context_desc}
-                    </div>
-                  </div>
+                <div className="font-medium mb-2">Step 5 · 量价交叉判定</div>
+                <div className="text-muted-foreground">{scoreDetail.score.rule}</div>
+                <div className="mt-2 pt-2 border-t flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">动作</span>
+                  <span className={`font-medium ${verdictCls(scoreDetail.score.verdict)}`}>
+                    {scoreDetail.score.action}
+                  </span>
+                </div>
+              </div>
+
+              {/* Step 6：联动校验 */}
+              <div className="rounded-lg border p-4">
+                <div className="font-medium mb-1">Step 6 · 联动校验（自选池同板块）</div>
+                <div className="text-xs text-muted-foreground">
+                  {scoreDetail.score.sector_desc || "无行业归属 → 按个股噪音处理"}
                 </div>
               </div>
             </div>

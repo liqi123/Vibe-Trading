@@ -1,5 +1,6 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import fs from "node:fs";
 import path from "path";
 
 const PROXY_PATHS = [
@@ -17,6 +18,37 @@ const PROXY_PATHS = [
   "/tools",
 ];
 
+// [reload-probe] 客户端把"页面为何重新加载"的取证 POST 回来，落成日志供离线分析。
+// 日志写在 frontend 根目录之外：写在根目录里会一直被 chokidar 监听到。
+const RELOAD_PROBE_LOG = path.resolve(__dirname, "../../scripts/_reload_probe.log");
+
+function reloadProbeSink(): Plugin {
+  return {
+    name: "reload-probe-sink",
+    configureServer(server) {
+      server.middlewares.use("/__reload_probe", (req, res) => {
+        if (req.method !== "POST") {
+          res.statusCode = 405;
+          res.end();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          try {
+            const line = `${new Date().toISOString()} ${Buffer.concat(chunks).toString("utf8")}\n`;
+            fs.appendFileSync(RELOAD_PROBE_LOG, line);
+          } catch {
+            // 诊断通道自身出错绝不能影响页面
+          }
+          res.statusCode = 204;
+          res.end();
+        });
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_API_URL || "http://127.0.0.1:8899";
@@ -32,7 +64,7 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    plugins: [react()],
+    plugins: [react(), reloadProbeSink()],
     resolve: {
       alias: { "@": path.resolve(__dirname, "./src") },
     },

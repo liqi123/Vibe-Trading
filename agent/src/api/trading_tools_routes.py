@@ -1203,7 +1203,8 @@ def ai_sentiment_analysis(body: dict) -> dict:
                             "role": m.get("role"), "concepts": m.get("concepts")})
         ctx = {
             "主线": ml.get("concept"), "家数": ml.get("n"), "涨停家数": ml.get("zt_n"),
-            "均涨": ml.get("avg_chg"), "最高连板": ml.get("max_streak"), "强度分": ml.get("score"),
+            # 主线级字段不得叫「最高连板」——与市场级 breadth.max_streak 同名会让 AI 写成全市场口径
+            "均涨": ml.get("avg_chg"), "主线最高板": ml.get("max_streak"), "强度分": ml.get("score"),
             "概念热度": (ml.get("heat") or 0), "板块涨幅%": ml.get("board_chg"),
             "当前周期": body.get("cycle", ""), "成员": members,
         }
@@ -1268,7 +1269,7 @@ def rank_sentiment_mainlines(body: dict) -> dict:
         if top < 2:
             return ""
         ranked = sorted([s for s in sts if (s.get("streak") or 0) == top],
-                        key=lambda s: -len(str(s.get("ltime") or "99:99")))
+                        key=lambda s: str(s.get("ltime") or "99:99"))
         lead = ranked[0]
         return f"{lead.get('name') or lead.get('code')}({top}板)"
 
@@ -1284,11 +1285,13 @@ def rank_sentiment_mainlines(body: dict) -> dict:
         return [f"{s.get('name') or s.get('code')}" for s in mids[:3]]
 
     def _pick_follower(ml) -> list:
-        """低位跟风：首板成员，涨停时间较晚者。"""
+        """低位跟风：首板成员，涨停时间较晚者；缺上板时间的排在已知之后。"""
         sts = ml.get("stocks") or []
-        lows = sorted([s for s in sts if (s.get("streak") or 0) == 0],
-                      key=lambda s: str(s.get("ltime") or "99:99"), reverse=True)
-        return [f"{s.get('name') or s.get('code')}" for s in lows[:4]]
+        lows = [s for s in sts if (s.get("streak") or 0) == 0]
+        # None→'99:99' 在降序下会排最前，等于把「数据缺失」当成「最晚涨停」
+        known = sorted([s for s in lows if s.get("ltime")], key=lambda s: s["ltime"], reverse=True)
+        unknown = [s for s in lows if not s.get("ltime")]
+        return [f"{s.get('name') or s.get('code')}" for s in (known + unknown)[:4]]
 
     def _rule_analyze() -> tuple:
         """纯规则四维度定性分析（不调 LLM，不展示分数，点名具体个股）。
@@ -1367,7 +1370,8 @@ def rank_sentiment_mainlines(body: dict) -> dict:
         ]
         brief.append({
             "主线": ml.get("concept"), "家数": ml.get("n"), "涨停": ml.get("zt_n"),
-            "均涨%": ml.get("avg_chg"), "最高连板": ml.get("max_streak"),
+            # 同上：主线级字段用「主线最高板」，避免与市场级「最高连板」混淆
+            "均涨%": ml.get("avg_chg"), "主线最高板": ml.get("max_streak"),
             "强度分": ml.get("score"), "概念热度": (ml.get("heat") or 0),
             "板块涨幅%": ml.get("board_chg"), "成员": members,
         })
@@ -3432,94 +3436,62 @@ def get_watchlist_auction(codes: str = "") -> dict:
                         or ind_by_bare.get(bare) or ind_by_bare.get(code) or "")
             concepts = concepts_by_bare.get(bare) or concepts_by_bare.get(code) or []
 
-            # 打分模型（四步法）
+            # 打分（竞价超预期五步法：CL/T/VR → 形态档 → 预期中枢 → R → 量价交叉）
             score = None
             try:
                 auction_price = t.get("auction_price", 0)
                 prev_close = t.get("prev_close", 0)
                 auction_amount = t.get("auction_amount", 0) or 0
-                prev_day_amount = 0
-
-                if auction_price and prev_close:
-                    # 获取昨日K线数据（剧本分类：昨日O/H/C 相对前日收盘，量比=昨日量/前日量）
+                if auction_price and prev_close and prev_date:
                     from utils.config import get_date_col
                     date_col_kl, is_int_kl = get_date_col()
+                    prev_date_val = int(prev_date.replace("-", "")) if is_int_kl else prev_date
                     db_kl = _get_db()
                     if db_kl:
                         try:
-                            # 取最近交易日K线（昨日）
-                            dr = db_kl.execute(
-                                f"SELECT MAX({date_col_kl}) FROM daily_kline WHERE code=?",
-                                (code,),
+                            kl_row = db_kl.execute(
+                                f"SELECT open, high, low, close, volume, amount FROM daily_kline WHERE code=? AND {date_col_kl}=?",
+                                (code, prev_date_val),
                             ).fetchone()
-                            if dr:
-                                kl_date = dr[0]
-                                kl_row = db_kl.execute(
-                                    f"SELECT open, high, low, close, volume, amount FROM daily_kline WHERE code=? AND {date_col_kl}=?",
-                                    (code, kl_date),
-                                ).fetchone()
-                                # 前一交易日（用于 C_prev / V_prev）
-                                prev_kl_row = db_kl.execute(
-                                    f"SELECT close, volume FROM daily_kline WHERE code=? AND {date_col_kl}<? ORDER BY {date_col_kl} DESC LIMIT 1",
-                                    (code, kl_date),
-                                ).fetchone()
-                                if kl_row and prev_kl_row:
-                                    o, h, l, c, v, amt = kl_row
-                                    c_prev, v_prev = prev_kl_row
-                                    if o and h and l and c and v and v > 0 and c_prev and v_prev:
-                                        open_pct = (o / c_prev - 1) * 100
-                                        close_pct = (c / c_prev - 1) * 100
-                                        high_pct = (h / c_prev - 1) * 100
-                                        upper_shadow = (h - max(o, c)) / c_prev * 100
-                                        body_pct = (c - o) / o * 100 if o else 0
-                                        # 昨日量比 = 昨日全天量 / 前日全天量
-                                        vol_ratio_kl = v / v_prev if v_prev else 0
-                                        # 昨日是否涨停（主板9.8%/创业科创19.8%）
-                                        bare_kl = code[2:] if code.startswith(("sh", "sz", "bj")) else code
-                                        _lim = 19.8 if bare_kl.startswith(("30", "68")) else 9.8
-                                        stock_was_limit = close_pct >= _lim or (h / c_prev - 1) * 100 >= _lim
-                                        # amount in daily_kline is NULL (TDX), use volume*close as proxy; convert to 万元 to match auction_amount
-                                        prev_day_amount = amt or (v * c / 10000 if v and c else 0)
-
-                                        # 获取市场宽度（使用竞价数据，竞价结束后即可用）
-                                        try:
-                                            breadth = _get_auction_breadth()
-                                        except Exception:
-                                            breadth = {"limit_up": 0, "limit_down": 0, "up": 0, "down": 0}
-
-                                        # 获取行业竞价平均涨幅（auction 表按 industry_l1 分组）
-                                        try:
-                                            sw_changes = _get_sw_industry_changes()
-                                            ind_l1 = _get_stock_industry_l1(code)
-                                            sector_avg_chg = sw_changes.get(ind_l1, 0.0) if ind_l1 else 0.0
-                                        except Exception:
-                                            sector_avg_chg = 0.0
-
-                                        # 竞价涨幅（个股）
-                                        stock_gap_pct = (auction_price - prev_close) / prev_close * 100 if prev_close else 0
-
-                                        score = watchlist_stock_score(
-                                            auction_price=auction_price,
-                                            prev_close=prev_close,
-                                            auction_amount=auction_amount,
-                                            prev_day_amount=prev_day_amount,
-                                            open_pct=open_pct,
-                                            close_pct=close_pct,
-                                            high_pct=high_pct,
-                                            upper_shadow_pct=upper_shadow,
-                                            实体_pct=body_pct,
-                                            vol_ratio=vol_ratio_kl,
-                                            main_net_flow_pct=0,
-                                            sector_zt_count=0,
-                                            sector_avg_chg=sector_avg_chg,
-                                            stock_chg=stock_gap_pct,
-                                            limit_up=breadth.get("limit_up", 0),
-                                            limit_down=breadth.get("limit_down", 0),
-                                            up_count=breadth.get("up", 0),
-                                            down_count=breadth.get("down", 0),
-                                            market_chg_pct=0,
-                                            stock_was_limit=stock_was_limit,
-                                        )
+                            # 昨日之前的两个交易日收盘（连板判定）
+                            older_rows = db_kl.execute(
+                                f"SELECT close, volume FROM daily_kline WHERE code=? AND {date_col_kl}<? ORDER BY {date_col_kl} DESC LIMIT 2",
+                                (code, prev_date_val),
+                            ).fetchall()
+                            # 昨日之前 5 日成交量（VR 分母）
+                            vols5 = [r5[0] for r5 in db_kl.execute(
+                                f"SELECT volume FROM daily_kline WHERE code=? AND {date_col_kl}<? ORDER BY {date_col_kl} DESC LIMIT 5",
+                                (code, prev_date_val),
+                            ).fetchall()]
+                            if kl_row and older_rows:
+                                o, h, l, c, v, amt = kl_row
+                                c_prev = older_rows[0][0]
+                                c_pp = older_rows[1][0] if len(older_rows) > 1 else None
+                                if o and h and l and c and v and v > 0 and c_prev:
+                                    gap_pct = (auction_price - prev_close) / prev_close * 100
+                                    cl_pct = (c - l) / (h - l) * 100 if h > l else 100.0
+                                    # 连板：昨日与前日收盘涨幅均达涨停线（S1 形态档用）
+                                    bare_kl = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+                                    lim = 19.8 if bare_kl.startswith(("30", "68")) else 9.8
+                                    pct_y = (c / c_prev - 1) * 100
+                                    pct_d = (c_prev / c_pp - 1) * 100 if c_pp else None
+                                    is_lb = pct_d is not None and pct_y >= lim and pct_d >= lim
+                                    avg5 = sum(vols5) / len(vols5) if vols5 else 0
+                                    vr = v / avg5 if avg5 else None
+                                    # 昨日换手率 T = 昨日成交量 / 流通股本（股本由 fund_daily 换手率反推）
+                                    shares = _float_shares_from_fund(db_kl, code)
+                                    t_pct = v / shares * 100 if shares else None
+                                    # amount 全 NULL（TDX）→ volume×close 代理，换算万元对齐 auction_amount
+                                    prev_day_amount = amt or (v * c / 10000 if v and c else 0)
+                                    r_pct = auction_amount / prev_day_amount * 100 if prev_day_amount else None
+                                    score = auction_five_step_score(
+                                        cl_pct=cl_pct,
+                                        turnover_pct=t_pct,
+                                        vol_ratio=vr,
+                                        gap_pct=gap_pct,
+                                        r_pct=r_pct,
+                                        is_lianban=is_lb,
+                                    )
                         finally:
                             db_kl.close()
             except Exception as _e:
@@ -3535,6 +3507,34 @@ def get_watchlist_auction(codes: str = "") -> dict:
                 "concepts": concepts,
                 "score": score,
             }
+
+        # Step6 联动校验：同板块（同花顺二级）同向 ≥2 只才升级为板块级信号（样本限于自选池）
+        ind_groups: dict = {}
+        for _c, _it in result.items():
+            if _it.get("industry"):
+                ind_groups.setdefault(_it["industry"], []).append(_c)
+        for _ind, _cs in ind_groups.items():
+            signs: dict = {}
+            for _c in _cs:
+                _g = (result[_c].get("score") or {}).get("gap")
+                signs[_c] = 0 if _g is None else (1 if _g > 0 else -1)
+            for _c in _cs:
+                _s = result[_c].get("score")
+                if not _s:
+                    continue
+                _same = 1 + sum(1 for _x in _cs if _x != _c and signs[_x] == signs[_c] and signs[_c] != 0)
+                _s["sector_peers"] = _same
+                _s["sector_signal"] = _same >= 2
+                _s["sector_desc"] = (
+                    f"{_ind} · 同向 {_same} 只 → 板块级信号" if _same >= 2
+                    else f"{_ind} · 同向 {_same} 只 → 按个股噪音处理"
+                )
+        for _c, _it in result.items():
+            _s = _it.get("score")
+            if _s and "sector_signal" not in _s:
+                _s["sector_signal"] = False
+                _s["sector_peers"] = 1
+                _s["sector_desc"] = "无行业归属 → 按个股噪音处理"
 
         return {"auction": result}
     finally:
@@ -3638,6 +3638,65 @@ def ai_analyze(data: dict) -> dict:
 
         report = analyze_stocks(stocks)
         return {"report": report}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/ai/reasons")
+def ai_reasons(data: dict) -> dict:
+    """实时价格 + 买/不买双向理由分析。
+
+    入参: {"codes": ["sh600519", "300717", "sz000725"]}
+    返回: {"stocks":[{"code","name","price","change_pct",
+                      "buy_reasons":[...],"no_buy_reasons":[...]}]}
+    """
+    codes = data.get("codes", [])
+    if not codes:
+        return {"error": "No codes provided"}
+
+    try:
+        from data.tencent_quotes import fetch_detail, add_prefix
+        from analysis.llm_analyzer import analyze_stock_reasons
+
+        # 带前缀的代码 → 原始输入代码（用于回传稳定的展示用代码）
+        code_by_prefixed = {add_prefix(c): c for c in codes}
+        prefixed = list(code_by_prefixed.keys())
+
+        detail_map = fetch_detail(prefixed)  # key 为带前缀代码
+        if not detail_map:
+            return {"error": "行情源未返回数据（可能非交易时段或网络异常）"}
+
+        stocks = []
+        for pref, q in detail_map.items():
+            stocks.append(
+                {
+                    "code": pref,
+                    "name": q.get("name", ""),
+                    "price": q.get("price", 0),
+                    "change_pct": q.get("change_pct", 0),
+                    "open": q.get("open", 0),
+                    "high": q.get("high", 0),
+                    "low": q.get("low", 0),
+                    "prev_close": q.get("prev_close", 0),
+                    "amount": q.get("amount", 0),
+                    "volume": q.get("volume", 0),
+                    "pe_ttm": q.get("pe_ttm", 0),
+                    "pb": q.get("pb", 0),
+                    "mcap": q.get("mcap", 0),
+                    "float_mcap": q.get("float_mcap", 0),
+                }
+            )
+
+        result = analyze_stock_reasons(stocks)
+        # 回传时把代码换回用户输入的原值，并补上实时价格便于前端展示
+        for s in result.get("stocks", []):
+            q = detail_map.get(s.get("code"))
+            if q:
+                s["price"] = q.get("price", 0)
+                s["change_pct"] = q.get("change_pct", 0)
+                s["name"] = s.get("name") or q.get("name", "")
+            s["code"] = code_by_prefixed.get(s.get("code"), s.get("code"))
+        return result
     except Exception as e:
         return {"error": str(e)}
 
@@ -5314,6 +5373,174 @@ def watchlist_stock_score(
         "verdict": verdict,
         "action": action,
     }
+
+
+# ---------------------------------------------------------------------------
+# 竞价超预期五步法（expectation-framework：CL/T/VR → 形态档 → 预期中枢 → R → 量价交叉）
+# ---------------------------------------------------------------------------
+
+_ZONE_NAMES = {
+    "S1": "缩量强势", "S2": "换手强势", "S3": "天量分歧(强)",
+    "S4": "缩量整理", "S5": "中性震荡", "S6": "放量震荡",
+    "S7": "缩量阴跌", "S8": "换手走弱", "S9": "天量出货",
+}
+
+# Step3 预期中枢表: (中枢下限, 中枢上限, 超预期线, 不及线)，单位 %
+_EXPECT_TABLE = {
+    "S1_lb": (3.0, 5.0, 7.0, 1.0),   # S1 缩量强势且连板
+    "S1": (1.0, 3.0, 5.0, 0.0),
+    "S2": (1.0, 3.0, 5.0, -1.0),
+    "S3": (0.0, 2.0, 4.0, -2.0),
+    "S4": (-1.0, 1.0, 3.0, -2.0),
+    "S5": (-1.0, 1.0, 3.0, -2.0),
+    "S6": (-2.0, 0.0, 2.0, -3.0),
+    "S7": (-4.0, -2.0, -1.0, -5.0),
+    "S8": (-4.0, -2.0, -1.0, -5.0),
+    "S9": (-4.0, -2.0, 0.0, -5.0),
+}
+
+
+def _classify_zone(cl_pct: float, t_pct: float | None) -> str:
+    """Step2: CL × 换手率 → 形态档 S1~S9。换手缺失时按中位 10% 假设定档。"""
+    t = 10.0 if t_pct is None else t_pct
+    if cl_pct >= 70:
+        return "S1" if t < 5 else ("S2" if t <= 15 else "S3")
+    if cl_pct >= 30:
+        return "S4" if t < 5 else ("S5" if t <= 15 else "S6")
+    return "S7" if t < 5 else ("S8" if t <= 15 else "S9")
+
+
+def _r_level(r_pct: float | None) -> str:
+    """Step4: 竞价量能比 R 定性。"""
+    if r_pct is None:
+        return "无数据"
+    if r_pct < 3:
+        return "缩量竞价"
+    if r_pct <= 5:
+        return "正常"
+    if r_pct <= 8:
+        return "放量"
+    return "巨量"
+
+
+def auction_five_step_score(
+    cl_pct: float,
+    turnover_pct: float | None,
+    vol_ratio: float | None,
+    gap_pct: float,
+    r_pct: float | None,
+    is_lianban: bool = False,
+) -> dict:
+    """竞价超预期五步法打分（Step1~Step5，Step6 联动由调用方按同板块分组补充）。
+
+    cl_pct: 昨日 CL 收盘位置 (收-低)/(高-低)*100
+    turnover_pct: 昨日换手率 T（%），None 时按中位 10% 定档并标记 turnover_assumed
+    vol_ratio: 昨日量比 VR（昨日量/前5日均量）
+    gap_pct: 竞价 gap（竞价价 vs 昨收，%）
+    r_pct: 量能比 R = 竞价成交额/昨日成交额*100
+    """
+    zone = _classify_zone(cl_pct, turnover_pct)
+    key = "S1_lb" if (zone == "S1" and is_lianban) else zone
+    hub_lo, hub_hi, sup, fail = _EXPECT_TABLE[key]
+    sup_ge = zone in ("S7", "S8", "S9")  # 弱势档超预期线为「>=」，其余为「>」
+    r_level = _r_level(r_pct)
+
+    def _r_txt() -> str:
+        return f"R {r_pct:.2f}%" if r_pct is not None else "R 无数据"
+
+    if (gap_pct >= sup) if sup_ge else (gap_pct > sup):
+        # 开盘位置 ≥ 超预期线：量能决定强弱
+        strong_thr = 9.0 if zone == "S1" else 8.0  # Step4 例外：S1 昨日基数小，抢筹线上浮
+        if r_pct is not None and r_pct >= strong_thr:
+            verdict, action = "强超预期", "可追，打最快板"
+            rule = f"gap {gap_pct:+.2f}% ≥ 超预期线 {sup:+.1f}% 且 {_r_txt()} ≥ {strong_thr:.0f}% → 位置+量能双强"
+        elif r_pct is not None and r_pct >= 5:
+            verdict, action = "超预期", "可参与，开盘后确认承接"
+            rule = f"gap {gap_pct:+.2f}% ≥ 超预期线 {sup:+.1f}% 且 {_r_txt()} 放量 → 超预期且有承接"
+        else:
+            verdict, action = "弱超预期", "防诱多，等回封/站稳确认"
+            rule = f"gap {gap_pct:+.2f}% ≥ 超预期线 {sup:+.1f}% 但 {_r_txt()}（{r_level}）量能不足 → 位置强、承接存疑"
+    elif gap_pct >= hub_lo:
+        # 预期中枢附近
+        if gap_pct > hub_hi:
+            verdict, action = "偏强", "观察延续性，不追高"
+            rule = (f"gap {gap_pct:+.2f}% 高于中枢上沿 {hub_hi:+.1f}% 但未及超预期线 {sup:+.1f}%"
+                    f" → 偏强但未触发超预期")
+        else:
+            verdict, action = "正常", "按原计划，不追高"
+            rule = f"gap {gap_pct:+.2f}% 落在预期中枢 [{hub_lo:+.1f}%, {hub_hi:+.1f}%]，{_r_txt()} {r_level}"
+    else:
+        # 低于预期中枢（不及区）：量能 R × 昨日换手 T 交叉
+        if r_pct is not None and r_pct >= 5:
+            verdict, action = "出货加速", "回避 / 离场"
+            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}% 且 {_r_txt()} ≥ 5% → 放量低开，出货加速"
+        elif gap_pct >= 0:
+            verdict, action = "不及预期", "回避，不追（承接不足）"
+            rule = (f"gap {gap_pct:+.2f}% 未达预期中枢下沿 {hub_lo:+.1f}% 且 {_r_txt()}（{r_level}）"
+                    f" → 高开但承接不足")
+        elif turnover_pct is None:
+            verdict, action = "不及预期", "回避，不追（换手率缺失）"
+            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，换手率缺失无法判衰竭 → 保守回避"
+        elif turnover_pct > 15:
+            verdict, action = "抛压衰竭", "可低吸（关键反手机会）"
+            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()} 缩量，且昨日换手 {turnover_pct:.2f}% > 15%"
+                    f" → 昨日抛压已释放")
+        elif r_pct is not None and r_pct < 3:
+            verdict, action = "抛压未释放", "回避"
+            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()} < 3%，昨日换手 {turnover_pct:.2f}% ≤ 15%"
+                    f" → 抛压未开始释放")
+        else:
+            verdict, action = "不及预期", "回避，不追"
+            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，{_r_txt()} 量能中性 → 不及预期"
+
+    return {
+        "framework": "五步法",
+        "cl": round(cl_pct, 1),
+        "turnover": round(turnover_pct, 2) if turnover_pct is not None else None,
+        "turnover_assumed": turnover_pct is None,
+        "vr": round(vol_ratio, 2) if vol_ratio is not None else None,
+        "zone": zone,
+        "zone_name": _ZONE_NAMES[zone],
+        "lianban": bool(is_lianban),
+        "hub": [hub_lo, hub_hi],
+        "sup": sup,
+        "sup_ge": sup_ge,
+        "fail": fail,
+        "gap": round(gap_pct, 2),
+        "r": round(r_pct, 2) if r_pct is not None else None,
+        "r_level": r_level,
+        "verdict": verdict,
+        "action": action,
+        "rule": rule,
+    }
+
+
+def _float_shares_from_fund(db, code: str) -> float | None:
+    """用 fund_daily 最新换手率反推流通股本（股），失败返回 None。
+
+    fund_daily 只覆盖到 2026-07-21，股本变化慢，用于估算昨日换手率足够。
+    """
+    bare = code[2:] if code.startswith(("sh", "sz", "bj")) else code
+    try:
+        row = db.execute(
+            "SELECT turnover_pct, date FROM fund_daily WHERE code=? AND turnover_pct > 0 ORDER BY date DESC LIMIT 1",
+            (bare,),
+        ).fetchone()
+        if not row:
+            return None
+        t_pct, fdate = row
+        from utils.config import get_date_col
+        date_col, is_int = get_date_col()
+        dv = int(str(fdate).replace("-", "")) if is_int else str(fdate)
+        vol_row = db.execute(
+            f"SELECT volume FROM daily_kline WHERE code=? AND {date_col}=?",
+            (code, dv),
+        ).fetchone()
+        if not vol_row or not vol_row[0]:
+            return None
+        return float(vol_row[0]) / (float(t_pct) / 100.0)
+    except Exception:
+        return None
 
 
 def _fetch_zt_pool_map(date_yyyymmdd: str) -> dict:
