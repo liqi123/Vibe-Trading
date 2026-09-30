@@ -3612,6 +3612,80 @@ def weekly_report() -> dict:
 # AI Analysis (AI分析)
 # ---------------------------------------------------------------------------
 
+def _db_detail_map(prefixed_codes: list[str]) -> dict[str, dict[str, Any]]:
+    """行情源不可用/缺数时，用 daily_kline 最新收盘补出 fetch_detail 同构字段。
+
+    字段单位与 tencent_quotes.fetch_detail 保持一致（amount=万元, mcap=亿元,
+    volume=手），这样上层拼装逻辑无需区分数据来源。
+    """
+    if not prefixed_codes:
+        return {}
+    db = _get_db()
+    if db is None:
+        return {}
+    try:
+        cur = db.cursor()
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
+        dc = "trade_date" if "trade_date" in cols else "date"
+        name_table = _stock_table(db)
+
+        def _bare(c: str) -> str:
+            return c[2:] if c[:2] in ("sh", "sz", "bj") else c
+
+        # 估值字段（fund_daily 只有 6 位裸代码且可能滞后，取不到就为 0）
+        bares = [_bare(c) for c in prefixed_codes]
+        fund: dict[str, tuple] = {}
+        try:
+            ph = ",".join("?" * len(bares))
+            for r in cur.execute(
+                f"SELECT code, pe_ttm, pb, mcap_yi FROM fund_daily "
+                f"WHERE code IN ({ph}) ORDER BY date DESC",
+                bares,
+            ).fetchall():
+                fund.setdefault(r[0], r[1:])
+        except Exception:
+            pass
+
+        out: dict[str, dict[str, Any]] = {}
+        for pref, bare in zip(prefixed_codes, bares):
+            rows = cur.execute(
+                f"SELECT {dc}, open, high, low, close, volume, amount "
+                f"FROM daily_kline WHERE code IN (?, ?) ORDER BY {dc} DESC LIMIT 2",
+                (pref, bare),
+            ).fetchall()
+            if not rows:
+                continue
+            latest = rows[0]
+            close = float(latest[4] or 0)
+            prev_close = float(rows[1][4] or 0) if len(rows) > 1 and rows[1][0] != latest[0] else 0
+            if prev_close <= 0:
+                prev_close = close
+            nrow = cur.execute(
+                f"SELECT name FROM {name_table} WHERE code IN (?, ?) LIMIT 1", (pref, bare)
+            ).fetchone()
+            volume_share = float(latest[5] or 0)              # 库内单位: 股
+            amount_yuan = float(latest[6] or 0) or volume_share * close  # amount 常为 NULL
+            pe, pb, mcap_yuan = fund.get(bare, (0, 0, 0))
+            out[pref] = {
+                "name": nrow[0] if nrow else "",
+                "price": close,
+                "open": float(latest[1] or 0),
+                "high": float(latest[2] or 0),
+                "low": float(latest[3] or 0),
+                "prev_close": prev_close,
+                "change_pct": (close / prev_close - 1) * 100 if prev_close else 0,
+                "volume": volume_share / 100,
+                "amount": amount_yuan / 1e4,
+                "pe_ttm": float(pe or 0),
+                "pb": float(pb or 0),
+                "mcap": float(mcap_yuan or 0) / 1e8,
+                "float_mcap": 0,
+            }
+        return out
+    finally:
+        db.close()
+
+
 @router.post("/ai/analyze")
 def ai_analyze(data: dict) -> dict:
     """Analyze stocks using LLM."""
@@ -3642,11 +3716,63 @@ def ai_analyze(data: dict) -> dict:
         return {"error": str(e)}
 
 
+def _resolve_input_codes(raw_items: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """把用户输入（代码或股票名）解析成6位代码，返回 ([(code, 原始输入)...], unresolved)。
+
+    中文名称若不解析，会拼进腾讯 URL 导致 ascii 编码失败（行情源整体无返回）。
+    """
+    pairs: list[tuple[str, str]] = []
+    unresolved: list[str] = []
+    db = None
+    for item in raw_items:
+        s = str(item).strip()
+        if not s:
+            continue
+        code = None
+        if s.isdigit() and len(s) == 6:
+            code = s
+        elif s[:2] in ("sh", "sz", "bj") and s[2:].isdigit():
+            code = s[2:]
+        else:
+            # 可能是股票名称 → 查库
+            if db is None:
+                db = _get_db()
+            if db is not None:
+                try:
+                    cur = db.cursor()
+                    table = _stock_table(db)
+                    cur.execute(f"SELECT code FROM {table} WHERE name=? LIMIT 1", (s,))
+                    row = cur.fetchone()
+                    if row is None:
+                        cur.execute(f"SELECT code FROM {table} WHERE name LIKE ? LIMIT 1", (f"{s}%",))
+                        row = cur.fetchone()
+                    if row is None:
+                        # 包含匹配（如输入「茅台」→「贵州茅台」），仅在唯一命中时采纳
+                        cur.execute(f"SELECT code FROM {table} WHERE name LIKE ?", (f"%{s}%",))
+                        rows = cur.fetchall()
+                        if len(rows) == 1:
+                            row = rows[0]
+                    if row:
+                        code = str(row[0])
+                except Exception:
+                    code = None
+        if code is None:
+            unresolved.append(s)
+            continue
+        pairs.append((code, s))
+    if db is not None:
+        db.close()
+    # 去重保序
+    seen = set()
+    pairs = [p for p in pairs if not (p[0] in seen or seen.add(p[0]))]
+    return pairs, unresolved
+
+
 @router.post("/ai/reasons")
 def ai_reasons(data: dict) -> dict:
     """实时价格 + 买/不买双向理由分析。
 
-    入参: {"codes": ["sh600519", "300717", "sz000725"]}
+    入参: {"codes": ["sh600519", "300717", "sz000725", "贵州茅台"]}
     返回: {"stocks":[{"code","name","price","change_pct",
                       "buy_reasons":[...],"no_buy_reasons":[...]}]}
     """
@@ -3658,11 +3784,25 @@ def ai_reasons(data: dict) -> dict:
         from data.tencent_quotes import fetch_detail, add_prefix
         from analysis.llm_analyzer import analyze_stock_reasons
 
-        # 带前缀的代码 → 原始输入代码（用于回传稳定的展示用代码）
-        code_by_prefixed = {add_prefix(c): c for c in codes}
+        pairs, unresolved = _resolve_input_codes(codes)
+        if not pairs:
+            return {"error": f"无法识别的代码或股票名称: {'、'.join(unresolved)}"}
+
+        # 带前缀的代码 → 展示用代码（输入是代码则原样回传，输入是名称则回传解析出的代码）
+        def _is_code_input(t: str) -> bool:
+            body = t[2:] if t[:2] in ("sh", "sz", "bj") else t
+            return body.isdigit() and len(body) == 6
+
+        code_by_prefixed = {
+            add_prefix(code): (raw if _is_code_input(raw) else code) for code, raw in pairs
+        }
         prefixed = list(code_by_prefixed.keys())
 
         detail_map = fetch_detail(prefixed)  # key 为带前缀代码
+        # 行情源缺数（非交易时段/网络异常）→ 用数据库最新收盘兜底
+        missing = [p for p in prefixed if p not in detail_map]
+        if missing:
+            detail_map.update(_db_detail_map(missing))
         if not detail_map:
             return {"error": "行情源未返回数据（可能非交易时段或网络异常）"}
 

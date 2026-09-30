@@ -9,9 +9,18 @@ interface StockReason {
   change_pct: number;
   buy_reasons: string[];
   no_buy_reasons: string[];
+  verdict?: string;
+  entry?: string;
+  stop_loss?: string;
   error?: string;
   raw?: string;
 }
+
+const VERDICT_STYLE: Record<string, { label: string; className: string }> = {
+  可买: { label: "可买", className: "bg-red-100 text-red-700 border-red-300" },
+  观望: { label: "观望", className: "bg-amber-100 text-amber-700 border-amber-300" },
+  回避: { label: "回避", className: "bg-green-100 text-green-700 border-green-300" },
+};
 
 function pctColor(pct: number): string {
   if (pct > 0) return "text-red-500"; // A股惯例：涨=红
@@ -147,6 +156,35 @@ export function AIAnalysis() {
             </div>
           </div>
           <div className="text-[11px] text-muted-foreground">实时价格（非交易时段为最近收盘价）</div>
+
+          {!s.error && (s.verdict || s.entry || s.stop_loss) && (
+            <div className="border rounded-md p-3 bg-muted/40 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-muted-foreground">操作结论</span>
+                {s.verdict && (
+                  <span
+                    className={`px-2 py-0.5 text-xs font-semibold border rounded ${
+                      VERDICT_STYLE[s.verdict]?.className ?? "bg-muted text-foreground border-border"
+                    }`}
+                  >
+                    {VERDICT_STYLE[s.verdict]?.label ?? s.verdict}
+                  </span>
+                )}
+              </div>
+              {s.entry && (
+                <div className="text-xs leading-relaxed">
+                  <span className="text-muted-foreground">买入位置：</span>
+                  <span className="font-medium tabular-nums">{s.entry}</span>
+                </div>
+              )}
+              {s.stop_loss && (
+                <div className="text-xs leading-relaxed">
+                  <span className="text-muted-foreground">止损位：</span>
+                  <span className="font-medium tabular-nums">{s.stop_loss}</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {s.error ? (
             <div className="text-xs text-red-600">⚠️ {s.error}</div>
