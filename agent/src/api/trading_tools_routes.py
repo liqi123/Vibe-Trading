@@ -3678,12 +3678,14 @@ def ai_reasons(data: dict) -> dict:
                     "high": q.get("high", 0),
                     "low": q.get("low", 0),
                     "prev_close": q.get("prev_close", 0),
-                    "amount": q.get("amount", 0),
+                    # fetch_detail 返回的 amount 单位为万元、mcap/float_mcap 单位为亿，
+                    # 这里统一换算成「元」再交给 LLM formatter（其展示逻辑按元设计）。
+                    "amount": (q.get("amount") or 0) * 1e4,
                     "volume": q.get("volume", 0),
                     "pe_ttm": q.get("pe_ttm", 0),
                     "pb": q.get("pb", 0),
-                    "mcap": q.get("mcap", 0),
-                    "float_mcap": q.get("float_mcap", 0),
+                    "mcap": (q.get("mcap") or 0) * 1e8,
+                    "float_mcap": (q.get("float_mcap") or 0) * 1e8,
                 }
             )
 
