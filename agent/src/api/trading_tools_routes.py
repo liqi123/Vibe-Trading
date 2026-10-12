@@ -393,7 +393,7 @@ def add_expectation(data: dict):
 
 @router.post("/expectations/update-prices")
 def update_expectation_prices(data: dict):
-    """Update cost_price, name, note for a stock."""
+    """Update cost_price, name, note, stop_loss, take_profit for a stock."""
     code = data.get("code", "").strip().lower()
     if not code:
         raise HTTPException(status_code=400, detail="Code required")
@@ -409,6 +409,11 @@ def update_expectation_prices(data: dict):
                 p["name"] = data.get("name", "")
             if "note" in data:
                 p["note"] = data.get("note", "")
+            # 止盈/止损价：显式传 None 则清除，否则按数值写入
+            if "stop_loss" in data:
+                p["stop_loss"] = data.get("stop_loss") if data.get("stop_loss") not in (None, "", 0) else None
+            if "take_profit" in data:
+                p["take_profit"] = data.get("take_profit") if data.get("take_profit") not in (None, "", 0) else None
             break
 
     state["positions"] = positions

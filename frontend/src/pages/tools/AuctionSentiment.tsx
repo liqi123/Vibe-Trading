@@ -33,6 +33,38 @@ interface StageResult {
   ai_report?: string;
   ai_source?: "project-llm" | "web-llm" | string;
 }
+/** 候选池终审行（阶段5出结果后有 rank/stop；此前只有 stocks 入池行） */
+interface PoolFinal {
+  code: string;
+  name: string;
+  slot?: string;
+  industry?: string;
+  auction_chg?: number | null;
+  reason?: string;
+  rank?: string;
+  s3?: string;
+  s4?: string;
+  stop?: number | null;
+  note?: string;
+}
+interface PoolStock {
+  code: string;
+  name: string;
+  slot?: string;
+  industry?: string;
+  auction_chg?: number | null;
+  reason?: string;
+  s3?: { pass?: boolean | null; desc?: string } | string | null;
+  s4?: { pass?: boolean | null; desc?: string } | string | null;
+}
+interface PoolChannel {
+  date?: string;
+  stocks?: PoolStock[];
+  final?: PoolFinal[];
+  gate?: string | null;
+  note?: string;
+  steps_done?: Record<string, boolean>;
+}
 interface CheckPayload {
   ok: boolean;
   error?: string;
@@ -41,6 +73,7 @@ interface CheckPayload {
   stage_reached?: number;
   stages: StageResult[];
   overall?: { verdict: string; bad_total: number; decisions: string[]; last_decision: string };
+  pool?: { rule?: PoolChannel | null; llm?: PoolChannel | null } | null;
 }
 
 /** 阶段展示映射。后端 stage 编号 2/3/4/5 不动；显示编号从 1 起，对应竞价结束=阶段1。
@@ -81,6 +114,128 @@ function AiReportBlock({ text, source }: { text: string; source?: string }) {
         {isProject ? "项目 LLM 分析（本地竞价 + 腾讯实时）" : "AI 本地分析结论（豆包 + DeepSeek 多源综合）"}
       </p>
       <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap text-sm">{text}</div>
+    </div>
+  );
+}
+
+const RANK_STYLES: Record<string, string> = {
+  推荐: "bg-green-500/15 text-green-600 border-green-500/30",
+  备选: "bg-yellow-500/15 text-yellow-600 border-yellow-500/30",
+  仅观察: "bg-orange-500/15 text-orange-600 border-orange-500/30",
+  淘汰: "bg-red-500/15 text-red-600 border-red-500/30",
+};
+
+const sigDesc = (v: PoolStock["s3"]): string => {
+  if (!v) return "—";
+  if (typeof v === "string") return v;
+  return v.desc || "—";
+};
+
+/** 候选池单通道卡：阶段5出终审后展示 rank/防守位，此前展示入池理由+逐步验证 */
+function PoolChannelCard({ title, pool }: { title: string; pool: PoolChannel }) {
+  const finals = pool.final ?? [];
+  const rows: PoolFinal[] = finals.length
+    ? finals
+    : (pool.stocks ?? []).map((s) => ({
+        code: s.code,
+        name: s.name,
+        slot: s.slot,
+        industry: s.industry,
+        auction_chg: s.auction_chg,
+        reason: s.reason,
+        s3: sigDesc(s.s3),
+        s4: sigDesc(s.s4),
+      }));
+  return (
+    <div className="rounded-lg bg-card border p-4 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="font-semibold text-sm">候选池 · {title}</h3>
+        {pool.gate && (
+          <span className={cn("px-2 py-0.5 text-xs rounded-full border", decisionColor(pool.gate))}>
+            闸门 {pool.gate}
+          </span>
+        )}
+        {pool.note && <span className="text-xs text-muted-foreground">{pool.note}</span>}
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">暂无候选</p>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((r) => (
+            <li key={r.code} className="text-sm border rounded-md p-2 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {r.rank && (
+                  <span className={cn("px-1.5 py-0.5 text-xs rounded border", RANK_STYLES[r.rank] || "bg-muted text-muted-foreground")}>
+                    {r.rank}
+                  </span>
+                )}
+                <span className="font-medium">{r.name}</span>
+                <span className="text-xs text-muted-foreground">{r.code}</span>
+                {r.industry && <span className="text-xs text-muted-foreground">{r.industry}</span>}
+                {r.auction_chg != null && (
+                  <span className={cn("text-xs", r.auction_chg >= 0 ? "text-red-500" : "text-green-600")}>
+                    竞价{r.auction_chg >= 0 ? "+" : ""}
+                    {r.auction_chg.toFixed(2)}%
+                  </span>
+                )}
+                {r.stop != null && <span className="text-xs text-muted-foreground">防守位 {r.stop}</span>}
+              </div>
+              {r.reason && <p className="text-xs text-muted-foreground">入池：{r.reason}</p>}
+              <p className="text-xs text-muted-foreground">
+                09:35 {r.s3 || "—"} | 09:45 {r.s4 || "—"}
+                {r.note ? ` | ${r.note}` : ""}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** 推荐股票区：规则通道（后端即时计算）+ LLM 通道（缓存回填，可懒推进） */
+function PoolSection({
+  pool,
+  advancing,
+  advanceError,
+  onAdvance,
+}: {
+  pool?: CheckPayload["pool"];
+  advancing: boolean;
+  advanceError?: string | null;
+  onAdvance: () => void;
+}) {
+  const rule = pool?.rule;
+  const llm = pool?.llm;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold">推荐股票 · 候选池（规则 + LLM 双通道）</h2>
+        {!llm && (
+          <button
+            onClick={onAdvance}
+            disabled={advancing}
+            className="ml-auto px-2 py-0.5 text-xs border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {advancing ? "LLM 池推进中…（最长数分钟）" : "推进 LLM 池"}
+          </button>
+        )}
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        {rule && <PoolChannelCard title="规则通道" pool={rule} />}
+        {llm ? (
+          <PoolChannelCard title="LLM 通道" pool={llm} />
+        ) : (
+          <div className="rounded-lg bg-card border p-4 text-sm text-muted-foreground">
+            LLM 通道尚未生成：点击「推进 LLM 池」，让 LLM 独立选池 → 逐股自验证 → 终审（每阶段一次调用，步级缓存，失败可重试）。
+          </div>
+        )}
+      </div>
+      {advanceError && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          LLM 池推进失败：{advanceError}
+        </div>
+      )}
     </div>
   );
 }
@@ -201,6 +356,29 @@ export function AuctionSentiment({ date: propDate }: { date?: string } = {}) {
     [date, applyAiReport],
   );
 
+  // 推进 LLM 选股池（步级缓存，已完成步跳过；数据拉取+LLM调用较慢）
+  const [advancing, setAdvancing] = useState(false);
+  const [advanceError, setAdvanceError] = useState<string | null>(null);
+  const advancePool = useCallback(async () => {
+    setAdvancing(true);
+    setAdvanceError(null);
+    try {
+      const res = await api.tools.post<{ ok: boolean; pool?: CheckPayload["pool"]; error?: string }>(
+        "/auction-sentiment/pool-advance",
+        { date },
+      );
+      if (res.ok && res.pool) {
+        setPayload((prev) => (prev ? { ...prev, pool: res.pool } : prev));
+      } else {
+        setAdvanceError(res.error || "推进失败");
+      }
+    } catch (e: any) {
+      setAdvanceError(e?.message ?? String(e));
+    } finally {
+      setAdvancing(false);
+    }
+  }, [date]);
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex flex-wrap items-center gap-2">
@@ -223,7 +401,7 @@ export function AuctionSentiment({ date: propDate }: { date?: string } = {}) {
       {loading ? (
         <div className="border rounded-lg p-12 text-center text-muted-foreground">
           <Loader2 className="h-6 w-6 mx-auto mb-2 animate-spin opacity-50" />
-          <p className="text-xs">全市场行情拉取约需 10-20 秒…</p>
+          <p className="text-xs">全市场行情拉取约需 30 秒…</p>
         </div>
       ) : error ? (
         <div className="border rounded-lg p-12 text-center">
@@ -255,6 +433,14 @@ export function AuctionSentiment({ date: propDate }: { date?: string } = {}) {
               </div>
             </div>
           )}
+
+          {/* 推荐股票：候选池双通道（规则通道即时，LLM 通道缓存+懒推进） */}
+          <PoolSection
+            pool={payload?.pool}
+            advancing={advancing}
+            advanceError={advanceError}
+            onAdvance={advancePool}
+          />
 
           {/* 四阶段卡片 — 始终渲染4张，有数据用真实，无数据用占位 */}
           <div className="grid gap-3 lg:grid-cols-2">

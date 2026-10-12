@@ -12,6 +12,8 @@ interface WatchlistItem {
   price: number;
   change_pct: number;
   cost_price?: number;
+  stop_loss?: number | null;
+  take_profit?: number | null;
   ma5?: number;
   ma10?: number;
   ma20?: number;
@@ -64,6 +66,8 @@ interface PositionData {
   code: string;
   name?: string;
   cost_price?: number;
+  stop_loss?: number | null;
+  take_profit?: number | null;
   ma5?: number;
   ma10?: number;
   ma20?: number;
@@ -80,7 +84,7 @@ export function Watchlist() {
   const [newCode, setNewCode] = useState("");
   const [searchResults, setSearchResults] = useState<{code: string; name: string}[]>([]);
   const [editingCode, setEditingCode] = useState<string | null>(null);
-  const [editValues, setEditValues] = useState({ cost_price: "" });
+  const [editValues, setEditValues] = useState({ cost_price: "", stop_loss: "", take_profit: "" });
   const [editingNoteCode, setEditingNoteCode] = useState<string | null>(null);
   const [editNote, setEditNote] = useState("");
   const editNoteRef = useRef("");
@@ -178,6 +182,8 @@ export function Watchlist() {
             price: priceInfo.price || 0,
             change_pct: priceInfo.change_pct || 0,
             cost_price: p.cost_price || 0,
+            stop_loss: p.stop_loss ?? null,
+            take_profit: p.take_profit ?? null,
             ma5: p.ma5,
             ma10: p.ma10,
             ma20: p.ma20,
@@ -278,12 +284,14 @@ export function Watchlist() {
     setEditingCode(item.code);
     setEditValues({
       cost_price: item.cost_price ? String(item.cost_price) : "",
+      stop_loss: item.stop_loss != null ? String(item.stop_loss) : "",
+      take_profit: item.take_profit != null ? String(item.take_profit) : "",
     });
   };
 
   const cancelEdit = () => {
     setEditingCode(null);
-    setEditValues({ cost_price: "" });
+    setEditValues({ cost_price: "", stop_loss: "", take_profit: "" });
   };
 
   const saveEdit = async (code: string) => {
@@ -291,6 +299,8 @@ export function Watchlist() {
       await api.tools.post<any>("/expectations/update-prices", {
         code,
         cost_price: parseFloat(editValues.cost_price) || 0,
+        stop_loss: editValues.stop_loss ? parseFloat(editValues.stop_loss) : null,
+        take_profit: editValues.take_profit ? parseFloat(editValues.take_profit) : null,
       });
       setEditingCode(null);
       fetchData();
@@ -338,6 +348,47 @@ export function Watchlist() {
     setShowAddModal(true);
   };
 
+  // 止损价/止盈价 单元格：展示 + 内联编辑 + 触及高亮
+  const renderPriceCell = (item: WatchlistItem, field: "stop_loss" | "take_profit") => {
+    const val = field === "stop_loss" ? item.stop_loss : item.take_profit;
+    const editing = editingCode === item.code;
+    if (editing) {
+      return (
+        <input
+          type="number"
+          step="0.01"
+          value={editValues[field]}
+          onChange={(e) => setEditValues({ ...editValues, [field]: e.target.value })}
+          className="w-20 px-2 py-1 text-right text-sm border rounded bg-background"
+          placeholder="—"
+        />
+      );
+    }
+    if (val == null) return <span className="text-muted-foreground">—</span>;
+    const triggered =
+      item.price > 0 && (field === "stop_loss" ? item.price <= val : item.price >= val);
+    const cls = triggered
+      ? field === "stop_loss"
+        ? "text-red-600 font-semibold"
+        : "text-green-600 font-semibold"
+      : "";
+    const badge = triggered ? (field === "stop_loss" ? "触及" : "达标") : "";
+    return (
+      <span className={`font-mono ${cls}`}>
+        {val.toFixed(2)}
+        {badge && (
+          <span
+            className={`ml-1 text-[10px] px-1 py-0.5 rounded ${
+              field === "stop_loss" ? "bg-red-100 text-red-600" : "bg-green-100 text-green-600"
+            }`}
+          >
+            {badge}
+          </span>
+        )}
+      </span>
+    );
+  };
+
   const renderStockTable = (title: string, category: "observation" | "holding", rows: WatchlistItem[]) => (
     <div className="border rounded-lg bg-card overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/30">
@@ -367,6 +418,8 @@ export function Watchlist() {
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thPrice")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thChange")}</th>
                 <th className="px-4 py-3 text-right font-medium">成本价</th>
+                <th className="px-4 py-3 text-right font-medium">止损价</th>
+                <th className="px-4 py-3 text-right font-medium">止盈价</th>
                 <th className="px-4 py-3 text-right font-medium">盈亏</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionChange")}</th>
                 <th className="px-4 py-3 text-right font-medium">{t("watchlist.thAuctionVol")}</th>
@@ -403,6 +456,12 @@ export function Watchlist() {
                       ) : (
                         <span className="font-mono">{item.cost_price ? item.cost_price.toFixed(2) : "-"}</span>
                       )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {renderPriceCell(item, "stop_loss")}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {renderPriceCell(item, "take_profit")}
                     </td>
                     <td className={`px-4 py-3 text-right font-medium ${pnlPct == null ? "text-muted-foreground" : pnlPct >= 0 ? "text-red-600" : "text-green-600"}`}>
                       {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "-"}

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import date as _date, datetime, timedelta
+from datetime import date as _date, datetime, time as _dt_time, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -33,6 +33,15 @@ _PAPER_DIR = _TREE_ROOT / "paper"
 
 def _today() -> str:
     return _date.today().isoformat()
+
+
+def _in_trading_hours() -> bool:
+    """当前是否 A股交易时段（周一~周五 09:30-11:30 / 13:00-15:00，本地时区）。"""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    return (_dt_time(9, 30) <= t <= _dt_time(11, 30)) or (_dt_time(13, 0) <= t <= _dt_time(15, 0))
 
 
 def _auction_info(date_str: str) -> dict:
@@ -140,13 +149,38 @@ def flow_status(date: str = ""):
     }
 
 
+_ALERT_STATE_PATH = _PAPER_DIR / "alert_push_state.json"
+
+
+def _load_alert_state() -> dict:
+    try:
+        return json.loads(_ALERT_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_alert_state(state: dict):
+    tmp = _ALERT_STATE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_ALERT_STATE_PATH)
+
+
 @router.post("/stops")
-def flow_stops():
-    """检查自选股持仓止盈/止损，有告警则推送企业微信。"""
+def flow_stops(dry_run: bool = False):
+    """检查自选股持仓止盈/止损，达到则推送企业微信。
+
+    dry_run=true 仅发送一条【测试】消息验证通道，不触发真实告警、不改写入库。
+    带去重：同一标的的同一类告警(止盈/止损)只在状态跃迁时推送一次；价格恢复后标记清除，允许下次再触发。
+    """
     holdings = _watchlist_holdings()
     alerts = holdings["alerts"]
-    _notify_watchlist_alerts(alerts)
-    return {"ok": True, "alerts": alerts, "holdings": [holdings], "wecom_pushed": bool(alerts)}
+    if dry_run:
+        _notify_watchlist_alerts(alerts, holdings["positions"], dry_run=True)
+        return {"ok": True, "alerts": alerts, "dry_run": True, "wecom_pushed": True}
+    if not _in_trading_hours():
+        return {"ok": True, "alerts": alerts, "holdings": [holdings], "wecom_pushed": False, "skipped": "非交易时段(09:30-11:30/13:00-15:00 外)"}
+    pushed = _notify_watchlist_alerts(alerts, holdings["positions"])
+    return {"ok": True, "alerts": alerts, "holdings": [holdings], "wecom_pushed": pushed}
 
 
 @router.post("/target")
@@ -536,6 +570,7 @@ def _watchlist_holdings() -> dict:
                 "code": code, "name": holding["name"],
                 "reason": f"已达止盈价 {take_profit:.2f}",
                 "price": current, "threshold": take_profit,
+                "kind": "take_profit", "pnl_pct": holding.get("pnl_pct"),
             })
         elif stop_loss and current and current <= stop_loss:
             alerts.append({
@@ -543,18 +578,61 @@ def _watchlist_holdings() -> dict:
                 "code": code, "name": holding["name"],
                 "reason": f"已破止损价 {stop_loss:.2f}",
                 "price": current, "threshold": stop_loss,
+                "kind": "stop_loss", "pnl_pct": holding.get("pnl_pct"),
             })
     return {"name": "自选持仓", "strategy": "watchlist", "positions": holdings, "alerts": alerts}
 
 
-def _notify_watchlist_alerts(alerts: list):
-    """有自选持仓止盈/止损告警时推送企业微信。"""
-    if not alerts:
-        return
+def _notify_watchlist_alerts(alerts: list, positions: list | None = None, dry_run: bool = False) -> bool:
+    """自选持仓止盈/止损告警推送企业微信（带去重）。
+
+    - dry_run=True：仅发送一条【测试】消息验证通道，不做真实告警、不改状态。
+    - 去重：同一标的(code)+同类告警(kind)只在状态首次跃迁时推送一次；价格恢复后清除标记，
+      下次再次触发可重新推送。
+    - positions 用于恢复清除：某标的当前未触发任何告警时，清掉它在状态表里的旧标记。
+    返回是否真正发送了消息。
+    """
     from utils.notify import send_wecom
 
-    lines = [
-        f"> **{a.get('portfolio', '自选持仓')}** 💡 {a['name']}({a['code']})\n> {a['reason']} 现价{a['price']:.2f}"
-        for a in alerts
-    ]
-    send_wecom("自选持仓止盈/止损告警", "\n".join(lines))
+    if dry_run:
+        send_wecom(
+            "自选持仓止盈/止损告警[测试]",
+            "这是一条**测试推送**，用于验证企业微信通道连通性。\n> 真实告警将在持仓达到止盈/止损价时自动发送。",
+        )
+        return True
+
+    state = _load_alert_state()
+    # 当前触发的告警签名集合
+    triggered = {}
+    for a in alerts:
+        sig = f"{a['code']}:{a.get('kind')}"
+        triggered[sig] = a
+
+    # 恢复清除：持仓当前未触发任何告警 -> 清掉其旧标记，允许下次再触发
+    if positions:
+        live_codes = {p.get("code") for p in positions if p.get("code")}
+        for sig in list(state.keys()):
+            code = sig.split(":", 1)[0]
+            if code in live_codes and sig not in triggered:
+                state.pop(sig, None)
+
+    new_alerts = []
+    for sig, a in triggered.items():
+        if state.get(sig) != "notified":
+            new_alerts.append(a)
+            state[sig] = "notified"
+
+    pushed = False
+    if new_alerts:
+        lines = [
+            f"> **{a.get('portfolio', '自选持仓')}** "
+            f"{'🟢' if a.get('kind') == 'take_profit' else '🔴'} "
+            f"{a['name']}({a['code']})\n> {a['reason']} 现价{a['price']:.2f}"
+            + (f" 盈亏{a['pnl_pct']:+.2f}%" if a.get('pnl_pct') is not None else "")
+            for a in new_alerts
+        ]
+        send_wecom("自选持仓止盈/止损告警", "\n".join(lines))
+        pushed = True
+
+    _save_alert_state(state)
+    return pushed

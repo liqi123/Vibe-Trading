@@ -103,6 +103,18 @@ def auction_sentiment_check(date: str = "", stage: int = 0):
         from data.auction_sentiment_check import summarize_stages
 
         payload["overall"] = summarize_stages(stages)
+    # LLM 选股池只回填缓存（API 路径 run(verbose=False) 不触发 LLM 调用，
+    # 推进走 POST /pool-advance，避免 /check 变慢）
+    pool = payload.get("pool")
+    if isinstance(pool, dict) and not pool.get("llm"):
+        try:
+            from data.auction_sentiment_ai import load_llm_pool_cache
+
+            cached_pool = load_llm_pool_cache(date_str)
+            if cached_pool:
+                pool["llm"] = cached_pool
+        except Exception:  # noqa: BLE001
+            pass
     return {"ok": True, **payload}
 
 
@@ -171,6 +183,26 @@ def auction_stage_narrative(
     except Exception as exc:  # pragma: no cover
         return {"ok": False, "error": f"{exc}", "date": date_str, "stage": stage, "narrative": ""}
     return {"ok": True, "date": date_str, "stage": stage, "narrative": text, "cached": False}
+
+
+@router.post("/pool-advance")
+def auction_pool_advance(payload: dict | None = None, date: str = "", stage: int = 0):
+    """推进 LLM 选股池（09:25 选池 → 09:35/09:45 逐股自验证 → 10:00 终审）。
+
+    每步一次 LLM 调用、步级缓存（{date}_llm_pool.json），已完成步自动跳过。
+    数据拉取 + LLM 调用较慢（数十秒至数分钟），前端需显示进行中状态。
+    """
+    if payload:
+        date = date or payload.get("date", "")
+        stage = stage or int(payload.get("stage") or 0)
+    from data.auction_sentiment_check import get_today_str, run
+
+    date_str = date or get_today_str()
+    try:
+        result = run(date_str=date_str, stage=stage or None, verbose=False, llm_pool=True)
+    except Exception as exc:  # pragma: no cover
+        return {"ok": False, "error": f"{exc}", "date": date_str, "pool": None}
+    return {"ok": True, "date": date_str, "pool": (result.get("pool") or {})}
 
 
 def register_auction_sentiment_routes(app):
