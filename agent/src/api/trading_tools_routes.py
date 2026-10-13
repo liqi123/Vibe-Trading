@@ -6462,6 +6462,23 @@ def get_auction_gap_up(
         db.close()
 
 
+@router.get("/auction/hot100")
+def get_auction_hot100(top: int = 100) -> dict:
+    """东财人气榜前 N × 竞价超预期五步法。
+
+    复用根项目 data.auction_collector.hot100_expectation（东财排行 + get_watchlist_auction
+    打分）。外网排行腿约 1~3 秒；push2 行情失败时名称由本地库兜底，不影响打分。
+    """
+    from data.auction_collector import hot100_expectation
+
+    try:
+        items = hot100_expectation(None, top=max(1, min(int(top), 100)), push=False)
+    except Exception as e:
+        _log.warning("auction hot100 failed: %s", e)
+        return {"ok": False, "detail": str(e), "items": []}
+    return {"ok": True, "items": items}
+
+
 def _save_ai_report(date_str: str, stage_arg, report: str, log_line=None) -> str:
     """把综合报告落盘到 reports/output/auction_ai/{date}/stage{card}.md，返回相对路径。
 

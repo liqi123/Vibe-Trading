@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, Fragment, useRef } from "react";
 import { toast } from "sonner";
-import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera, Search, Bot, ArrowUpRight, ChevronDown, ExternalLink } from "lucide-react";
+import { RefreshCw, Zap, TrendingUp, TrendingDown, BarChart3, Calendar, Eye, Plus, Trash2, Sparkles, Camera, Search, Bot, ArrowUpRight, ChevronDown, ExternalLink, Flame } from "lucide-react";
 import { api } from "@/lib/api";
 import { RunLogPanel } from "@/components/RunLogPanel";
 import { useLLMWebAsk } from "@/hooks/useLLMWebAsk";
@@ -33,6 +33,15 @@ interface GapUpStock {
   top_industry?: string | null; top_industry_chg?: number | null;
 }
 
+interface HotStock {
+  rank: number; code: string; name: string;
+  price: number | null; chg: number | null;
+  gap: number | null; verdict: string; action: string;
+  zone_name: string; hub: [number, number] | null;
+  r: number | null; lianban: boolean;
+  score?: Record<string, unknown> | null;
+}
+
 function volClass(v: number) {
   if (v > 0) return "text-red-600";
   if (v < 0) return "text-green-600";
@@ -52,7 +61,7 @@ export function AuctionBoard() {
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
   const [snapshotting, setSnapshotting] = useState(false);
-  const [tab, setTab] = useState<"limitup" | "compare" | "expectation" | "concept" | "ai" | "gapup">("limitup");
+  const [tab, setTab] = useState<"limitup" | "compare" | "expectation" | "concept" | "ai" | "gapup" | "hot100">("limitup");
   const [limitUpData, setLimitUpData] = useState<{
     prev_limitup: any[];
     today_limitup: any[];
@@ -260,6 +269,8 @@ export function AuctionBoard() {
 
   const [gapUpData, setGapUpData] = useState<{ date: string; stocks: GapUpStock[] } | null>(null);
   const [gapUpLoading, setGapUpLoading] = useState(false);
+  const [hotData, setHotData] = useState<HotStock[] | null>(null);
+  const [hotLoading, setHotLoading] = useState(false);
 
   const fetchDates = async (selectLatest = false) => {
     try {
@@ -442,6 +453,15 @@ export function AuctionBoard() {
     finally { setGapUpLoading(false); }
   };
 
+  const fetchHot100 = async () => {
+    setHotLoading(true);
+    try {
+      const data = await api.tools.get<any>("/auction/hot100?top=100");
+      setHotData(data.ok === false ? [] : (data.items || []));
+    } catch (e) { setHotData([]); }
+    finally { setHotLoading(false); }
+  };
+
   const handleAddStock = async () => {
     if (!newCode.trim()) return;
     try {
@@ -608,6 +628,7 @@ export function AuctionBoard() {
       else if (tab === "concept") fetchConceptAnalysis(selectedDate);
       else if (tab === "limitup") fetchLimitUp();
       else if (tab === "gapup") fetchGapUp();
+      else if (tab === "hot100") fetchHot100();
     }
   }, [selectedDate, tab, analysisSource]);
 
@@ -742,6 +763,7 @@ export function AuctionBoard() {
               else if (tab === "concept") fetchConceptAnalysis(selectedDate);
               else if (tab === "limitup") fetchLimitUp();
               else if (tab === "gapup") fetchGapUp();
+              else if (tab === "hot100") fetchHot100();
             }}
             disabled={loading}
             className="flex items-center gap-2 px-3 py-1.5 text-sm border rounded-md hover:bg-muted transition-colors disabled:opacity-50"
@@ -775,6 +797,7 @@ export function AuctionBoard() {
       <div className="flex items-center gap-1 border-b">
         {[
           { key: "limitup" as const, label: "涨停竞价", icon: BarChart3 },
+          { key: "hot100" as const, label: "热度前100竞价", icon: Flame },
           { key: "gapup" as const, label: "跳空高开", icon: ArrowUpRight },
           { key: "compare" as const, label: "竞价对比", icon: TrendingDown },
           { key: "expectation" as const, label: "预期管理", icon: Eye },
@@ -928,6 +951,115 @@ export function AuctionBoard() {
             )}
           </div>
         </div>
+      ) : tab === "hot100" ? (
+        (() => {
+          const verdictCls = (v: string) =>
+            v === "强超预期" ? "bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400 font-semibold"
+            : v === "超预期" ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400"
+            : v === "弱超预期" ? "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400"
+            : v === "抛压衰竭" ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400"
+            : v === "出货加速" ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400 font-semibold"
+            : v === "不及预期" || v === "抛压未释放" ? "bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-400"
+            : "bg-muted/40 text-muted-foreground";
+          const OPP = new Set(["强超预期", "超预期", "弱超预期", "抛压衰竭"]);
+          const RISK = new Set(["不及预期", "出货加速", "抛压未释放"]);
+          const scored = (hotData || []).filter((h) => h.score);
+          const oppN = scored.filter((h) => OPP.has(h.verdict)).length;
+          const riskN = scored.filter((h) => RISK.has(h.verdict)).length;
+          return (
+            <div className="space-y-4">
+              <div className="grid grid-cols-4 gap-4 text-sm">
+                <div className="border rounded-lg bg-card p-3">
+                  <div className="text-muted-foreground">东财人气榜</div>
+                  <div className="text-xl font-bold">{hotData ? `${hotData.length}只` : "-"}</div>
+                </div>
+                <div className="border rounded-lg bg-card p-3">
+                  <div className="text-muted-foreground">可评分（有竞价+昨K）</div>
+                  <div className="text-xl font-bold">{hotData ? `${scored.length}只` : "-"}</div>
+                </div>
+                <div className="border rounded-lg bg-card p-3">
+                  <div className="text-muted-foreground">机会（超预期系/低吸）</div>
+                  <div className="text-xl font-bold text-red-600">{hotData ? `${oppN}只` : "-"}</div>
+                </div>
+                <div className="border rounded-lg bg-card p-3">
+                  <div className="text-muted-foreground">风险（回避/离场）</div>
+                  <div className="text-xl font-bold text-green-600">{hotData ? `${riskN}只` : "-"}</div>
+                </div>
+              </div>
+              <div className="border rounded-lg bg-card overflow-hidden">
+                <div className="px-4 py-3 border-b bg-muted/30 flex items-center gap-2 justify-between">
+                  <div className="flex items-center gap-2">
+                    <Flame className="h-4 w-4 text-orange-500" />
+                    <h2 className="font-semibold">热度前100竞价（东财人气榜 × 五步法）</h2>
+                  </div>
+                  <span className="text-xs text-muted-foreground">机会组在前，按判定排序；打分取最近竞价日</span>
+                </div>
+                {hotLoading ? (
+                  <div className="p-8 text-center text-muted-foreground animate-pulse">加载中（拉取东财人气榜约 2~5 秒）...</div>
+                ) : !hotData || hotData.length === 0 ? (
+                  <div className="p-8 text-center text-muted-foreground">暂无数据（人气榜获取失败或接口不可用）</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/40 text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">人气排名</th>
+                          <th className="px-3 py-2 text-left font-medium">代码</th>
+                          <th className="px-3 py-2 text-left font-medium">名称</th>
+                          <th className="px-3 py-2 text-right font-medium">竞价gap</th>
+                          <th className="px-3 py-2 text-left font-medium">形态档</th>
+                          <th className="px-3 py-2 text-center font-medium">五步法判定</th>
+                          <th className="px-3 py-2 text-left font-medium">预期中枢</th>
+                          <th className="px-3 py-2 text-right font-medium">量能比R</th>
+                          <th className="px-3 py-2 text-left font-medium">操作建议</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...scored].sort((a, b) => {
+                          const w = (v: string) =>
+                            v === "强超预期" ? 0 : v === "超预期" ? 1 : v === "抛压衰竭" ? 2 : v === "弱超预期" ? 3
+                            : v === "偏强" ? 4 : v === "正常" ? 5
+                            : v === "不及预期" ? 6 : v === "出货加速" ? 7 : v === "抛压未释放" ? 8 : 9;
+                          return w(a.verdict) - w(b.verdict) || a.rank - b.rank;
+                        }).map((h) => (
+                          <tr key={h.code} className="border-t hover:bg-muted/30">
+                            <td className="px-3 py-2 text-muted-foreground">#{h.rank}</td>
+                            <td className="px-3 py-2 font-mono">{h.code}</td>
+                            <td className="px-3 py-2 font-medium">
+                              {h.name}
+                              {h.lianban && (
+                                <span className="ml-1 text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400">连板</span>
+                              )}
+                            </td>
+                            <td className={`px-3 py-2 text-right font-medium ${h.gap == null ? "text-muted-foreground" : h.gap >= 0 ? "text-red-600" : "text-green-600"}`}>
+                              {h.gap == null ? "-" : `${h.gap >= 0 ? "+" : ""}${h.gap.toFixed(2)}%`}
+                            </td>
+                            <td className="px-3 py-2 text-xs text-muted-foreground">{h.zone_name || "-"}</td>
+                            <td className="px-3 py-2 text-center">
+                              <span className={`text-xs px-2 py-0.5 rounded-full ${verdictCls(h.verdict)}`}>{h.verdict}</span>
+                            </td>
+                            <td className="px-3 py-2 text-xs text-muted-foreground">
+                              {h.hub ? `${h.hub[0] >= 0 ? "+" : ""}${h.hub[0]}~+${h.hub[1]}%` : "-"}
+                            </td>
+                            <td className={`px-3 py-2 text-right ${h.r == null ? "text-muted-foreground" : h.r >= 5 ? "text-red-600" : ""}`}>
+                              {h.r == null ? "-" : `${h.r.toFixed(2)}%`}
+                            </td>
+                            <td className="px-3 py-2 text-xs">{h.action || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {(hotData || []).filter((h) => !h.score).length > 0 && (
+                      <div className="px-4 py-2 text-xs text-muted-foreground border-t">
+                        另有 {(hotData || []).filter((h) => !h.score).length} 只缺竞价/昨K线未评分（已隐藏）
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()
       ) : tab === "compare" && compareData ? (
         <div className="space-y-6">
           {/* Search Bar */}
