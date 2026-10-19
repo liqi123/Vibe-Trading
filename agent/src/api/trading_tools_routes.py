@@ -3397,10 +3397,13 @@ def get_watchlist_auction(codes: str = "") -> dict:
         try:
             cc_search = list(dict.fromkeys(bare_codes + code_list))
             cc_ph = ",".join("?" * len(cc_search))
+            # 列名回退：旧库 ths_concepts，现库 concepts/core_concepts（硬编码会静默降级）
+            cc_cols = {r[1] for r in db.execute("PRAGMA table_info(concept_count)").fetchall()}
+            cc_col = next((c for c in ("ths_concepts", "concepts", "core_concepts") if c in cc_cols), None)
             cc_rows = db.execute(
-                f"SELECT code, ths_concepts FROM concept_count WHERE code IN ({cc_ph})",
+                f"SELECT code, {cc_col} FROM concept_count WHERE code IN ({cc_ph})",
                 cc_search,
-            ).fetchall()
+            ).fetchall() if cc_col else []
             for r in cc_rows:
                 if r[1]:
                     lst = _parse_ths_concepts(r[1])
