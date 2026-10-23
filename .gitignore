@@ -90,3 +90,8 @@ AGENTS.md
 # Alpha Zoo wiki artifacts (generated, not source)
 wiki/alpha-library/manifest.json
 wiki/alpha-library/content/
+
+# Runtime logs / crash dumps (never commit)
+*.log
+*.err
+agent/tdx_data.db

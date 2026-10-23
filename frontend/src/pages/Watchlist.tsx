@@ -102,7 +102,7 @@ export function Watchlist() {
     verdict === "正常" ? "text-green-600" :
     verdict === "偏强" ? "text-blue-600" :
     verdict === "出货加速" ? "text-red-700" :
-    verdict === "抛压衰竭" ? "text-sky-600" :
+    verdict === "放量出清待确认" ? "text-sky-600" :
     verdict === "不及预期" || verdict === "抛压未释放" ? "text-yellow-600" :
     "text-gray-600";
 

@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { VibeShortStats } from "./VibeShortStats";
 
 // A股红涨绿跌（与 MarketReview 约定一致）
 const pctColor = (p: number) => (p > 0 ? "text-danger" : p < 0 ? "text-success" : "text-muted-foreground");
@@ -19,11 +20,21 @@ const localDate = () => {
 interface AnalystCard { key: string; title: string; tag: string; html: string }
 interface VerifyItem { metric: string; label: string; direction: string; reason?: string; base_value?: number | null; unit?: string }
 interface FocusBlock { text?: string; verification_items?: VerifyItem[] }
+interface NumberCheckItem {
+  label: string; tier?: string; expected?: number | null; unit?: string;
+  reported?: number[] | null; ok?: boolean | null; expr?: string; computed?: number; stated?: number;
+}
+interface NumberChecks {
+  available?: boolean; reason?: string; checked?: number; mismatch?: number;
+  recalc_checked?: number; recalc_mismatch?: number; missing_n?: number; checks?: NumberCheckItem[];
+}
 interface ReviewPayload {
   date?: string; analysts?: AnalystCard[]; focus?: FocusBlock; focus_md?: string;
   sentiment_report?: string; capital_report?: string; theme_report?: string;
   dragon_tiger_report?: string; leader_report?: string; macro_sector_report?: string;
   warnings?: string[];
+  number_checks?: NumberChecks;
+  fingerprint_ok?: boolean;
 }
 
 interface SentimentBlock { up: number; down: number; flat: number; zt: number; zt_real: number; dt: number; dt_real: number; breadth: string; speculation: string; date: string }
@@ -201,6 +212,62 @@ export function VibeReview() {
                 <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{payload.focus_md}</ReactMarkdown>
                 </div>
+              </div>
+            )}
+            {payload.number_checks?.available && (
+              <div className={cn("border rounded-lg p-3 bg-card", payload.number_checks.mismatch || payload.number_checks.recalc_mismatch ? "border-destructive/50" : "")}>
+                <p className="mb-1.5 text-xs font-semibold text-muted-foreground">
+                  AI 数字核对：资料包 {payload.number_checks.checked ?? 0} 项
+                  {payload.number_checks.mismatch
+                    ? <span className="text-destructive"> · {payload.number_checks.mismatch} 项不一致</span>
+                    : <span className="text-success"> · 全一致</span>}
+                  {(payload.number_checks.recalc_checked ?? 0) > 0 && (
+                    payload.number_checks.recalc_mismatch
+                      ? <span className="text-destructive"> · 算式 {payload.number_checks.recalc_checked} 条（{payload.number_checks.recalc_mismatch} 错）</span>
+                      : <span> · 算式 {payload.number_checks.recalc_checked} 条全对</span>
+                  )}
+                  {(payload.number_checks.missing_n ?? 0) > 0 && (
+                    <span className="text-muted-foreground"> · {payload.number_checks.missing_n} 项未写出处</span>
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {(payload.number_checks.checks ?? []).map((c, i) => {
+                    const tier = c.tier ?? "packet";
+                    if (tier === "missing") {
+                      return (
+                        <span key={`${c.label}-${i}`} title={`数据包 ${c.expected}${c.unit ?? ""}，报告全文未提`}
+                          className="inline-flex items-center gap-1 rounded border border-dashed border-border/60 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                          <span className="font-medium">{c.label}</span><span>未写出处</span>
+                        </span>
+                      );
+                    }
+                    if (tier === "recalc") {
+                      return (
+                        <span key={`${c.expr}-${i}`}
+                          className={cn("inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px]", c.ok ? "border-border/60" : "border-destructive/60 text-destructive font-semibold")}
+                          title={`报告写 ${c.stated} · 重算 ${c.computed}`}>
+                          <span className="font-medium">算式</span>
+                          <span className="font-mono">{c.expr}</span>
+                          {!c.ok && <span className="font-mono">✗ 算得 {c.computed}</span>}
+                        </span>
+                      );
+                    }
+                    return (
+                      <span key={`${c.label}-${i}`}
+                        className={cn("inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px]", c.ok ? "border-border/60" : "border-destructive/60 text-destructive font-semibold")}
+                        title={`数据包 ${c.expected}${c.unit ?? ""} · 报告 ${(c.reported ?? []).map((v) => `${v}${c.unit ?? ""}`).join(" / ")}`}>
+                        <span className="font-medium">{c.label}</span>
+                        <span className="font-mono">{(c.reported ?? []).map((v) => `${v}`).join("/")}{c.unit ?? ""}</span>
+                        {!c.ok && <span className="font-mono">✗ 期望 {c.expected}</span>}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {payload.fingerprint_ok === false && (
+              <div className="border rounded-lg p-3 bg-card border-destructive/50">
+                <p className="text-xs text-destructive font-semibold">⚠ 指纹校验失败：内容与落盘时不一致（文件被修改过？）</p>
               </div>
             )}
             {!analysts.length && !payload.focus_md && !payload.focus?.verification_items?.length && (
@@ -455,6 +522,9 @@ export function VibeReview() {
           </div>
         ) : <p className="p-4 text-center text-sm text-muted-foreground">数据加载中（首次约 40s）...</p>}
       </div>
+
+      {/* 8. 短线统计（题材轮动/涨停样本/情绪历史/结构变化/周报，懒加载） */}
+      <VibeShortStats />
     </div>
   );
 }

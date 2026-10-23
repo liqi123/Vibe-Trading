@@ -272,14 +272,17 @@ export function AuctionBoard() {
   const [hotData, setHotData] = useState<HotStock[] | null>(null);
   const [hotLoading, setHotLoading] = useState(false);
 
-  const fetchDates = async (selectLatest = false) => {
+  const fetchDates = async (selectLatest = false): Promise<string | null> => {
     try {
       const data = await api.tools.get<any>("/auction/dates");
       setDates(data.dates || []);
-      if (data.dates?.length > 0 && (selectLatest || !selectedDate)) {
-        setSelectedDate(data.dates[0].date);
+      const latest = data.dates?.[0]?.date ?? null;
+      if (latest && (selectLatest || !selectedDate)) {
+        setSelectedDate(latest);
       }
+      return latest;
     } catch (e) { /* ignore */ }
+    return null;
   };
 
   const fetchCompare = async () => {
@@ -756,7 +759,11 @@ export function AuctionBoard() {
             {snapshotting ? "采集中..." : "采集快照"}
           </button>
           <button
-            onClick={() => {
+            onClick={async () => {
+              const prev = selectedDate;
+              const latest = await fetchDates(true);
+              // 日期切到最新（如竞价采集后出现今日）→ useEffect [selectedDate, tab] 自动重拉
+              if (latest && latest !== prev) return;
               if (!selectedDate) return;
               if (tab === "compare") fetchCompare();
               else if (tab === "expectation") fetchExpectData();
@@ -957,11 +964,11 @@ export function AuctionBoard() {
             v === "强超预期" ? "bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400 font-semibold"
             : v === "超预期" ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400"
             : v === "弱超预期" ? "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400"
-            : v === "抛压衰竭" ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400"
+            : v === "放量出清待确认" ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400"
             : v === "出货加速" ? "bg-red-50 text-red-600 dark:bg-red-950/30 dark:text-red-400 font-semibold"
             : v === "不及预期" || v === "抛压未释放" ? "bg-green-50 text-green-700 dark:bg-green-950/30 dark:text-green-400"
             : "bg-muted/40 text-muted-foreground";
-          const OPP = new Set(["强超预期", "超预期", "弱超预期", "抛压衰竭"]);
+          const OPP = new Set(["强超预期", "超预期", "弱超预期"]);
           const RISK = new Set(["不及预期", "出货加速", "抛压未释放"]);
           const scored = (hotData || []).filter((h) => h.score);
           const oppN = scored.filter((h) => OPP.has(h.verdict)).length;
@@ -978,7 +985,7 @@ export function AuctionBoard() {
                   <div className="text-xl font-bold">{hotData ? `${scored.length}只` : "-"}</div>
                 </div>
                 <div className="border rounded-lg bg-card p-3">
-                  <div className="text-muted-foreground">机会（超预期系/低吸）</div>
+                  <div className="text-muted-foreground">机会（超预期系）</div>
                   <div className="text-xl font-bold text-red-600">{hotData ? `${oppN}只` : "-"}</div>
                 </div>
                 <div className="border rounded-lg bg-card p-3">
@@ -1017,8 +1024,8 @@ export function AuctionBoard() {
                       <tbody>
                         {[...scored].sort((a, b) => {
                           const w = (v: string) =>
-                            v === "强超预期" ? 0 : v === "超预期" ? 1 : v === "抛压衰竭" ? 2 : v === "弱超预期" ? 3
-                            : v === "偏强" ? 4 : v === "正常" ? 5
+                            v === "强超预期" ? 0 : v === "超预期" ? 1 : v === "弱超预期" ? 2
+                            : v === "偏强" ? 3 : v === "正常" ? 4 : v === "放量出清待确认" ? 5
                             : v === "不及预期" ? 6 : v === "出货加速" ? 7 : v === "抛压未释放" ? 8 : 9;
                           return w(a.verdict) - w(b.verdict) || a.rank - b.rank;
                         }).map((h) => (

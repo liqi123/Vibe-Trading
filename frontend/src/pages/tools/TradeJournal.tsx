@@ -22,23 +22,39 @@ interface Stats {
   avg_pnl: number;
 }
 
+interface GroupStat { n: number; win_rate: number; avg_pnl_pct: number; total_pnl?: number }
+interface PatternCard { pattern: string; n: number; win_rate: number; avg_pnl_pct: number; total_pnl: number }
+interface DisciplineIssue { date: string; code: string; name: string; rule: string; detail: string }
+interface PendingItem { date: string; code: string; name: string; pnl_pct: number | null; days_since: number | null; exit_date?: string; exit_reason?: string }
+interface Xirr { available?: boolean; reason?: string; xirr?: number; n_trades?: number }
+interface JournalReport {
+  by_emotion?: Record<string, GroupStat>; by_board?: Record<string, GroupStat>;
+  discipline?: DisciplineIssue[]; pending_review?: PendingItem[];
+  patterns?: PatternCard[]; xirr?: Xirr; error?: string;
+}
+
+const fmtPct1 = (v: number | null | undefined, d = 1) => (v == null ? "—" : `${v.toFixed(d)}%`);
+
 export function TradeJournal() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [weekly, setWeekly] = useState("");
+  const [report, setReport] = useState<JournalReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"trades" | "stats" | "weekly">("trades");
+  const [tab, setTab] = useState<"trades" | "stats" | "weekly" | "report">("trades");
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [jData, wData] = await Promise.all([
+      const [jData, wData, rData] = await Promise.all([
         api.tools.get<any>("/journal?days=90"),
         api.tools.get<any>("/journal/weekly"),
+        api.tools.get<any>("/journal/report?days=90"),
       ]);
       setTrades(jData.trades || []);
       setStats(jData.stats || null);
       setWeekly(wData.report || "");
+      setReport(rData);
     } catch { /* ignore */ }
     setLoading(false);
   };
@@ -59,12 +75,12 @@ export function TradeJournal() {
       </div>
 
       <div className="flex gap-2 border-b">
-        {(["trades", "stats", "weekly"] as const).map(t => (
+        {(["trades", "stats", "weekly", "report"] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               tab === t ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
             }`}>
-            {t === "trades" ? "交易记录" : t === "stats" ? "统计数据" : "周报"}
+            {t === "trades" ? "交易记录" : t === "stats" ? "统计数据" : t === "weekly" ? "周报" : "复盘报告"}
           </button>
         ))}
       </div>
@@ -138,6 +154,140 @@ export function TradeJournal() {
       {tab === "weekly" && (
         <div className="border rounded-lg bg-card p-5">
           <pre className="text-sm whitespace-pre-wrap font-mono">{weekly || "暂无周报数据"}</pre>
+        </div>
+      )}
+
+      {tab === "report" && (
+        <div className="space-y-4">
+          {report?.error && <div className="border rounded-lg bg-card p-4 text-sm text-destructive">{report.error}</div>}
+
+          {/* XIRR + 纪律/复查概览 */}
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="border rounded-lg p-4 bg-card">
+              <div className="text-sm text-muted-foreground mb-1">已平仓组合 XIRR（年化）</div>
+              {report?.xirr?.available ? (
+                <p className={`text-2xl font-bold ${(report.xirr.xirr ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                  {fmtPct1(((report.xirr.xirr ?? 0) * 100))}
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">{report?.xirr?.reason ?? "—"}</p>
+              )}
+              {report?.xirr?.available && <p className="mt-1 text-xs text-muted-foreground">{report.xirr.n_trades} 笔</p>}
+            </div>
+            <div className="border rounded-lg p-4 bg-card">
+              <div className="text-sm text-muted-foreground mb-1">纪律违规</div>
+              <p className={`text-2xl font-bold ${(report?.discipline?.length ?? 0) > 0 ? "text-destructive" : ""}`}>
+                {report?.discipline?.length ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {[...new Set((report?.discipline ?? []).map((d) => d.rule))].join(" · ") || "无"}
+              </p>
+            </div>
+            <div className="border rounded-lg p-4 bg-card">
+              <div className="text-sm text-muted-foreground mb-1">待复查（平仓未评分）</div>
+              <p className={`text-2xl font-bold ${(report?.pending_review?.length ?? 0) > 0 ? "text-amber-600" : ""}`}>
+                {report?.pending_review?.length ?? 0}
+              </p>
+            </div>
+          </div>
+
+          {/* 按情绪档 / 按板位 */}
+          <div className="grid gap-4 md:grid-cols-2">
+            {[{ title: "对账 · 按入场日情绪档", rows: report?.by_emotion }, { title: "对账 · 按入场日板位", rows: report?.by_board }].map((g) => (
+              <div key={g.title} className="border rounded-lg bg-card p-4">
+                <p className="text-sm font-medium mb-2">{g.title}</p>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-xs text-muted-foreground">
+                      {["组", "n", "胜率", "均盈亏%", "累计盈亏"].map((h) => <th key={h} className="py-1.5 font-medium">{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(g.rows ?? {}).length === 0 ? (
+                      <tr><td colSpan={5} className="py-3 text-center text-xs text-muted-foreground">暂无已平仓样本</td></tr>
+                    ) : Object.entries(g.rows ?? {}).map(([k, s]) => (
+                      <tr key={k} className="border-b last:border-0">
+                        <td className="py-1.5">{k}</td>
+                        <td className="py-1.5 font-mono">{s.n}</td>
+                        <td className="py-1.5 font-mono">{fmtPct1(s.win_rate)}</td>
+                        <td className={`py-1.5 font-mono ${s.avg_pnl_pct >= 0 ? "text-red-600" : "text-green-600"}`}>{s.avg_pnl_pct.toFixed(1)}</td>
+                        <td className={`py-1.5 font-mono ${(s.total_pnl ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                          {(s.total_pnl ?? 0).toFixed(0)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+
+          {/* 模式卡 */}
+          <div className="border rounded-lg bg-card p-4">
+            <p className="text-sm font-medium mb-2">模式卡（情绪档 × 板位，n≥2 才成卡）</p>
+            {(report?.patterns ?? []).length === 0 ? (
+              <p className="text-xs text-muted-foreground">暂无成卡模式（已平仓样本不足或未带情绪快照）</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left text-xs text-muted-foreground">
+                    {["模式", "n", "胜率", "均盈亏%", "累计盈亏"].map((h) => <th key={h} className="py-1.5 font-medium">{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(report?.patterns ?? []).map((p) => (
+                    <tr key={p.pattern} className="border-b last:border-0">
+                      <td className="py-1.5 font-medium">{p.pattern}</td>
+                      <td className="py-1.5 font-mono">{p.n}</td>
+                      <td className="py-1.5 font-mono">{fmtPct1(p.win_rate)}</td>
+                      <td className={`py-1.5 font-mono ${p.avg_pnl_pct >= 0 ? "text-red-600" : "text-green-600"}`}>{p.avg_pnl_pct.toFixed(1)}</td>
+                      <td className={`py-1.5 font-mono ${p.total_pnl >= 0 ? "text-red-600" : "text-green-600"}`}>{p.total_pnl.toFixed(0)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* 纪律违规明细 + 待复查明细 */}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="border rounded-lg bg-card p-4">
+              <p className="text-sm font-medium mb-2">纪律违规明细</p>
+              {(report?.discipline ?? []).length === 0 ? (
+                <p className="text-xs text-muted-foreground">无违规</p>
+              ) : (
+                <ul className="space-y-1 text-xs">
+                  {(report?.discipline ?? []).map((d, i) => (
+                    <li key={i} className="flex gap-2 border-b last:border-0 py-1.5">
+                      <span className="font-mono text-muted-foreground">{d.date}</span>
+                      <span>{d.name}</span>
+                      <span className="text-destructive font-medium">{d.rule}</span>
+                      <span className="text-muted-foreground ml-auto">{d.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="border rounded-lg bg-card p-4">
+              <p className="text-sm font-medium mb-2">待复查清单</p>
+              {(report?.pending_review ?? []).length === 0 ? (
+                <p className="text-xs text-muted-foreground">全部已评分</p>
+              ) : (
+                <ul className="space-y-1 text-xs">
+                  {(report?.pending_review ?? []).map((p, i) => (
+                    <li key={i} className="flex gap-2 border-b last:border-0 py-1.5">
+                      <span className="font-mono text-muted-foreground">{p.exit_date || p.date}</span>
+                      <span>{p.name}</span>
+                      <span className={`font-mono ${(p.pnl_pct ?? 0) >= 0 ? "text-red-600" : "text-green-600"}`}>
+                        {p.pnl_pct != null ? `${p.pnl_pct >= 0 ? "+" : ""}${p.pnl_pct.toFixed(1)}%` : "—"}
+                      </span>
+                      <span className="text-muted-foreground ml-auto">{p.exit_reason || "—"} · {p.days_since ?? "?"}天前</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

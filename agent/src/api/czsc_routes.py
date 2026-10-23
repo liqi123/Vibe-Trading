@@ -77,19 +77,18 @@ def _stock_table(db: sqlite3.Connection | None = None) -> str:
 
 
 def _open_db_readonly(path: str) -> sqlite3.Connection | None:
-    """以 immutable 只读模式打开 SQLite，绕过 sandbox 对 -wal/-journal 的拦截。
-
-    immutable=1 告知 SQLite 文件不会被修改，故不打开 WAL/journal，
-    仅读主 .db 文件——适合只读 API。主库写操作由 `python -m utils update` 独立连接处理。
+    """以只读模式打开 SQLite：优先 mode=ro（可读 WAL 中未 checkpoint 的最新数据），
+    失败退回 immutable=1（绕过 sandbox 对 -wal/-shm 的拦截，仅读主文件，可能滞后于 WAL）。
     """
-    uri = "file:" + str(path).replace("\\", "/").lstrip("/") + "?immutable=1"
-    try:
-        conn = sqlite3.connect(uri, uri=True, timeout=10)
-        # 验证可读
-        conn.execute("SELECT 1").fetchone()
-        return conn
-    except Exception:
-        return None
+    base = "file:" + str(path).replace("\\", "/").lstrip("/")
+    for uri in (base + "?mode=ro", base + "?immutable=1"):
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=10)
+            conn.execute("SELECT 1").fetchone()
+            return conn
+        except Exception:
+            continue
+    return None
 
 
 def _db_max_date(conn: sqlite3.Connection) -> int | str | None:

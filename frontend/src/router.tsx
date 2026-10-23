@@ -61,6 +61,21 @@ const DailyReview = lazy(() =>
 const VibeReview = lazy(() =>
   import("@/pages/tools/VibeReview").then((m) => ({ default: m.VibeReview })),
 );
+const SectorResearch = lazy(() =>
+  import("@/pages/tools/SectorResearch").then((m) => ({ default: m.SectorResearch })),
+);
+const BacktestWorkbench = lazy(() =>
+  import("@/pages/tools/BacktestWorkbench").then((m) => ({ default: m.BacktestWorkbench })),
+);
+const CandidatePool = lazy(() =>
+  import("@/pages/tools/CandidatePool").then((m) => ({ default: m.CandidatePool })),
+);
+const IntradayWatch = lazy(() =>
+  import("@/pages/tools/IntradayWatch").then((m) => ({ default: m.IntradayWatch })),
+);
+const StockDeepDive = lazy(() =>
+  import("@/pages/tools/StockDeepDive").then((m) => ({ default: m.StockDeepDive })),
+);
 const SentimentIndex = lazy(() =>
   import("@/pages/tools/SentimentIndex").then((m) => ({ default: m.SentimentIndex })),
 );
@@ -87,6 +102,9 @@ const CzscAnalysis = lazy(() =>
 );
 const Gainers = lazy(() =>
   import("@/pages/tools/Gainers").then((m) => ({ default: m.Gainers })),
+);
+const IntradayAnalysis = lazy(() =>
+  import("@/pages/tools/IntradayAnalysis").then((m) => ({ default: m.IntradayAnalysis })),
 );
 const MarketLadder = lazy(() =>
   import("@/pages/MarketLadder").then((m) => ({ default: m.MarketLadder })),
@@ -138,6 +156,11 @@ export const router = createBrowserRouter([
       { path: "/news", element: wrap(NewsSearch) },
       { path: "/daily-review", element: wrap(DailyReview) },
       { path: "/vibe-review", element: wrap(VibeReview) },
+      { path: "/sector-research", element: wrap(SectorResearch) },
+      { path: "/backtest-workbench", element: wrap(BacktestWorkbench) },
+      { path: "/candidate-pool", element: wrap(CandidatePool) },
+      { path: "/intraday-watch", element: wrap(IntradayWatch) },
+      { path: "/stock-deep-dive", element: wrap(StockDeepDive) },
       { path: "/sentiment-index", element: wrap(SentimentIndex) },
       { path: "/scheduled-tasks", element: wrap(ScheduledTasks) },
       { path: "/auction-board", element: wrap(AuctionBoard) },
@@ -149,6 +172,7 @@ export const router = createBrowserRouter([
       { path: "/market-ladder", element: wrap(MarketLadder) },
       { path: "/volume-rank", element: wrap(VolumeRank) },
       { path: "/gainers", element: wrap(Gainers) },
+      { path: "/intraday-analysis", element: wrap(IntradayAnalysis) },
     ],
   },
 ]);

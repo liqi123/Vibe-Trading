@@ -9,13 +9,21 @@ interface IntradayBar {
   v: number;
 }
 
+export interface IntradayMarker {
+  t: string;
+  p: number;
+  color: string;
+  label: string;
+}
+
 interface Props {
   bars: IntradayBar[];
   prevClose: number | null;
   height?: number;
+  markers?: IntradayMarker[];
 }
 
-export function IntradayChart({ bars, prevClose, height = 280 }: Props) {
+export function IntradayChart({ bars, prevClose, height = 280, markers }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ReturnType<typeof echarts.init> | null>(null);
   const { dark } = useDarkMode();
@@ -144,6 +152,27 @@ export function IntradayChart({ bars, prevClose, height = 280 }: Props) {
           yAxisIndex: 1,
           z: 1,
         },
+        ...(markers && markers.length
+          ? [
+              {
+                type: "scatter",
+                data: markers.map((m) => ({
+                  value: [m.t, m.p],
+                  label: m.label,
+                  itemStyle: { color: m.color },
+                })),
+                symbol: "pin",
+                symbolSize: 30,
+                z: 10,
+                xAxisIndex: 0,
+                yAxisIndex: 0,
+                tooltip: {
+                  formatter: (p: any) =>
+                    `<div style="font-size:12px;font-weight:500">${p.data?.label ?? ""}</div>`,
+                },
+              },
+            ]
+          : []),
       ],
     };
 
@@ -157,7 +186,7 @@ export function IntradayChart({ bars, prevClose, height = 280 }: Props) {
       chart.dispose();
       chartRef.current = null;
     };
-  }, [bars, prevClose, dark]);
+  }, [bars, prevClose, markers, dark]);
 
   if (bars.length < 2) {
     return (

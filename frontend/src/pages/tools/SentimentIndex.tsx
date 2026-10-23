@@ -42,6 +42,9 @@ const stateColor = (s: string) => {
 
 const fmt = (v: number | null | undefined, digits = 1) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(digits));
 
+// Number(null) === 0，会把 null 指数收盘当成 0 污染归一化区间 → 显式转 NaN 走"缺测"分支
+const toNum = (v: unknown): number => (v == null || v === "" ? NaN : Number(v));
+
 function SparkLine({ rows, overlayKey, overlayLabel }: { rows: Row[]; overlayKey: string; overlayLabel: string }) {
   const w = 900, h = 240, pad = 30;
   if (!rows || rows.length < 2) return <p className="p-6 text-center text-sm text-muted-foreground">数据不足</p>;
@@ -50,18 +53,19 @@ function SparkLine({ rows, overlayKey, overlayLabel }: { rows: Row[]; overlayKey
   const x = (i: number) => pad + (i * (w - pad * 2)) / (rows.length - 1);
   const y = (v: number) => h - pad - ((v - min) * (h - pad * 2)) / (max - min);
   const path = rows.map((r, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(Number(r.afgi)).toFixed(1)}`).join(" ");
-  const ma5 = rows.map((r) => y(Number(r.ma5))).filter((v) => !Number.isNaN(v));
-  const ma5Path = ma5.length ? rows.map((r, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(Number(r.ma5)).toFixed(1)}`).join(" ") : "";
-  const overlayVals = rows.map((r) => Number(r[`${overlayKey}_close`])).filter((v) => !Number.isNaN(v));
-  const overlayMin = Math.min(...overlayVals), overlayMax = Math.max(...overlayVals);
+  const ma5 = rows.map((r) => y(toNum(r.ma5))).filter((v) => !Number.isNaN(v));
+  const ma5Path = ma5.length ? rows.map((r, i) => (Number.isNaN(toNum(r.ma5)) ? "" : `${i === 0 || Number.isNaN(toNum(rows[i - 1].ma5)) ? "M" : "L"}${x(i).toFixed(1)},${y(toNum(r.ma5)).toFixed(1)}`)).filter(Boolean).join(" ") : "";
+  const overlayVals = rows.map((r) => toNum(r[`${overlayKey}_close`])).filter((v) => !Number.isNaN(v));
+  const overlayMin = overlayVals.length ? Math.min(...overlayVals) : 0;
+  const overlayMax = overlayVals.length ? Math.max(...overlayVals) : 1;
   const overlaySpan = overlayMax - overlayMin || 1;
   const yOverlay = (v: number) => y(((v - overlayMin) / overlaySpan) * 100);
   const overlayPath = rows
-    .map((r, i) => (Number.isNaN(Number(r[`${overlayKey}_close`])) ? "" : `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${yOverlay(Number(r[`${overlayKey}_close`])).toFixed(1)}`))
+    .map((r, i) => (Number.isNaN(toNum(r[`${overlayKey}_close`])) ? "" : `${i === 0 || Number.isNaN(toNum(rows[i - 1][`${overlayKey}_close`])) ? "M" : "L"}${x(i).toFixed(1)},${yOverlay(toNum(r[`${overlayKey}_close`])).toFixed(1)}`))
     .filter(Boolean)
     .join(" ");
   const last = rows[rows.length - 1];
-  const lastOverlay = Number(last[`${overlayKey}_close`]);
+  const lastOverlay = toNum(last[`${overlayKey}_close`]);
   const tickCount = Math.min(9, rows.length);
   const tickEvery = Math.max(1, Math.floor((rows.length - 1) / (tickCount - 1)));
   const ticks = rows.filter((_, i) => i % tickEvery === 0 || i === rows.length - 1);
@@ -93,10 +97,14 @@ function SparkLine({ rows, overlayKey, overlayLabel }: { rows: Row[]; overlayKey
       {overlayPath && (
         <>
           <path d={overlayPath} fill="none" strokeWidth="1.5" className="stroke-success" />
-          <circle cx={x(rows.length - 1)} cy={yOverlay(lastOverlay)} r="3.5" className="fill-success" />
-          <text x={x(rows.length - 1) - 30} y={yOverlay(lastOverlay) - 8} fontSize="10" className="fill-success font-medium">
-            {overlayLabel} {fmt(lastOverlay, 0)}
-          </text>
+          {!Number.isNaN(lastOverlay) && (
+            <>
+              <circle cx={x(rows.length - 1)} cy={yOverlay(lastOverlay)} r="3.5" className="fill-success" />
+              <text x={x(rows.length - 1) - 30} y={yOverlay(lastOverlay) - 8} fontSize="10" className="fill-success font-medium">
+                {overlayLabel} {fmt(lastOverlay, 0)}
+              </text>
+            </>
+          )}
         </>
       )}
       {rows.map((r, i) => (

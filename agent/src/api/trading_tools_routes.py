@@ -95,25 +95,25 @@ def _stock_table(db: sqlite3.Connection | None = None) -> str:
 
 
 def _open_db_readonly(path: str) -> sqlite3.Connection | None:
-    """以 immutable 只读模式打开 SQLite，绕过 sandbox 对 -wal/-journal 的拦截。
-
-    immutable=1 告知 SQLite 文件不会被修改，故不打开 WAL/journal，
-    仅读主 .db 文件——适合只读 API。主库写操作由 `python -m utils update` 独立连接处理。
+    """以只读模式打开 SQLite：优先 mode=ro（可读 WAL 中未 checkpoint 的最新数据），
+    失败退回 immutable=1（绕过 sandbox 对 -wal/-shm 的拦截，仅读主文件，可能滞后于 WAL）。
     """
-    uri = "file:" + str(path).replace("\\", "/").lstrip("/") + "?immutable=1"
-    try:
-        conn = sqlite3.connect(uri, uri=True, timeout=10)
-        conn.execute("SELECT 1").fetchone()  # 验证可读
-        return conn
-    except Exception:
-        return None
+    base = "file:" + str(path).replace("\\", "/").lstrip("/")
+    for uri in (base + "?mode=ro", base + "?immutable=1"):
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=10)
+            conn.execute("SELECT 1").fetchone()  # 验证可读
+            return conn
+        except Exception:
+            continue
+    return None
 
 
 def _get_db(writable: bool = False) -> sqlite3.Connection | None:
     """Open the SQLite database holding daily_kline.
 
     候选路径优先级: utils.config.DB_PATH > G:/E: 盘 > 项目本地 tdx_daily.db > 旧 tdx_data.db。
-    - 只读（默认）: 用 immutable=1 URI 打开，避开 sandbox 对 WAL 的拦截，并按 max date 选最新库。
+    - 只读（默认）: mode=ro 优先（读得到 WAL 最新数据），退回 immutable=1，并按 max date 选最新库。
     - 可写（writable=True）: 用普通 sqlite3.connect，选第一个能打开且有 daily_kline 表的库
       （sandbox 下 G:\\ 可能因 WAL 打不开，会回退到本地可写副本）。
     """
@@ -150,7 +150,7 @@ def _get_db(writable: bool = False) -> sqlite3.Connection | None:
                 continue
         return None
 
-    # 只读模式: immutable=1 + 新鲜度比较
+    # 只读模式: mode=ro(优先)/immutable=1 + 新鲜度比较
     best_conn: sqlite3.Connection | None = None
     best_max = None
     for c in candidates:
@@ -2113,6 +2113,17 @@ def get_stock_intraday(code: str) -> dict:
     return {"code": code, "bars": [], "prev_close": None}
 
 
+@router.get("/stock/{code}/intraday-judge")
+def stock_intraday_judge(code: str) -> dict:
+    """分时买点五规则判定（实时）：VWAP+回踩质量+底部稳定+二波上攻 → 可以买/观察/不买。"""
+    try:
+        from analysis.intraday_judge import load as judge_load
+
+        return judge_load(code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"分时判定失败: {e}") from e
+
+
 @router.post("/stock/{code}/buy")
 def buy_stock(code: str, data: dict):
     """Buy a stock into paper trading portfolio.
@@ -3336,13 +3347,23 @@ def get_watchlist_auction(codes: str = "") -> dict:
         return {"auction": {}}
     try:
         dates = [r[0] for r in db.execute(
-            "SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 2"
+            "SELECT DISTINCT date FROM auction ORDER BY date DESC LIMIT 1"
         ).fetchall()]
         if not dates:
             return {"auction": {}}
 
         today_date = dates[0]
-        prev_date = dates[1] if len(dates) > 1 else None
+        # prev 交易日从 daily_kline 取（auction 表可能缺采集日，用 dates[1] 会错位到 T-2）
+        from utils.config import get_date_col, fmt_date
+        _dcol, _dis_int = get_date_col()
+        _prow = db.execute(
+            f"SELECT MAX({_dcol}) FROM daily_kline WHERE {_dcol} < ?",
+            (fmt_date(today_date),),
+        ).fetchone()
+        prev_date = None
+        if _prow and _prow[0] is not None:
+            _pv = str(_prow[0])
+            prev_date = f"{_pv[:4]}-{_pv[4:6]}-{_pv[6:]}" if _dis_int else _pv
 
         # Auction table stores codes without sh/sz prefix (mostly),
         # but some dates have mixed formats (both bare and prefixed)
@@ -3444,7 +3465,7 @@ def get_watchlist_auction(codes: str = "") -> dict:
                         or ind_by_bare.get(bare) or ind_by_bare.get(code) or "")
             concepts = concepts_by_bare.get(bare) or concepts_by_bare.get(code) or []
 
-            # 打分（竞价超预期五步法：CL/T/VR → 形态档 → 预期中枢 → R → 量价交叉）
+            # 打分（竞价超预期五步法：CL/T → 形态档 → 预期中枢 → R → 量价交叉；VR 仅透传展示）
             score = None
             try:
                 auction_price = t.get("auction_price", 0)
@@ -3499,6 +3520,7 @@ def get_watchlist_auction(codes: str = "") -> dict:
                                         gap_pct=gap_pct,
                                         r_pct=r_pct,
                                         is_lianban=is_lb,
+                                        yday_yin=c < o,
                                     )
                         finally:
                             db_kl.close()
@@ -3562,9 +3584,29 @@ def get_journal(days: int = 30) -> dict:
         trades = tj.get_recent_trades(days)
         stats = tj.stats(days)
         closed = tj.get_closed_trades()
-        return {"trades": trades, "closed": closed, "stats": stats}
+        return {"trades": trades, "closed": closed, "stats": stats,
+                "by_emotion": tj.stats_by_emotion(days)}
     except Exception as e:
         return {"trades": [], "closed": [], "stats": {}, "error": str(e)}
+
+
+@router.get("/journal/report")
+def journal_report(days: int = 90) -> dict:
+    """交易日志复盘报告：板位对账/纪律检查/复查清单/模式卡/XIRR。"""
+    try:
+        from trading.trade_journal import TradeJournal
+        tj = TradeJournal()
+        return {
+            "days": days,
+            "by_emotion": tj.stats_by_emotion(days),
+            "by_board": tj.stats_by_board(days),
+            "discipline": tj.discipline(days),
+            "pending_review": tj.pending_review(days),
+            "patterns": tj.pattern_cards(days),
+            "xirr": tj.xirr_closed(max(days, 180)),
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @router.post("/journal/log")
@@ -5155,121 +5197,6 @@ def _limit_pct(code: str, name: str = "") -> float:
     return (limit_up_ratio(code, name) - 1.0) * 100
 
 
-# ----------------------------------------------------------------------------
-# 涨停次日竞价预期（「明礼队长」淘股吧方法论）
-# 昨日涨停股的今日竞价，用「价（高开幅度）+ 量（竞价量能）」两变量打预期等级，
-# 分 C1~C6 六种组合，直接对应次日操作。封板时间决定高开预期带。
-# ----------------------------------------------------------------------------
-# 封板时间 → 高开预期带（(不及下限, 符合下限, 超预期下限)，单位 %）
-_SEAL_BANDS = {
-    "一字":   (6, 9, 9),
-    "9:45前": (4, 6, 6),
-    "午前板": (2, 4, 4),
-    "午后板": (-2, 1, 1),
-    "尾盘板": (-2, 0, 0),
-}
-
-
-# 身份 → 高开预期带 ((不及下限, 符合下限, 超预期下限)，%)，文章《涨停后怎么做预期》分身份基准
-_ROLE_BANDS = {
-    "龙头": (3, 6, 6),
-    "跟风": (0, 3, 3),
-    "独立": (6, 9, 9),
-}
-
-
-def _seal_band(first_seal: str, last_seal: str) -> str:
-    """按昨日「首次封板时间」归类到 5 档预期带。
-
-    first_seal/last_seal 形如 '092500'/'145027'（东财涨停池首次/最后封板时间 HHMMSS）。
-    """
-    if not first_seal:
-        return "午前板"  # 拿不到时给中性档（2-4%）
-    t = int(first_seal[:4]) if first_seal[:4].isdigit() else 9999
-    last = int(last_seal[:4]) if last_seal and last_seal[:4].isdigit() else 9999
-    if t <= 925 and last <= 925:
-        return "一字"      # 竞价即封死且全天未开
-    if t <= 945:
-        return "9:45前"
-    if t <= 1130:
-        return "午前板"
-    if t <= 1400:
-        return "午后板"
-    return "尾盘板"
-
-
-def _price_level(band: str, role: str, open_pct) -> str:
-    """价预期：按身份（龙头/跟风/独立）选基准带，把今日竞价高开%分为 超预期/符合/不及预期。
-
-    身份优先（文章《涨停后怎么做预期》分身份基准）；身份未知回退到封板时间档。
-    """
-    if open_pct is None:
-        return "未知"
-    if role in _ROLE_BANDS:
-        bad, ok, strong = _ROLE_BANDS[role]
-    elif band in _SEAL_BANDS:
-        bad, ok, strong = _SEAL_BANDS[band]
-    else:
-        return "未知"
-    if open_pct > strong and strong > bad:
-        return "超预期"
-    if open_pct >= bad:
-        return "符合预期"
-    return "不及预期"
-
-
-def _vol_level(auction_amount_wan, yest_amount_yuan) -> tuple:
-    """量能：竞价量能 = 今竞价额 ÷ 昨日总成交额。
-
-    达标线（及格线）与天量上限：
-        昨日成交额 <2 亿    → 达标 ≥10%，天量 >15%
-        昨日成交额 2~5 亿   → 达标 ≥10%，天量 >15%
-        昨日成交额 5~10 亿  → 达标 ≥8%，天量 >10%
-        昨日成交额 10~20 亿 → 达标 ≥5%，天量 >8%
-        昨日成交额 ≥20 亿   → 达标 ≥4%，天量 >6%
-    返回值 (level, pct)：(达标/不足/天量, 竞价量能百分比)。
-    """
-    if auction_amount_wan is None or not yest_amount_yuan or yest_amount_yuan <= 0:
-        return "未知", None
-    pct = auction_amount_wan * 1e4 / yest_amount_yuan * 100
-    if yest_amount_yuan >= 2e9:
-        need, ceiling = 4, 6
-    elif yest_amount_yuan >= 1e9:
-        need, ceiling = 5, 8
-    elif yest_amount_yuan >= 5e8:
-        need, ceiling = 8, 10
-    elif yest_amount_yuan >= 2e8:
-        need, ceiling = 10, 15
-    else:
-        need, ceiling = 10, 15
-    if pct > ceiling:
-        return "天量", round(pct, 2)
-    return ("达标" if pct >= need else "不足"), round(pct, 2)
-
-
-# 6 组合标签/操作（含颜色含义，前端可据 colour 上色）
-_COMBOS = {
-    ("超预期", "达标"): ("C1", "价超量足", "资金抢筹·敢加仓", "red"),
-    ("超预期", "不足"): ("C2", "价超量少", "诱多陷阱·别追", "orange"),
-    ("符合预期", "达标"): ("C3", "价合量足", "看开盘承接", "blue"),
-    ("符合预期", "不足"): ("C4", "价合量少", "弱分歧·先落袋", "gray"),
-    ("不及预期", "达标"): ("C5", "价不及量足", "分歧洗盘·看修复", "purple"),
-    ("不及预期", "不足"): ("C6", "价不及量少", "最危险·核按钮", "black"),
-    ("超预期", "天量"): ("C7", "价超天量", "筹码松动·警惕出货", "darkred"),
-    ("符合预期", "天量"): ("C8", "价合天量", "量价异动·观望", "darkorange"),
-    ("不及预期", "天量"): ("C9", "价不及天量", "恐慌抛售·回避", "darkgray"),
-}
-
-
-def _combo(price_level: str, vol_level: str) -> dict:
-    """价×量 → C1~C6 组合标签、标题、操作建议、颜色。"""
-    key = (price_level, vol_level)
-    if key not in _COMBOS:
-        return {"combo": None, "label": "未知", "action": "", "color": "gray"}
-    combo, label, action, color = _COMBOS[key]
-    return {"combo": combo, "label": label, "action": action, "color": color}
-
-
 # ---------------------------------------------------------------------------
 # 自选股/观察股竞价打分模型（剧本→基准→修正→验证 四步法）
 # 来源：文档《竞价预期量化打分模型》，用于非涨停预期股的次日竞价评估
@@ -5526,7 +5453,7 @@ def watchlist_stock_score(
 
 
 # ---------------------------------------------------------------------------
-# 竞价超预期五步法（expectation-framework：CL/T/VR → 形态档 → 预期中枢 → R → 量价交叉）
+# 竞价超预期五步法（expectation-framework：CL/T → 形态档 → 预期中枢 → R → 量价交叉）
 # ---------------------------------------------------------------------------
 
 _ZONE_NAMES = {
@@ -5536,17 +5463,22 @@ _ZONE_NAMES = {
 }
 
 # Step3 预期中枢表: (中枢下限, 中枢上限, 超预期线, 不及线)，单位 %
+# 口径：各形态档竞价 gap 的经验分位（hub=[p25,p75]，sup=p90，fail=p10）。
+# 校准窗 2026-06-30~2026-10-15（auction 表全量，64 个竞价日，n=269534）。
+# 13 个月（2025-10~2026-10，日线开盘价代理竞价价，n=153 万）验证：主要档
+# 两时段分位差 ≤0.15pp、月度 p90 漂移 ≤0.6pp，非单一行情窗口产物。
+# S1_lb（缩量强势+连板）为双峰分布（一字开 ~10% vs 平开），分位无意义，保留手拍值。
 _EXPECT_TABLE = {
-    "S1_lb": (3.0, 5.0, 7.0, 1.0),   # S1 缩量强势且连板
-    "S1": (1.0, 3.0, 5.0, 0.0),
-    "S2": (1.0, 3.0, 5.0, -1.0),
-    "S3": (0.0, 2.0, 4.0, -2.0),
-    "S4": (-1.0, 1.0, 3.0, -2.0),
-    "S5": (-1.0, 1.0, 3.0, -2.0),
-    "S6": (-2.0, 0.0, 2.0, -3.0),
-    "S7": (-4.0, -2.0, -1.0, -5.0),
-    "S8": (-4.0, -2.0, -1.0, -5.0),
-    "S9": (-4.0, -2.0, 0.0, -5.0),
+    "S1_lb": (3.0, 5.0, 7.0, 1.0),   # S1 缩量强势且连板（手拍，双峰分布）
+    "S1": (-0.59, 0.17, 0.73, -1.05),
+    "S2": (-1.24, 0.41, 1.82, -2.30),
+    "S3": (-2.81, 0.40, 2.74, -4.89),
+    "S4": (-0.47, 0.26, 0.82, -0.95),
+    "S5": (-1.20, 0.35, 1.44, -2.18),
+    "S6": (-2.45, 0.07, 1.50, -4.40),
+    "S7": (-0.38, 0.44, 1.16, -0.91),
+    "S8": (-1.01, 0.95, 2.11, -2.16),
+    "S9": (-2.49, 0.53, 2.00, -4.56),
 }
 
 
@@ -5580,14 +5512,17 @@ def auction_five_step_score(
     gap_pct: float,
     r_pct: float | None,
     is_lianban: bool = False,
+    yday_yin: bool | None = None,
 ) -> dict:
     """竞价超预期五步法打分（Step1~Step5，Step6 联动由调用方按同板块分组补充）。
 
     cl_pct: 昨日 CL 收盘位置 (收-低)/(高-低)*100
     turnover_pct: 昨日换手率 T（%），None 时按中位 10% 定档并标记 turnover_assumed
-    vol_ratio: 昨日量比 VR（昨日量/前5日均量）
+    vol_ratio: 昨日量比 VR（昨日量/前5日均量）——不参与定档/判定，仅透传给前端展示
     gap_pct: 竞价 gap（竞价价 vs 昨收，%）
     r_pct: 量能比 R = 竞价成交额/昨日成交额*100
+    yday_yin: 昨日是否收阴（收<开）。放量出清形态仅在收阴（放量杀跌）时标记；
+        None 视为不可确认 → 不标记（保守）。
     """
     zone = _classify_zone(cl_pct, turnover_pct)
     key = "S1_lb" if (zone == "S1" and is_lianban) else zone
@@ -5623,22 +5558,32 @@ def auction_five_step_score(
         # 低于预期中枢（不及区）：量能 R × 昨日换手 T 交叉
         if r_pct is not None and r_pct >= 5:
             verdict, action = "出货加速", "回避 / 离场"
-            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}% 且 {_r_txt()} ≥ 5% → 放量低开，出货加速"
+            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}% 且 {_r_txt()} ≥ 5% → 放量低于中枢，出货加速"
+        elif gap_pct < fail:
+            verdict, action = "不及预期", "回避，不追（跌破不及线）"
+            rule = (f"gap {gap_pct:+.2f}% 跌破不及线 {fail:+.1f}%（中枢下沿 {hub_lo:+.1f}%）"
+                    f" → 深度低于预期")
         elif gap_pct >= 0:
             verdict, action = "不及预期", "回避，不追（承接不足）"
             rule = (f"gap {gap_pct:+.2f}% 未达预期中枢下沿 {hub_lo:+.1f}% 且 {_r_txt()}（{r_level}）"
                     f" → 高开但承接不足")
         elif turnover_pct is None:
             verdict, action = "不及预期", "回避，不追（换手率缺失）"
-            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，换手率缺失无法判衰竭 → 保守回避"
-        elif turnover_pct > 15:
-            verdict, action = "抛压衰竭", "可低吸（关键反手机会）"
-            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()} 缩量，且昨日换手 {turnover_pct:.2f}% > 15%"
-                    f" → 昨日抛压已释放")
+            rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，换手率缺失无法判出清形态 → 保守回避"
+        elif turnover_pct > 15 and cl_pct >= 30 and yday_yin:
+            # 2026-10-16 验证降级：62日仅45例，中位 -2.38%/胜率40%（均值靠少数V反右偏），
+            # 「衰竭→可低吸」不成立 → 改名+删买入语义，仅留物理标记作观察项
+            verdict, action = "放量出清待确认", "观察，不买（出清未确认）"
+            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()}（{r_level}），且昨日换手 {turnover_pct:.2f}% > 15%"
+                    f" 且 CL {cl_pct:.0f} ≥ 30 且收阴 → 昨日放量杀跌形态成立，但出清后反抽未验证，仅观察")
         elif r_pct is not None and r_pct < 3:
             verdict, action = "抛压未释放", "回避"
-            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()} < 3%，昨日换手 {turnover_pct:.2f}% ≤ 15%"
-                    f" → 抛压未开始释放")
+            rule = (f"gap {gap_pct:+.2f}% 低于中枢、{_r_txt()} < 3% 缩量无承接，"
+                    f"昨日（换手 {turnover_pct:.2f}%、CL {cl_pct:.0f}）未构成有效杀跌出清 → 抛压未确认释放")
+        elif turnover_pct > 15:
+            verdict, action = "不及预期", "回避，不追（放量未出清）"
+            rule = (f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，昨日换手 {turnover_pct:.2f}% 放量"
+                    f" 但{'未收阴' if yday_yin is not True else 'CL 低于 30'}（非杀跌出清形态）→ 不判出清")
         else:
             verdict, action = "不及预期", "回避，不追"
             rule = f"gap {gap_pct:+.2f}% 低于中枢下沿 {hub_lo:+.1f}%，{_r_txt()} 量能中性 → 不及预期"
@@ -5652,6 +5597,7 @@ def auction_five_step_score(
         "zone": zone,
         "zone_name": _ZONE_NAMES[zone],
         "lianban": bool(is_lianban),
+        "yday_yin": bool(yday_yin) if yday_yin is not None else None,
         "hub": [hub_lo, hub_hi],
         "sup": sup,
         "sup_ge": sup_ge,
@@ -5693,402 +5639,20 @@ def _float_shares_from_fund(db, code: str) -> float | None:
         return None
 
 
-def _fetch_zt_pool_map(date_yyyymmdd: str) -> dict:
-    """东财涨停池 → {6位代码: {seal_time, last_seal, consec, turnover_amount}}。
-
-    用「首次/最后封板时间」定预期带、用昨日成交额定量能。
-    拿不到（非 akshare / 网络失败）返回空 dict，调用方降级为只有价预期。
-    """
-    try:
-        import akshare as ak
-        zt = ak.stock_zt_pool_em(date=date_yyyymmdd)
-        if zt is None or getattr(zt, "empty", True):
-            return {}
-    except Exception as e:
-        _log.warning("zt_pool fetch failed %s: %s", date_yyyymmdd, e)
-        return {}
-    out = {}
-    for _, r in zt.iterrows():
-        code = str(r.get("代码", "")).zfill(6)
-        try:
-            consec = int(r.get("连板数") or 0)
-        except (TypeError, ValueError):
-            consec = 0
-        try:
-            t_amt = float(r.get("成交额") or 0)  # 元
-        except (TypeError, ValueError):
-            t_amt = 0
-        out[code] = {
-            "seal_time": str(r.get("首次封板时间", "") or ""),
-            "last_seal": str(r.get("最后封板时间", "") or ""),
-            "consec": consec,
-            "turnover_amount": t_amt,
-            "industry": str(r.get("所属行业", "") or ""),
-        }
-    return out
-
-
-def _calc_roles(zt_map: dict) -> dict:
-    """按行业分组判断昨日涨停股的板块身份：龙头/跟风/独立（文章《涨停后怎么做预期》+ 连板身位）。
-
-    规则（组内身位 = 连板数降序、同连板按封板时间升序）：
-      组内最高连板者为龙头；并列最高连板时取封板最早者为龙头；其余 → 跟风；
-      组内唯一涨停 → 独立票。
-      无行业信息组的唯一票按「独立」处理；无封板时间者不在分组内。
-    """
-    from collections import defaultdict
-
-    groups = defaultdict(list)
-    for code, zt in zt_map.items():
-        st = zt.get("seal_time", "")
-        if st and st[:4].isdigit():
-            consec = zt.get("consec", 0) or 0
-            groups[zt.get("industry", "")].append((consec, int(st[:4]), code))
-    roles = {}
-    for ind, gs in groups.items():
-        if len(gs) <= 1:
-            for _, _, c in gs:
-                roles[c] = "独立" if ind else "跟风"
-            continue
-        max_consec = max(x[0] for x in gs)
-        same_top = [x for x in gs if x[0] == max_consec]
-        if len(same_top) == 1:
-            lead_codes = {same_top[0][2]}
-        else:
-            lead_codes = {min(same_top, key=lambda x: x[1])[2]}
-        for k, t, c in gs:
-            roles[c] = "龙头" if c in lead_codes else "跟风"
-    return roles
-
-
 @router.get("/auction/limit-up-compare")
 def get_auction_limit_up_compare(date1: str = "", date2: str = ""):
-    """Compare auction volumes of yesterday's limit-up stocks vs today's auction limit-up stocks.
-    
-    Uses daily_kline close prices for yesterday's limit-up detection,
-    and auction table for today's auction limit-up detection.
-    
-    Auto-fallback: if date2 has no auction data, rolls back to the most recent
-    trading day that does; date1 follows one trading day before that.
-    
-    Args:
-        date1: yesterday's date (YYYY-MM-DD)
-        date2: today's date (YYYY-MM-DD)
+    """涨停次日竞价预期对比 — 实现已移植根项目 data/auction_limit_compare.py（单一实现）。
+
+    本路由薄封装转发，保持前端 /tools/auction/limit-up-compare 行为不变。
     """
     if not date1 or not date2:
         return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
-    db = _get_db()
-    if db is None:
-        return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
     try:
-        cur = db.cursor()
-        cols = {r[1] for r in cur.execute("PRAGMA table_info(daily_kline)").fetchall()}
-        dc = "trade_date" if "trade_date" in cols else "date"
-
-        # date2 → 与 daily_kline 日期列一致的类型
-        d2_bound = int(date2.replace("-", "")) if dc == "trade_date" else date2
-
-        # Find previous trading day before date2
-        cur.execute(
-            f"SELECT MAX({dc}) FROM daily_kline WHERE {dc} < ?",
-            (d2_bound,),
-        )
-        prev_trade_date = cur.fetchone()[0]
-
-        # Get date2 (yesterday) auction data
-        cur.execute(
-            "SELECT code, name, auction_vol, auction_amount, auction_price, prev_close "
-            "FROM auction WHERE date=?",
-            (date2,),
-        )
-        prev_auction = {}
-        for r in cur.fetchall():
-            prev_auction[r[0]] = {"name": r[1], "vol": r[2] or 0, "amount": r[3] or 0,
-                                   "price": r[4] or 0, "prev_close": r[5] or 0}
-
-        # Get date1 (today) auction data
-        cur.execute(
-            "SELECT code, name, auction_vol, auction_amount, auction_price, prev_close "
-            "FROM auction WHERE date=?",
-            (date1,),
-        )
-        today_auction = {}
-        for r in cur.fetchall():
-            today_auction[r[0]] = {"name": r[1], "vol": r[2] or 0, "amount": r[3] or 0,
-                                   "price": r[4] or 0, "prev_close": r[5] or 0}
-
-        # 真实涨停诱因：优先 ladder_cache 的 concepts（问财题材，与连板天梯同源），
-        # 缺失才降级同花顺宽概念（concept_count）。避免用宽标签（华为概念/乡村振兴等）做题材匹配导致跨板块误匹配噪声。
-        _ladder_concepts: dict = {}
-        _ladder_stocks: dict = {}  # code → ladder item (含 chg_pct, concepts 等)
-        try:
-            from data.auction_sentiment_check import load_ladder_json
-            for _d in (str(date2).replace("-", ""), str(date1).replace("-", "")):
-                _lj = load_ladder_json(_d)
-                if not _lj:
-                    continue
-                for _it in (_lj.get("ladder") or []):
-                    _c = _it.get("code", "")
-                    _cs = _it.get("concepts") or []
-                    if _c:
-                        if _cs:
-                            _ladder_concepts.setdefault(_c, _cs)  # date2（昨日）优先
-                        _ladder_stocks.setdefault(_c, _it)  # 同样 date2 优先
-        except Exception:
-            _log.warning("ladder concepts load failed", exc_info=True)
-        _ths_map = {}
-        try:
-            from data.auction_concept_analysis import fetch_concepts
-            _ths_map = fetch_concepts(cur)
-        except Exception:
-            _log.warning("auction concepts load failed", exc_info=True)
-
-        def _get_concepts(code):
-            return _ladder_concepts.get(code) or _ths_map.get(code) or []
-
-        # 涨停股识别
-        # 昨日涨停：用连板梯队（ladder）的 chg_pct 判断，有昨日竞价数据即算
-        # 今日涨停：直接从今日竞价数据判断（auction_price/prev_close >= 涨停阈值）
-        prev_limitup_codes = set()
-        today_limitup_codes = set()
-        for code, item in _ladder_stocks.items():
-            chg = item.get("chg_pct", 0) or 0
-            if chg < 9.8:
-                continue
-            # 有昨日竞价 = 昨日涨停
-            if code in prev_auction:
-                prev_limitup_codes.add(code)
-        # 今日竞价涨停：直接从竞价数据判断
-        for code, info in today_auction.items():
-            if _is_limit_up(code, info["price"], info["prev_close"], info.get("name", "")):
-                today_limitup_codes.add(code)
-
-        # 昨日东财涨停池（封板时间/连板数/成交额/行业）→ 涨停次日竞价预期（文章《涨停后怎么做预期》方法论）
-        zt_map = _fetch_zt_pool_map(str(date2).replace("-", ""))
-        roles = _calc_roles(zt_map)
-        # 今日涨停池：只用来给「今日竞价一字板」取所属行业；拿不到则降级为仅按概念匹配
-        zt_map_today = _fetch_zt_pool_map(str(date1).replace("-", ""))
-
-        def build_stock(code):
-            p = prev_auction.get(code)
-            t = today_auction.get(code)
-            name = (p or t or {}).get("name", "")
-            p_vol = (p or {}).get("vol", 0) or 0
-            t_vol = (t or {}).get("vol", 0) or 0
-            p_amt = (p or {}).get("amount", 0) or 0
-            t_amt = (t or {}).get("amount", 0) or 0
-            p_price = (p or {}).get("price", 0) or 0
-            t_price = (t or {}).get("price", 0) or 0
-            t_pc = (t or {}).get("prev_close", 0) or 0
-            p_pc = (p or {}).get("prev_close", 0) or 0
-            prev_close = t_pc or p_pc
-            vol_chg = t_vol - p_vol
-            vol_pct = round(t_vol / p_vol * 100, 2) if p_vol > 0 else 999.0
-            auction_chg = round((t_price - prev_close) / prev_close * 100, 2) if prev_close and t_price else None
-            is_prev = code in prev_limitup_codes
-            is_today = code in today_limitup_codes
-            # 涨停次日竞价预期：仅对「昨日涨停」股算（身份+价+量 → C1~C6）
-            biz = {}
-            if is_prev:
-                zt = zt_map.get(code) or {}
-                band = _seal_band(zt.get("seal_time", ""), zt.get("last_seal", ""))
-                role = roles.get(code, "")
-                plev = _price_level(band, role, auction_chg)
-                vlev, vpct = _vol_level(t_amt, zt.get("turnover_amount"))
-                bands = _ROLE_BANDS.get(role) or _SEAL_BANDS.get(band)
-                biz = {
-                    "band": band,
-                    "role": role,
-                    "first_seal": zt.get("seal_time", ""),
-                    "consec_boards": zt.get("consec", 0),
-                    "yest_amount": zt.get("turnover_amount", 0),
-                    "price_level": plev,
-                    "vol_level": vlev,
-                    "vol_pct_auction": vpct,
-                    # 超预期幅度（百分点）= 今日竞价涨幅 − 该股「超预期线」。
-                    # >0 已超预期；区间内为负但大于 (bad-strong)；低于下限则显著不及。
-                    # 跨band可比：尾盘板高开2%(+2.0) 强于一字板高开8%(-1.0)——「该弱不弱则为强」。
-                    "exp_strong": bands[2] if bands else None,
-                    "surprise": round(auction_chg - bands[2], 2) if (bands and auction_chg is not None) else None,
-                    "combo": _combo(plev, vlev),
-                }
-            return {
-                "code": code, "name": name,
-                "is_prev_limitup": is_prev,
-                "is_today_limitup": is_today,
-                "vol_today": t_vol, "vol_prev": p_vol,
-                "vol_chg": vol_chg, "vol_pct": vol_pct,
-                "amt_today": t_amt, "amt_prev": p_amt,
-                "price_today": t_price, "price_prev": p_price,
-                "prev_close": prev_close,
-                "auction_chg_today": auction_chg,
-                "concepts": _get_concepts(code),
-                "auction_expectation": biz,
-            }
-
-        all_codes = prev_limitup_codes | today_limitup_codes
-        both = [build_stock(c) for c in sorted(prev_limitup_codes & today_limitup_codes)]
-        prev_only = [build_stock(c) for c in sorted(prev_limitup_codes - today_limitup_codes)]
-        today_only = [build_stock(c) for c in sorted(today_limitup_codes - prev_limitup_codes)]
-
-        both.sort(key=lambda x: x["vol_today"], reverse=True)
-        prev_only.sort(key=lambda x: x["vol_today"], reverse=True)
-        today_only.sort(key=lambda x: x["vol_today"], reverse=True)
-
-        # 昨日涨停股实时涨跌幅（腾讯接口，用于「昨日涨停」表替换量变化列）
-        try:
-            from data.tencent_quotes import add_prefix, fetch_detail
-            prev_codes = [s["code"] for s in prev_only + both]
-            _rt = {}
-            for i in range(0, len(prev_codes), 50):
-                batch = [add_prefix(c) for c in prev_codes[i:i + 50]]
-                if not batch:
-                    continue
-                quotes = fetch_detail(batch)
-                for full_code, q in quotes.items():
-                    bare = full_code[2:] if full_code[:2] in ("sh", "sz", "bj") else full_code
-                    _rt[bare] = q.get("change_pct")
-            for s in prev_only + both:
-                s["realtime_chg_pct"] = _rt.get(s["code"])
-        except Exception:
-            _log.warning("auction prev_limitup realtime fetch failed", exc_info=True)
-            for s in prev_only + both:
-                s["realtime_chg_pct"] = None
-
-        # ============ 一字定方向 ============
-        # 方向标 = 今日竞价一字板（开盘即涨停，auction 价触涨停）= 竞价价格真正触板的股票
-        # 跟随标的 = 昨日涨停（prev_only ∪ both，才有预期基线）中，同概念或同板块、且竞价符合/超预期者
-        yizi_leaders = []
-        leader_pool = [s for s in (both + today_only) if s.get("is_today_limitup")]
-        follower_pool = [s for s in (prev_only + both)]
-
-        # ============ 非涨停股超预期筛选 ============
-        # 逻辑：用一字板个股的概念去匹配同板块竞价强势股（未涨停）
-        non_limitup_surprise = []
-        try:
-            # 每个一字板的 concepts 已经是问财题材（涨停诱因），直接用
-            # 按涨停诱因分组：trigger → [yizi leader codes]
-            trigger_to_leaders = {}
-            for s in (both + today_only):
-                if not s.get("is_today_limitup"):
-                    continue
-                for c in (s.get("concepts") or []):
-                    trigger_to_leaders.setdefault(c, []).append(s["code"])
-
-            if trigger_to_leaders:
-                today_codes = {s["code"] for s in (both + today_only)}
-                prev_codes = {s["code"] for s in (prev_only + both)}
-                exclude_codes = today_codes | prev_codes
-
-                for code, s in today_auction.items():
-                    if code in exclude_codes:
-                        continue
-                    price = s.get("price", 0)
-                    prev_close = s.get("prev_close", 0)
-                    if not price or not prev_close:
-                        continue
-                    auction_chg = (price - prev_close) / prev_close * 100
-                    if auction_chg <= 2:
-                        continue
-                    stock_concepts = _get_concepts(code)
-                    # 找匹配的涨停诱因
-                    matched_trigger = None
-                    for c in stock_concepts:
-                        if c in trigger_to_leaders:
-                            matched_trigger = c
-                            break
-                    if not matched_trigger:
-                        continue
-                    non_limitup_surprise.append({
-                        "code": code,
-                        "name": s.get("name", ""),
-                        "auction_price": price,
-                        "auction_chg": round(auction_chg, 2),
-                        "prev_close": prev_close,
-                        "concepts": stock_concepts,
-                        "matched_yizi_concepts": [matched_trigger],
-                        "source": "non_limitup_surprise",
-                    })
-
-                non_limitup_surprise.sort(key=lambda x: x.get("auction_chg", 0), reverse=True)
-                non_limitup_surprise = non_limitup_surprise[:30]
-
-        except Exception as e:
-            _log.warning("non_limitup_surprise筛选失败: %s", e, exc_info=True)
-            non_limitup_surprise = []  # 确保异常时返回空列表
-        # 概念频率过滤：候选池里出现频率过高的概念（乡村振兴/华为概念/芯片概念等宏观宽标签）
-        # 视为「宽概念」剔除，只保留能区分板块的紧概念，避免跨板块误匹配噪声。
-        from collections import Counter as _Counter
-        _cf = _Counter()
-        for s in follower_pool:
-            for c in (s.get("concepts") or []):
-                _cf[c] += 1
-        _generic_th = max(8, int(0.12 * len(follower_pool)))  # 出现 >12% 候选池 → 宽概念
-        _generic = {c for c, n in _cf.items() if n > _generic_th}
-        for L in leader_pool:
-            L_concepts = set(L.get("concepts") or []) - _generic
-            L_industry = (
-                (zt_map_today.get(L["code"], {}) or {}).get("industry")
-                or (zt_map.get(L["code"], {}) or {}).get("industry")
-                or ""
-            )
-            followers = []
-            seen = set()
-            for F in follower_pool:
-                if F["code"] == L["code"] or F["code"] in seen:
-                    continue
-                f_exp = F.get("auction_expectation") or {}
-                if f_exp.get("price_level") not in ("符合预期", "超预期"):
-                    continue
-                F_concepts = set(F.get("concepts") or []) - _generic
-                F_industry = (zt_map.get(F["code"], {}) or {}).get("industry") or ""
-                match_type = ""
-                if L_industry and F_industry and L_industry == F_industry:
-                    match_type = "板块"
-                elif L_concepts and F_concepts and len(L_concepts & F_concepts) >= 1:
-                    # 共享 ≥1 个真实题材即算同题材（ladder 题材每只仅 2~3 个，不宜要求 ≥2）
-                    match_type = "概念"
-                if match_type:
-                    seen.add(F["code"])
-                    followers.append({**F, "match_type": match_type})
-            # 板块匹配优先，其次概念；各自按超预期幅度降序
-            followers.sort(
-                key=lambda x: (
-                    0 if x.get("match_type") == "板块" else 1,
-                    -((x.get("auction_expectation") or {}).get("surprise") or 0),
-                )
-            )
-            yizi_leaders.append({
-                "code": L["code"], "name": L["name"],
-                "concepts": L.get("concepts") or [],
-                "industry": L_industry,
-                "auction_chg_today": L.get("auction_chg_today"),
-                "consec_boards": (L.get("auction_expectation") or {}).get("consec_boards") or 0,
-                "followers": followers[:20],
-            })
-        # 一字板强度：连板高、竞价涨幅大在前
-        yizi_leaders.sort(
-            key=lambda x: (x["consec_boards"] or 0, x["auction_chg_today"] or 0),
-            reverse=True,
-        )
-
-        return {
-            "prev_limitup": prev_only,
-            "today_limitup": today_only,
-            "both_limitup": both,
-            "yizi_leaders": yizi_leaders,
-            "non_limitup_surprise": non_limitup_surprise,
-            "date1": date1, "date2": date2,
-            "prev_count": len(prev_only) + len(both),
-            "today_count": len(today_only) + len(both),
-            "both_count": len(both),
-            "non_limitup_surprise_count": len(non_limitup_surprise),
-        }
-    except Exception as e:
+        from data.auction_limit_compare import get_auction_limit_up_compare as _impl
+        return _impl(date1=date1, date2=date2)
+    except Exception:
         _log.warning("auction limit-up-compare failed", exc_info=True)
         return {"prev_limitup": [], "today_limitup": [], "both_limitup": []}
-    finally:
-        db.close()
 
 
 @router.get("/auction/search")

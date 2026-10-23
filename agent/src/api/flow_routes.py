@@ -411,7 +411,17 @@ def _auction_active_industries(date_str: str, top_n: int = 10) -> list[dict]:
     from utils.config import DB_PATH
 
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?immutable=1", uri=True)
+        conn = None
+        base = "file:" + str(DB_PATH).replace("\\", "/").lstrip("/")
+        for uri in (base + "?mode=ro", base + "?immutable=1"):
+            try:
+                conn = sqlite3.connect(uri, uri=True)
+                conn.execute("SELECT 1").fetchone()
+                break
+            except Exception:
+                conn = None
+        if conn is None:
+            return []
     except Exception:
         return []
 

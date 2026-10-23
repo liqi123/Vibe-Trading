@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network, Crosshair, Eye, Flame } from "lucide-react";
+import { Wallet, Search, Star, Calculator, BookOpen, Brain, TrendingUp, Newspaper, BarChart3, LineChart, Layers, DollarSign, Gauge, Network, Crosshair, Eye, Flame, Activity, Filter } from "lucide-react";
 
 const TOOLS = [
   {
@@ -87,6 +87,41 @@ const TOOLS = [
     color: "text-red-500",
   },
   {
+    to: "/sector-research",
+    icon: Layers,
+    title: "产业研究",
+    desc: "20 个产业板块分步研究提示词：先读研报，再逐页梳理技术路线/产业链与价值量/全球格局",
+    color: "text-amber-600",
+  },
+  {
+    to: "/backtest-workbench",
+    icon: Brain,
+    title: "对话回测",
+    desc: "一句话描述策略想法，LLM 生成信号规则 + 配置并自动跑回测，看收益/Sharpe/回撤",
+    color: "text-purple-500",
+  },
+  {
+    to: "/candidate-pool",
+    icon: Filter,
+    title: "候选池",
+    desc: "自选/持仓/全市场三档，按 PE/PB/市值/换手/成交额实时筛选候选标的",
+    color: "text-blue-500",
+  },
+  {
+    to: "/intraday-watch",
+    icon: Activity,
+    title: "盯盘实时",
+    desc: "自选持仓 3 秒行情 + 昨日涨停梯队今日晋级状态 + 盯盘异动（急拉急跌/封板开板）",
+    color: "text-emerald-500",
+  },
+  {
+    to: "/stock-deep-dive",
+    icon: LineChart,
+    title: "个股深挖",
+    desc: "行情/财务摘要/估值分位 + K线图 + 资讯/研报/事件日历 一票一页",
+    color: "text-rose-500",
+  },
+  {
     to: "/sentiment-index",
     icon: Gauge,
     title: "恐惧贪婪指数",
@@ -113,6 +148,13 @@ const TOOLS = [
     title: "个股深度分析",
     desc: "斐波那契价位、技术指标、摆动周期、K线数据一站式分析",
     color: "text-rose-500",
+  },
+  {
+    to: "/intraday-analysis",
+    icon: Activity,
+    title: "分时买点判定",
+    desc: "分时VWAP+回踩质量+底部稳定+二波上攻，五规则实时判可不可以买",
+    color: "text-emerald-500",
   },
   {
     to: "/czsc-analysis",
