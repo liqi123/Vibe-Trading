@@ -87,14 +87,19 @@ def _fear_greedy() -> dict | None:
     try:
         import pandas as pd
 
-        df = pd.read_csv(_SENTIMENT_CACHE)
+        df = pd.read_csv(_SENTIMENT_CACHE, encoding="utf-8-sig")
         if df.empty:
             return None
+        date_col = "trade_date" if "trade_date" in df.columns else ("date" if "date" in df.columns else None)
+        if date_col:
+            df = df.sort_values(date_col)  # 物理行序不可靠，按日期取最新
         last = df.iloc[-1]
-        afgi = round(float(last.get("afgi", 50)), 1)
+        afgi = round(float(last.get("afgi")), 1)
+        if afgi != afgi:  # NaN
+            return None
         state = str(last.get("afgi_state", ""))
         return {
-            "date": str(last.get("date", "")),
+            "date": str(last.get("date") or last.get("trade_date") or ""),
             "afgi": afgi,
             "state": state,
             "advice": _afgi_advice(afgi),

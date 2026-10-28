@@ -34,18 +34,30 @@ _COMPONENT_LABELS = [
 ]
 
 
+def _round(value, digits: int = 2):
+    """非有限值(缺测)返回 None，避免 NaN 污染 JSON。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
 def _row_to_dict(row) -> dict:
     out = {"date": str(row.get("trade_date", ""))}
     for col, _ in _COMPONENT_LABELS:
-        out[col] = round(float(row.get(col, 50.0)), 2)
-    out["afgi"] = round(float(row.get("afgi", 50.0)), 2)
+        out[col] = _round(row.get(col))
+    # 缺测分项：AFGI 里已按权重剔除，这里把缺测显式暴露给前端
+    out["missing"] = [col for col, _ in _COMPONENT_LABELS if out[col] is None]
+    afgi = _round(row.get("afgi", 50.0))
+    out["afgi"] = 50.0 if afgi is None else afgi
     out["state"] = row.get("afgi_state", "--")
-    out["ma5"] = round(float(row.get("afgi_ma5", float("nan"))), 2)
-    out["ma20"] = round(float(row.get("afgi_ma20", float("nan"))), 2)
-    out["change"] = round(float(row.get("afgi_change", 0.0)), 2)
+    out["ma5"] = _round(row.get("afgi_ma5", float("nan")))
+    out["ma20"] = _round(row.get("afgi_ma20", float("nan")))
+    change = _round(row.get("afgi_change", 0.0))
+    out["change"] = 0.0 if change is None else change
     for key in ("hs300", "sh", "zz1000", "cyb"):
-        value = row.get(f"{key}_close", float("nan"))
-        out[f"{key}_close"] = None if value is None or (isinstance(value, float) and value != value) else round(float(value), 2)
+        out[f"{key}_close"] = _round(row.get(f"{key}_close", float("nan")))
     return out
 
 

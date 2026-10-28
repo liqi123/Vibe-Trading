@@ -270,6 +270,10 @@ register_auction_sentiment_routes(app)
 from src.api.flow_routes import register_flow_routes  # noqa: E402
 register_flow_routes(app)
 
+# --- 交易计划（txt 导入 + 竞价数据 LLM 逐条核对） ---
+from src.api.trade_plan_routes import register_trade_plan_routes  # noqa: E402
+register_trade_plan_routes(app)
+
 # --- 淘股吧关注用户信号监控 ---
 from src.api.tgb_routes import register_tgb_routes  # noqa: E402
 register_tgb_routes(app)

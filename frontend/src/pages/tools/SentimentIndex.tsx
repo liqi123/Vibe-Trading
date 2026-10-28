@@ -27,7 +27,7 @@ interface SeriesPayload {
   indicators?: IndicatorRow[];
   error?: string;
 }
-interface IndicatorRow { name: string; value: number | null; score: number; direction: string }
+interface IndicatorRow { name: string; value: number | null; score: number | null; direction: string; missing?: boolean }
 
 const stateColor = (s: string) => {
   switch (s) {
@@ -262,17 +262,20 @@ export function SentimentIndex() {
             <div className="border rounded-lg p-4 bg-card">
               <div className="grid gap-3 sm:grid-cols-3">
                 {components.map((c) => {
-                  const v = Number(latest[c.key] ?? 50);
+                  const raw = latest[c.key];
+                  // null = 当日缺测（AFGI 已按权重剔除该分项），显示"—"而不是伪造 50 分
+                  const missing = raw == null || Number.isNaN(Number(raw));
+                  const v = missing ? 0 : Number(raw);
                   return (
-                    <div key={c.key} className="rounded-lg bg-muted/20 p-3">
+                    <div key={c.key} className={cn("rounded-lg bg-muted/20 p-3", missing && "opacity-60")}>
                       <div className="flex items-baseline justify-between">
                         <p className="text-xs text-muted-foreground">{c.label}</p>
-                        <p className="font-mono text-lg font-bold">{v.toFixed(1)}</p>
+                        <p className="font-mono text-lg font-bold">{missing ? "缺测" : v.toFixed(1)}</p>
                       </div>
                       <div className="mt-1.5 h-1.5 rounded-full bg-muted/40 overflow-hidden">
                         <div
-                          className={cn("h-full rounded-full", v >= 60 ? "bg-danger" : v <= 40 ? "bg-success" : "bg-muted-foreground/50")}
-                          style={{ width: `${v}%` }}
+                          className={cn("h-full rounded-full", missing ? "bg-muted-foreground/30" : v >= 60 ? "bg-danger" : v <= 40 ? "bg-success" : "bg-muted-foreground/50")}
+                          style={{ width: `${missing ? 100 : v}%` }}
                         />
                       </div>
                     </div>
@@ -320,7 +323,7 @@ export function SentimentIndex() {
                           <td className="px-2 py-2 font-medium">{it.name}</td>
                           <td className={cn("px-2 py-2 text-xs", it.direction === "正向" ? "text-danger" : "text-success")}>{it.direction}</td>
                           <td className="px-2 py-2 font-mono">{it.value == null ? "—" : it.value}</td>
-                          <td className="px-2 py-2 font-mono">{it.score.toFixed(1)}</td>
+                          <td className={cn("px-2 py-2 font-mono", it.score == null && "text-muted-foreground")}>{it.score == null ? "缺测" : it.score.toFixed(1)}</td>
                         </tr>
                       ))}
                     </tbody>

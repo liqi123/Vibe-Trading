@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 import { useLLMWebAsk } from "@/hooks/useLLMWebAsk";
 import { LLMManualPaste, type ManualAnswer } from "@/components/llm/LLMManualPaste";
 import { AuctionSentiment } from "./AuctionSentiment";
+import { TradePlanCard } from "./TradePlan";
 
 interface Position {
   code: string;
@@ -1247,6 +1248,7 @@ export function ShortTermFlow() {
   const [preAskOpen, setPreAskOpen] = useState(false);
   const [reviewRefresh, setReviewRefresh] = useState(0);
   const [previewRefresh, setPreviewRefresh] = useState(0);
+  const [planCheckKey, setPlanCheckKey] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1280,6 +1282,7 @@ export function ShortTermFlow() {
     try {
       await api.tools.post(`/auction/collect`);
       await load();
+      setPlanCheckKey((k) => k + 1); // 竞价数据到位 → 触发交易计划自动核对
     } catch (e: any) {
       alert(e?.message ?? String(e));
     } finally {
@@ -1392,6 +1395,9 @@ export function ShortTermFlow() {
               </div>
             </div>
           </div>
+
+          {/* 交易计划 */}
+          <TradePlanCard date={date} auctionExists={status.auction.exists} checkKey={planCheckKey} />
 
           {/* 竞价后 + 盘中 */}
           <div className="rounded-lg border bg-card p-4 space-y-3">
